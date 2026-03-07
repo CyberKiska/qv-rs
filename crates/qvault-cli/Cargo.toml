@@ -1,0 +1,10 @@
+[package]
+name = "qvault-cli"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+qvault-core = { path = "../qvault-core" }

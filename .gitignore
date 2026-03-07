@@ -1,0 +1,36 @@
+# Rust
+target/
+**/*.rs.bk
+*.pdb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test files
+*.qkey
+*.qenc
+*.qcont
+test_data/
+*.recovered.*
+fixtures/
+!fixtures/js-oracle/
+!fixtures/js-oracle/**/
+!fixtures/js-oracle/**/*.qkey
+!fixtures/js-oracle/**/*.qenc
+!fixtures/js-oracle/**/*.qcont
+!fixtures/js-oracle/**/*.json
+
+# Backup files
+*.bak
+*.backup
+
+# Notes
+*.md
