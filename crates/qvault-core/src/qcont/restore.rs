@@ -9,13 +9,14 @@ use crate::policy::validate_container_policy_metadata;
 use crate::qcont::shard::QcontShard;
 use crate::qenc::build_qenc_header;
 use crate::sss::combine_shares;
+use zeroize::Zeroize;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RestoreQcontOptions {
     pub manifest_bytes: Option<Vec<u8>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct RestoredQcont {
     pub qenc_bytes: Vec<u8>,
     pub priv_key: Vec<u8>,
@@ -32,6 +33,26 @@ pub struct RestoredQcont {
     pub manifest_digest_hex: String,
     pub manifest_source: String,
     pub warnings: Vec<String>,
+}
+
+impl std::fmt::Debug for RestoredQcont {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RestoredQcont")
+            .field("qenc_bytes_len", &self.qenc_bytes.len())
+            .field("priv_key_len", &self.priv_key.len())
+            .field("container_id", &self.container_id)
+            .field("container_hash", &self.container_hash)
+            .field("private_key_hash", &self.private_key_hash)
+            .field("recovered_qenc_hash", &self.recovered_qenc_hash)
+            .field("recovered_priv_hash", &self.recovered_priv_hash)
+            .field("rejected_shard_indices", &self.rejected_shard_indices)
+            .field("qenc_ok", &self.qenc_ok)
+            .field("qkey_ok", &self.qkey_ok)
+            .field("manifest_digest_hex", &self.manifest_digest_hex)
+            .field("manifest_source", &self.manifest_source)
+            .field("warnings", &self.warnings)
+            .finish()
+    }
 }
 
 pub fn restore_from_shards(
@@ -313,12 +334,15 @@ pub fn restore_from_shards(
 
     let mut sorted_shares = valid_share_shards;
     sorted_shares.sort_by_key(|shard| shard.shard_index);
-    let selected_shares = sorted_shares
+    let mut selected_shares = sorted_shares
         .iter()
         .take(t)
         .map(|shard| shard.share.clone())
         .collect::<Vec<_>>();
     let priv_key = combine_shares(&selected_shares)?;
+    for share in &mut selected_shares {
+        share.zeroize();
+    }
 
     let rs_encode_base = if base.meta_json.rs_encode_base > 0 {
         base.meta_json.rs_encode_base as usize

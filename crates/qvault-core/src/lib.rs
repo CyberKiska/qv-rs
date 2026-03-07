@@ -1,4 +1,5 @@
 pub mod aead;
+pub mod bundle;
 pub mod bytes;
 pub mod erasure;
 pub mod error;
@@ -12,6 +13,10 @@ pub mod qenc;
 pub mod sss;
 pub mod test_support;
 
+pub use bundle::{
+    build_bundle_payload, bundle_filename_for_time, current_bundle_filename, is_bundle_payload,
+    parse_bundle_payload, BundleEntryRef, ParsedBundleEntry,
+};
 pub use error::{QvError, Result};
 pub use manifest::{canonicalize_archive_manifest, parse_archive_manifest_bytes, ArchiveManifest};
 pub use mlkem::{decapsulate, encapsulate, generate_key_pair};

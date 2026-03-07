@@ -20,14 +20,24 @@ use zeroize::Zeroize;
 pub const CHUNK_SIZE: usize = 8 * 1024 * 1024;
 pub const MAX_FILE_SIZE: usize = 1024 * 1024 * 1024;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct DecryptedQenc {
     pub file_bytes: Vec<u8>,
     pub private_metadata: WrappedPayloadPrivateMetadata,
     pub warnings: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default)]
+impl std::fmt::Debug for DecryptedQenc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DecryptedQenc")
+            .field("file_bytes_len", &self.file_bytes.len())
+            .field("private_metadata", &self.private_metadata)
+            .field("warnings", &self.warnings)
+            .finish()
+    }
+}
+
+#[derive(Clone, Default)]
 pub struct EncryptQencOptions {
     pub original_filename: Option<String>,
     pub timestamp: Option<String>,
@@ -139,61 +149,77 @@ pub fn encrypt_qenc(
 pub fn decrypt_qenc(container_bytes: &[u8], secret_key: &[u8]) -> Result<DecryptedQenc> {
     let parsed = parse_qenc_header(container_bytes)?;
     let _nonce_contract = validate_container_policy_metadata(&parsed.metadata, false)?;
-    let shared_secret = decapsulate(&parsed.encapsulated_key, secret_key)?;
-    let derived = derive_key_with_kmac(
+    let mut shared_secret = decapsulate(&parsed.encapsulated_key, secret_key)?;
+    let mut derived = derive_key_with_kmac(
         &shared_secret,
         &parsed.kdf_salt,
         &parsed.meta_bytes,
         &parsed.metadata.domain_strings,
     )?;
 
-    if !verify_key_commitment(&derived.kenc, &parsed.stored_key_commitment) {
-        return Err(err(
-            "Key commitment verification failed. Container may be corrupted or tampered with.",
-        ));
-    }
-
-    let encrypted_data = &container_bytes[parsed.offset..];
-    let decrypted_payload = match parsed.metadata.aead_mode.as_str() {
-        "single-container-aead" => decrypt_chunk(
-            &derived.kenc,
-            encrypted_data,
-            &parsed.container_nonce,
-            &parsed.header,
-        )?,
-        "per-chunk-aead" => {
-            decrypt_per_chunk(&parsed, encrypted_data, &derived.kenc, &derived.kiv)?
+    let result = (|| {
+        if !verify_key_commitment(&derived.kenc, &parsed.stored_key_commitment) {
+            return Err(err(
+                "Key commitment verification failed. Container may be corrupted or tampered with.",
+            ));
         }
-        other => return Err(err(format!("Unsupported AEAD mode: {other}"))),
-    };
 
-    let payload_format = parsed.metadata.payload_format.clone().unwrap_or_default();
-    if payload_format != "wrapped-v1" {
-        return Err(err(format!(
-            "Unsupported payload format: {}",
-            if payload_format.is_empty() {
-                "unknown"
-            } else {
-                &payload_format
+        let encrypted_data = &container_bytes[parsed.offset..];
+        let mut decrypted_payload = match parsed.metadata.aead_mode.as_str() {
+            "single-container-aead" => decrypt_chunk(
+                &derived.kenc,
+                encrypted_data,
+                &parsed.container_nonce,
+                &parsed.header,
+            )?,
+            "per-chunk-aead" => {
+                decrypt_per_chunk(&parsed, encrypted_data, &derived.kenc, &derived.kiv)?
             }
-        )));
-    }
+            other => return Err(err(format!("Unsupported AEAD mode: {other}"))),
+        };
 
-    let (private_metadata, file_bytes) = unwrap_wrapped_payload(&decrypted_payload)?;
-    let recovered_file_hash = sha3_512_hex(&file_bytes);
-    if !private_metadata
-        .file_hash
-        .eq_ignore_ascii_case(&recovered_file_hash)
-    {
-        return Err(err(
-            "Wrapped payload fileHash does not match decrypted payload",
-        ));
-    }
-    Ok(DecryptedQenc {
-        file_bytes,
-        private_metadata,
-        warnings: Vec::new(),
-    })
+        let payload_format = parsed.metadata.payload_format.clone().unwrap_or_default();
+        if payload_format != "wrapped-v1" {
+            decrypted_payload.zeroize();
+            return Err(err(format!(
+                "Unsupported payload format: {}",
+                if payload_format.is_empty() {
+                    "unknown"
+                } else {
+                    &payload_format
+                }
+            )));
+        }
+
+        let (private_metadata, file_bytes) = match unwrap_wrapped_payload(&decrypted_payload) {
+            Ok(value) => value,
+            Err(error) => {
+                decrypted_payload.zeroize();
+                return Err(error);
+            }
+        };
+        decrypted_payload.zeroize();
+
+        let recovered_file_hash = sha3_512_hex(&file_bytes);
+        if !private_metadata
+            .file_hash
+            .eq_ignore_ascii_case(&recovered_file_hash)
+        {
+            return Err(err(
+                "Wrapped payload fileHash does not match decrypted payload",
+            ));
+        }
+
+        Ok(DecryptedQenc {
+            file_bytes,
+            private_metadata,
+            warnings: Vec::new(),
+        })
+    })();
+
+    shared_secret.zeroize();
+    derived.zeroize();
+    result
 }
 
 pub fn current_iso8601_utc_millis() -> String {
@@ -238,6 +264,7 @@ fn decrypt_per_chunk(
         let enc_len = plain_len + 16;
         let enc_end = encrypted_offset + enc_len as usize;
         if enc_end > encrypted_data.len() {
+            plaintext.zeroize();
             return Err(err(
                 "Encrypted payload has trailing or truncated chunk data",
             ));
@@ -254,12 +281,20 @@ fn decrypt_per_chunk(
             &parsed.metadata.iv_strategy,
         )?;
         let aad = build_chunk_aad(&parsed.header, index as u32, plain_len as u32);
-        let chunk_plaintext = decrypt_chunk(kenc, chunk_ciphertext, &iv, &aad)?;
+        let mut chunk_plaintext = match decrypt_chunk(kenc, chunk_ciphertext, &iv, &aad) {
+            Ok(chunk_plaintext) => chunk_plaintext,
+            Err(error) => {
+                plaintext.zeroize();
+                return Err(error);
+            }
+        };
         plaintext.extend_from_slice(&chunk_plaintext);
+        chunk_plaintext.zeroize();
         encrypted_offset = enc_end;
     }
 
     if encrypted_offset != encrypted_data.len() {
+        plaintext.zeroize();
         return Err(err(
             "Encrypted payload has trailing or truncated chunk data",
         ));

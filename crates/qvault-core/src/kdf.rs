@@ -1,4 +1,5 @@
 use tiny_keccak::{Hasher, Kmac};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::bytes::timing_safe_equal;
 use crate::error::{err, Result};
@@ -8,7 +9,7 @@ use crate::qenc::metadata::DomainStrings;
 pub const AES_KEY_SIZE: usize = 32;
 pub const KMAC256_DEFAULT_DKLEN: usize = 32;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Zeroize, ZeroizeOnDrop)]
 pub struct DerivedKeys {
     pub kraw: [u8; 32],
     pub kenc: [u8; 32],

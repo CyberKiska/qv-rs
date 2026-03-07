@@ -170,6 +170,29 @@ fn rust_build_matches_js_split_7of5_chunked_fixture() -> Result<()> {
 }
 
 #[test]
+fn split_rejects_unrelated_secret_key() -> Result<()> {
+    let fixture = load_split_fixture("split-5of3")?;
+    let unrelated_secret_key =
+        read_fixture_bytes(fixture_path("single-small").join("secret.qkey"))?;
+
+    let error = build_qcont_shards(
+        &fixture.qenc_bytes,
+        &unrelated_secret_key,
+        QcontBuildParams { n: 5, k: 3 },
+        &QcontBuildOptions::default(),
+    )
+    .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("Secret key does not match this .qenc container"),
+        "unexpected error: {error}"
+    );
+    Ok(())
+}
+
+#[test]
 fn rust_restores_js_split_5of3_fixture() -> Result<()> {
     let fixture = load_split_fixture("split-5of3")?;
     let shards = parse_fixture_shards(&fixture)?;

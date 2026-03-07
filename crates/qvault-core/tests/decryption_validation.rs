@@ -1,10 +1,14 @@
 use anyhow::Result;
+use serde_json::Value;
 
 use qvault_core::aead::encrypt_chunk;
 use qvault_core::kdf::{compute_key_commitment, derive_key_with_kmac};
 use qvault_core::qenc::payload::{wrap_wrapped_payload, WrappedPayloadPrivateMetadata};
 use qvault_core::qenc::{build_qenc_metadata, serialize_qenc_metadata, CHUNK_SIZE};
-use qvault_core::{build_qenc_header, decrypt_qenc, encapsulate, generate_key_pair};
+use qvault_core::test_support::fixtures::{fixture_path, read_fixture_bytes};
+use qvault_core::{
+    build_qenc_header, decrypt_qenc, encapsulate, generate_key_pair, parse_qenc_header,
+};
 
 #[test]
 fn decrypt_qenc_rejects_wrapped_payload_hash_mismatch() -> Result<()> {
@@ -53,6 +57,37 @@ fn decrypt_qenc_rejects_wrapped_payload_hash_mismatch() -> Result<()> {
     assert_eq!(
         error.to_string(),
         "Wrapped payload fileHash does not match decrypted payload"
+    );
+    Ok(())
+}
+
+#[test]
+fn decrypt_qenc_rejects_policy_metadata_mismatch() -> Result<()> {
+    let fixture_dir = fixture_path("single-small");
+    let qenc_bytes = read_fixture_bytes(fixture_dir.join("container.qenc"))?;
+    let secret_key = read_fixture_bytes(fixture_dir.join("secret.qkey"))?;
+    let parsed = parse_qenc_header(&qenc_bytes)?;
+
+    let mut metadata: Value = serde_json::from_slice(&parsed.meta_bytes)?;
+    metadata["noncePolicyId"] = Value::String("QV-GCM-BAD-POLICY".to_string());
+    let tampered_meta_bytes = serde_json::to_vec(&metadata)?;
+
+    let header = build_qenc_header(
+        &parsed.encapsulated_key,
+        &parsed.container_nonce,
+        &parsed.kdf_salt,
+        &tampered_meta_bytes,
+        &parsed.stored_key_commitment,
+    )?;
+    let mut tampered_container = header;
+    tampered_container.extend_from_slice(&qenc_bytes[parsed.offset..]);
+
+    let error = decrypt_qenc(&tampered_container, &secret_key).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("Unsupported noncePolicyId for single-container-aead"),
+        "unexpected error: {error}"
     );
     Ok(())
 }

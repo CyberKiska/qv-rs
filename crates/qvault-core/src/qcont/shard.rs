@@ -112,7 +112,7 @@ pub struct ParseDiagnostics {
     pub warnings: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct QcontShard {
     pub meta_json: QcontShardMetadata,
     pub meta_bytes: Vec<u8>,
@@ -131,10 +131,32 @@ pub struct QcontShard {
     pub diagnostics: ParseDiagnostics,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl std::fmt::Debug for QcontShard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QcontShard")
+            .field("shard_index", &self.shard_index)
+            .field("container_id", &self.meta_json.container_id)
+            .field("manifest_digest_hex", &self.manifest_digest_hex)
+            .field("share_len", &self.share.len())
+            .field("fragments_len", &self.fragments.len())
+            .field("diagnostics", &self.diagnostics)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub struct QcontShardParseReport {
     pub shard: Option<QcontShard>,
     pub diagnostics: ParseDiagnostics,
+}
+
+impl std::fmt::Debug for QcontShardParseReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QcontShardParseReport")
+            .field("has_shard", &self.shard.is_some())
+            .field("diagnostics", &self.diagnostics)
+            .finish()
+    }
 }
 
 pub fn parse_qcont_shard(bytes: &[u8]) -> Result<QcontShard> {

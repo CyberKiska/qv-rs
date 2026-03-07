@@ -16,6 +16,7 @@ use crate::qcont::shard::{
 };
 use crate::qenc::{current_iso8601_utc_millis, parse_qenc_header, CHUNK_SIZE};
 use crate::sss::split_secret;
+use zeroize::Zeroize;
 
 const QCONT_MAGIC: &[u8; 4] = b"QVC1";
 const QCONT_FORMAT_VERSION: &str = "QVqcont-5";
@@ -35,19 +36,38 @@ pub struct QcontBuildOptions {
     pub allow_legacy_ed25519: Option<bool>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct BuiltQcontShard {
     pub bytes: Vec<u8>,
     pub index: u16,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl std::fmt::Debug for BuiltQcontShard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BuiltQcontShard")
+            .field("index", &self.index)
+            .field("bytes_len", &self.bytes.len())
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub struct BuiltQcontShards {
     pub shards: Vec<BuiltQcontShard>,
     pub manifest: ArchiveManifest,
     pub manifest_bytes: Vec<u8>,
     pub manifest_digest_hex: String,
     pub format_version: String,
+}
+
+impl std::fmt::Debug for BuiltQcontShards {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BuiltQcontShards")
+            .field("shard_count", &self.shards.len())
+            .field("manifest_digest_hex", &self.manifest_digest_hex)
+            .field("format_version", &self.format_version)
+            .finish()
+    }
 }
 
 pub fn build_qcont_shards(
@@ -80,20 +100,23 @@ pub fn build_qcont_shards(
         return Err(err("QENC metadata is missing valid domainStrings"));
     }
 
-    let trial_shared_secret = decapsulate(&parsed.encapsulated_key, priv_key_bytes)
+    {
+        let mut trial_shared_secret = decapsulate(&parsed.encapsulated_key, priv_key_bytes)
+            .map_err(|error| err(format!("Key verification failed: {error}")))?;
+        let derived = derive_key_with_kmac(
+            &trial_shared_secret,
+            &parsed.kdf_salt,
+            &parsed.meta_bytes,
+            ds,
+        )
         .map_err(|error| err(format!("Key verification failed: {error}")))?;
-    let derived = derive_key_with_kmac(
-        &trial_shared_secret,
-        &parsed.kdf_salt,
-        &parsed.meta_bytes,
-        ds,
-    )
-    .map_err(|error| err(format!("Key verification failed: {error}")))?;
-    let key_match = verify_key_commitment(&derived.kenc, &key_commitment);
-    if !key_match {
-        return Err(err(
-            "Secret key does not match this .qenc container (key commitment mismatch). Ensure you are using the correct secretKey.qkey for this container.",
-        ));
+        let key_match = verify_key_commitment(&derived.kenc, &key_commitment);
+        trial_shared_secret.zeroize();
+        if !key_match {
+            return Err(err(
+                "Secret key does not match this .qenc container (key commitment mismatch). Ensure you are using the correct secretKey.qkey for this container.",
+            ));
+        }
     }
 
     let effective_length = parsed
