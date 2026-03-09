@@ -1,25 +1,23 @@
+use crate::auth::{AuthPolicy, AuthPolicyLevel};
 use crate::bytes::to_hex;
 use crate::erasure;
 use crate::error::{err, Result};
 use crate::hash::{sha3_512, sha3_512_hex};
 use crate::kdf::{derive_key_with_kmac, verify_key_commitment};
 use crate::manifest::{
-    canonicalize_archive_manifest, ArchiveManifest, ArchiveManifestQenc,
-    ArchiveManifestReedSolomon, ArchiveManifestShamir, ArchiveManifestShardBinding,
-    ArchiveManifestShardBodyDefinition, ArchiveManifestSharding, ArchiveManifestShareCommitment,
-    ArchiveManifestSigningPolicy,
+    build_archive_manifest, build_initial_manifest_bundle, canonicalize_archive_manifest,
+    canonicalize_manifest_bundle, ArchiveManifest, BuildArchiveManifestParams, ManifestBundle,
 };
 use crate::mlkem::decapsulate;
-use crate::policy::{get_crypto_profile, DEFAULT_CRYPTO_PROFILE};
+use crate::policy::DEFAULT_CRYPTO_PROFILE;
 use crate::qcont::shard::{
-    QcontShardAlgorithmMetadata, QcontShardDomainStrings, QcontShardMetadata,
+    QcontShardAlgorithmMetadata, QcontShardDomainStrings, QcontShardMetadata, QCONT_FORMAT_VERSION,
 };
 use crate::qenc::{current_iso8601_utc_millis, parse_qenc_header, CHUNK_SIZE};
 use crate::sss::split_secret;
 use zeroize::Zeroize;
 
 const QCONT_MAGIC: &[u8; 4] = b"QVC1";
-const QCONT_FORMAT_VERSION: &str = "QVqcont-5";
 const RS_MAX_CODEWORD: usize = 255;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,8 +30,8 @@ pub struct QcontBuildParams {
 pub struct QcontBuildOptions {
     pub timestamp: Option<String>,
     pub sss_random_bytes: Option<Vec<u8>>,
-    pub require_signature: Option<bool>,
-    pub allow_legacy_ed25519: Option<bool>,
+    pub auth_policy_level: Option<AuthPolicyLevel>,
+    pub min_valid_signatures: Option<u64>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -55,8 +53,11 @@ impl std::fmt::Debug for BuiltQcontShard {
 pub struct BuiltQcontShards {
     pub shards: Vec<BuiltQcontShard>,
     pub manifest: ArchiveManifest,
+    pub bundle: ManifestBundle,
     pub manifest_bytes: Vec<u8>,
     pub manifest_digest_hex: String,
+    pub bundle_bytes: Vec<u8>,
+    pub bundle_digest_hex: String,
     pub format_version: String,
 }
 
@@ -65,9 +66,76 @@ impl std::fmt::Debug for BuiltQcontShards {
         f.debug_struct("BuiltQcontShards")
             .field("shard_count", &self.shards.len())
             .field("manifest_digest_hex", &self.manifest_digest_hex)
+            .field("bundle_digest_hex", &self.bundle_digest_hex)
             .field("format_version", &self.format_version)
             .finish()
     }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct QcontShardBlobParams<'a> {
+    pub meta_json_bytes: &'a [u8],
+    pub manifest_bytes: &'a [u8],
+    pub bundle_bytes: &'a [u8],
+    pub encapsulated_key: &'a [u8],
+    pub container_nonce: &'a [u8; 12],
+    pub kdf_salt: &'a [u8; 16],
+    pub qenc_meta_bytes: &'a [u8],
+    pub key_commitment: &'a [u8; 32],
+    pub shard_index: u16,
+    pub share: &'a [u8],
+    pub body_bytes: &'a [u8],
+}
+
+pub(crate) fn build_qcont_shard_blob(params: &QcontShardBlobParams<'_>) -> Vec<u8> {
+    let manifest_digest_bytes = sha3_512(params.manifest_bytes);
+    let bundle_digest_bytes = sha3_512(params.bundle_bytes);
+    let mut shard = Vec::with_capacity(
+        QCONT_MAGIC.len()
+            + 2
+            + params.meta_json_bytes.len()
+            + 4
+            + params.manifest_bytes.len()
+            + manifest_digest_bytes.len()
+            + 4
+            + params.bundle_bytes.len()
+            + bundle_digest_bytes.len()
+            + 4
+            + params.encapsulated_key.len()
+            + 12
+            + 16
+            + 2
+            + params.qenc_meta_bytes.len()
+            + 1
+            + params.key_commitment.len()
+            + 2
+            + 2
+            + params.share.len()
+            + params.body_bytes.len(),
+    );
+
+    shard.extend_from_slice(QCONT_MAGIC);
+    shard.extend_from_slice(&(params.meta_json_bytes.len() as u16).to_be_bytes());
+    shard.extend_from_slice(params.meta_json_bytes);
+    shard.extend_from_slice(&(params.manifest_bytes.len() as u32).to_be_bytes());
+    shard.extend_from_slice(params.manifest_bytes);
+    shard.extend_from_slice(&manifest_digest_bytes);
+    shard.extend_from_slice(&(params.bundle_bytes.len() as u32).to_be_bytes());
+    shard.extend_from_slice(params.bundle_bytes);
+    shard.extend_from_slice(&bundle_digest_bytes);
+    shard.extend_from_slice(&(params.encapsulated_key.len() as u32).to_be_bytes());
+    shard.extend_from_slice(params.encapsulated_key);
+    shard.extend_from_slice(params.container_nonce);
+    shard.extend_from_slice(params.kdf_salt);
+    shard.extend_from_slice(&(params.qenc_meta_bytes.len() as u16).to_be_bytes());
+    shard.extend_from_slice(params.qenc_meta_bytes);
+    shard.push(params.key_commitment.len() as u8);
+    shard.extend_from_slice(params.key_commitment);
+    shard.extend_from_slice(&params.shard_index.to_be_bytes());
+    shard.extend_from_slice(&(params.share.len() as u16).to_be_bytes());
+    shard.extend_from_slice(params.share);
+    shard.extend_from_slice(params.body_bytes);
+    shard
 }
 
 pub fn build_qcont_shards(
@@ -78,10 +146,12 @@ pub fn build_qcont_shards(
 ) -> Result<BuiltQcontShards> {
     let n = usize::from(params.n);
     let k = usize::from(params.k);
-    let m = n - k;
     if k < 2 || n <= k {
         return Err(err("Invalid RS parameters: require 2 <= k < n"));
     }
+    let Some(m) = n.checked_sub(k) else {
+        return Err(err("Invalid RS parameters: require 2 <= k < n"));
+    };
     if (m % 2) != 0 {
         return Err(err("n-k must be even"));
     }
@@ -136,7 +206,6 @@ pub fn build_qcont_shards(
         .map(|share| sha3_512_hex(share))
         .collect::<Vec<_>>();
 
-    let mut shard_buffers = vec![Vec::new(); n];
     let chunk_size = parsed.metadata.chunk_size.unwrap_or(CHUNK_SIZE as u64);
     let is_per_chunk = parsed.metadata.aead_mode == "per-chunk-aead";
     let total_chunks = if is_per_chunk {
@@ -149,12 +218,30 @@ pub fn build_qcont_shards(
     };
     let mut ciphertext_offset = 0usize;
     let mut per_fragment_size = 0usize;
+    let mut shard_bodies = vec![Vec::new(); n];
     for i in 0..total_chunks {
         let cipher_chunk = if is_per_chunk {
-            let plain_len = chunk_size.min(effective_length - (i * chunk_size)) as usize;
-            let enc_len = plain_len + 16;
-            let chunk = &ciphertext[ciphertext_offset..ciphertext_offset + enc_len];
-            ciphertext_offset += enc_len;
+            let chunk_start = i
+                .checked_mul(chunk_size)
+                .ok_or_else(|| err("QENC per-chunk framing overflow"))?;
+            let remaining = effective_length
+                .checked_sub(chunk_start)
+                .ok_or_else(|| err("QENC per-chunk framing exceeds payloadLength"))?;
+            let plain_len = usize::try_from(chunk_size.min(remaining))
+                .map_err(|_| err("QENC chunk length exceeds platform limits"))?;
+            let enc_len = plain_len
+                .checked_add(16)
+                .ok_or_else(|| err("QENC encrypted chunk length overflow"))?;
+            let chunk_end = ciphertext_offset
+                .checked_add(enc_len)
+                .ok_or_else(|| err("QENC ciphertext offset overflow"))?;
+            if chunk_end > ciphertext.len() {
+                return Err(err(
+                    "QENC ciphertext is truncated for declared per-chunk framing",
+                ));
+            }
+            let chunk = &ciphertext[ciphertext_offset..chunk_end];
+            ciphertext_offset = chunk_end;
             chunk
         } else {
             ciphertext
@@ -176,15 +263,18 @@ pub fn build_qcont_shards(
         if i == 0 {
             per_fragment_size = fragments[0].len();
         }
-
         for (j, fragment) in fragments.iter().enumerate() {
-            shard_buffers[j].extend_from_slice(&(fragment.len() as u32).to_be_bytes());
-            shard_buffers[j].extend_from_slice(fragment);
+            shard_bodies[j].extend_from_slice(&(fragment.len() as u32).to_be_bytes());
+            shard_bodies[j].extend_from_slice(fragment);
         }
     }
+    if is_per_chunk && ciphertext_offset != ciphertext.len() {
+        return Err(err(
+            "QENC ciphertext length does not match declared per-chunk framing",
+        ));
+    }
 
-    let shard_body_bytes = shard_buffers;
-    let fragment_body_hashes = shard_body_bytes
+    let fragment_body_hashes = shard_bodies
         .iter()
         .map(|body| sha3_512_hex(body))
         .collect::<Vec<_>>();
@@ -193,85 +283,50 @@ pub fn build_qcont_shards(
         .timestamp
         .clone()
         .unwrap_or_else(current_iso8601_utc_millis);
-    let profile = get_crypto_profile(parsed.metadata.crypto_profile_id.as_deref())?;
-    let require_signature = options.require_signature.unwrap_or(false);
-    let allow_legacy_ed25519 = options.allow_legacy_ed25519.unwrap_or(true);
-    let accepted_algorithms = vec![
-        "ML-DSA".to_string(),
-        "SLH-DSA-SHAKE".to_string(),
-        "Ed25519".to_string(),
-    ];
+    let auth_policy_level = options
+        .auth_policy_level
+        .unwrap_or(AuthPolicyLevel::StrongPqSignature);
+    let min_valid_signatures = options.min_valid_signatures.unwrap_or(1).max(1);
 
-    let manifest = ArchiveManifest {
-        schema: "quantum-vault-archive-manifest/v1".to_string(),
-        version: 1,
-        manifest_type: "archive".to_string(),
-        crypto_profile_id: parsed
-            .metadata
-            .crypto_profile_id
-            .clone()
-            .unwrap_or_else(|| DEFAULT_CRYPTO_PROFILE.crypto_profile_id.to_string()),
-        kdf_tree_id: profile.kdf_tree_id.to_string(),
-        nonce_policy_id: parsed.metadata.nonce_policy_id.clone(),
-        nonce_mode: parsed.metadata.nonce_mode.clone(),
-        counter_bits: parsed.metadata.counter_bits,
-        max_chunk_count: parsed.metadata.max_chunk_count,
-        aad_policy_id: profile.aad_policy_id.to_string(),
-        qenc: ArchiveManifestQenc {
-            format: parsed.metadata.fmt.clone(),
-            aead_mode: parsed.metadata.aead_mode.clone(),
-            iv_strategy: parsed.metadata.iv_strategy.clone(),
-            chunk_size,
-            chunk_count: total_chunks,
-            payload_length: parsed.metadata.payload_length.unwrap_or(effective_length),
-            hash_alg: "SHA3-512".to_string(),
-            qenc_hash: container_hash.clone(),
-            primary_anchor: "qencHash".to_string(),
-            container_id: container_id.clone(),
-            container_id_role: "secondary-header-id".to_string(),
-            container_id_alg: "SHA3-512(qenc-header-bytes)".to_string(),
-        },
-        sharding: ArchiveManifestSharding {
-            shamir: ArchiveManifestShamir {
-                threshold: t as u64,
-                share_count: n as u64,
-            },
-            reed_solomon: ArchiveManifestReedSolomon {
-                n: n as u64,
-                k: k as u64,
-                parity: m as u64,
-                codec_id: "QV-RS-ErasureCodes-v1".to_string(),
-            },
-        },
-        signing_policy: ArchiveManifestSigningPolicy {
-            require_signature,
-            accepted_algorithms,
-            allow_legacy_ed25519,
-        },
-        shard_binding: Some(ArchiveManifestShardBinding {
-            body_definition_id: "QV-QCONT-SHARDBODY-v1".to_string(),
-            body_definition: ArchiveManifestShardBodyDefinition {
-                includes: vec!["fragment-len32-stream".to_string()],
-                excludes: vec![
-                    "qcont-header".to_string(),
-                    "embedded-manifest".to_string(),
-                    "embedded-manifest-digest".to_string(),
-                    "external-signatures".to_string(),
-                ],
-            },
-            shard_body_hash_alg: "SHA3-512".to_string(),
-            shard_body_hashes: Some(fragment_body_hashes.clone()),
-            share_commitment: Some(ArchiveManifestShareCommitment {
-                hash_alg: "SHA3-512".to_string(),
-                input: "raw-shamir-share-bytes".to_string(),
-            }),
-            share_commitments: Some(share_commitments.clone()),
-        }),
-    };
+    let manifest = build_archive_manifest(&BuildArchiveManifestParams {
+        crypto_profile_id: parsed.metadata.crypto_profile_id.clone(),
+        qenc_format: parsed.metadata.fmt.clone(),
+        aead_mode: parsed.metadata.aead_mode.clone(),
+        iv_strategy: parsed.metadata.iv_strategy.clone(),
+        nonce_policy_id: Some(parsed.metadata.nonce_policy_id.clone()),
+        nonce_mode: Some(parsed.metadata.nonce_mode.clone()),
+        counter_bits: Some(parsed.metadata.counter_bits),
+        max_chunk_count: Some(parsed.metadata.max_chunk_count),
+        chunk_size,
+        chunk_count: total_chunks,
+        payload_length: parsed.metadata.payload_length.unwrap_or(effective_length),
+        qenc_hash: container_hash.clone(),
+        container_id: container_id.clone(),
+        shamir_threshold: t as u64,
+        shamir_share_count: n as u64,
+        rs_n: n as u64,
+        rs_k: k as u64,
+        rs_parity: m as u64,
+        rs_codec_id: Some("QV-RS-ErasureCodes-v1".to_string()),
+        shard_body_hashes: Some(fragment_body_hashes.clone()),
+        share_commitments: Some(share_commitments.clone()),
+        auth_policy_level,
+        min_valid_signatures,
+    })?;
     let canonical_manifest = canonicalize_archive_manifest(&manifest)?;
-    let manifest_bytes = canonical_manifest.bytes;
-    let manifest_digest_hex = canonical_manifest.digest_hex;
-    let manifest_digest_bytes = sha3_512(&manifest_bytes);
+    let manifest_bytes = canonical_manifest.bytes.clone();
+    let manifest_digest_hex = canonical_manifest.digest_hex.clone();
+
+    let initial_bundle = build_initial_manifest_bundle(
+        &manifest,
+        &AuthPolicy {
+            level: auth_policy_level,
+            min_valid_signatures,
+        },
+    )?;
+    let canonical_bundle = canonicalize_manifest_bundle(&initial_bundle)?;
+    let bundle_bytes = canonical_bundle.bytes.clone();
+    let bundle_digest_hex = canonical_bundle.digest_hex.clone();
 
     let meta_json = QcontShardMetadata {
         container_id: container_id.clone(),
@@ -327,56 +382,32 @@ pub fn build_qcont_shards(
         key_commitment_hex: to_hex(&key_commitment),
         has_embedded_manifest: true,
         manifest_digest: manifest_digest_hex.clone(),
-        share_commitments: Some(share_commitments),
-        fragment_body_hashes: Some(fragment_body_hashes),
+        has_embedded_bundle: true,
+        bundle_digest: bundle_digest_hex.clone(),
+        auth_policy_level: initial_bundle.auth_policy.level,
+        share_commitments: Some(share_commitments.clone()),
+        fragment_body_hashes: Some(fragment_body_hashes.clone()),
         timestamp,
     };
     let meta_json_bytes = serde_json::to_vec(&meta_json)?;
 
     let mut shards = Vec::with_capacity(n);
     for j in 0..n {
-        let share = &shares[j];
-        let body_bytes = &shard_body_bytes[j];
-        let mut shard = Vec::with_capacity(
-            QCONT_MAGIC.len()
-                + 2
-                + meta_json_bytes.len()
-                + 4
-                + manifest_bytes.len()
-                + manifest_digest_bytes.len()
-                + 4
-                + parsed.encapsulated_key.len()
-                + 12
-                + 16
-                + 2
-                + parsed.meta_bytes.len()
-                + 1
-                + key_commitment.len()
-                + 2
-                + 2
-                + share.len()
-                + body_bytes.len(),
-        );
-        shard.extend_from_slice(QCONT_MAGIC);
-        shard.extend_from_slice(&(meta_json_bytes.len() as u16).to_be_bytes());
-        shard.extend_from_slice(&meta_json_bytes);
-        shard.extend_from_slice(&(manifest_bytes.len() as u32).to_be_bytes());
-        shard.extend_from_slice(&manifest_bytes);
-        shard.extend_from_slice(&manifest_digest_bytes);
-        shard.extend_from_slice(&(parsed.encapsulated_key.len() as u32).to_be_bytes());
-        shard.extend_from_slice(&parsed.encapsulated_key);
-        shard.extend_from_slice(&parsed.container_nonce);
-        shard.extend_from_slice(&parsed.kdf_salt);
-        shard.extend_from_slice(&(parsed.meta_bytes.len() as u16).to_be_bytes());
-        shard.extend_from_slice(&parsed.meta_bytes);
-        shard.push(key_commitment.len() as u8);
-        shard.extend_from_slice(&key_commitment);
-        shard.extend_from_slice(&(j as u16).to_be_bytes());
-        shard.extend_from_slice(&(share.len() as u16).to_be_bytes());
-        shard.extend_from_slice(share);
-        shard.extend_from_slice(body_bytes);
+        let shard_bytes = build_qcont_shard_blob(&QcontShardBlobParams {
+            meta_json_bytes: &meta_json_bytes,
+            manifest_bytes: &manifest_bytes,
+            bundle_bytes: &bundle_bytes,
+            encapsulated_key: &parsed.encapsulated_key,
+            container_nonce: &parsed.container_nonce,
+            kdf_salt: &parsed.kdf_salt,
+            qenc_meta_bytes: &parsed.meta_bytes,
+            key_commitment: &key_commitment,
+            shard_index: j as u16,
+            share: &shares[j],
+            body_bytes: &shard_bodies[j],
+        });
         shards.push(BuiltQcontShard {
-            bytes: shard,
+            bytes: shard_bytes,
             index: j as u16,
         });
     }
@@ -384,8 +415,11 @@ pub fn build_qcont_shards(
     Ok(BuiltQcontShards {
         shards,
         manifest,
+        bundle: initial_bundle,
         manifest_bytes,
         manifest_digest_hex,
+        bundle_bytes,
+        bundle_digest_hex,
         format_version: QCONT_FORMAT_VERSION.to_string(),
     })
 }

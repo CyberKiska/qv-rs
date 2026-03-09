@@ -21,12 +21,7 @@ Thumbs.db
 test_data/
 *.recovered.*
 fixtures/
-!fixtures/js-oracle/
-!fixtures/js-oracle/**/
-!fixtures/js-oracle/**/*.qkey
-!fixtures/js-oracle/**/*.qenc
-!fixtures/js-oracle/**/*.qcont
-!fixtures/js-oracle/**/*.json
+examples/
 
 # Backup files
 *.bak
@@ -34,3 +29,4 @@ fixtures/
 
 # Notes
 *.md
+!README.md

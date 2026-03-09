@@ -1,10 +1,18 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 
+use crate::auth::{
+    assert_manifest_bundle_timestamps, inspect_timestamp_evidence, verify_manifest_signatures,
+    ArchivePolicyEvaluation, AuthPolicy, AuthPolicyLevel, AuthenticityReport, AuthenticityStatus,
+    VerificationInputs,
+};
 use crate::bytes::bytes_equal;
 use crate::erasure;
 use crate::error::{err, Result};
 use crate::hash::sha3_512_hex;
-use crate::manifest::{parse_archive_manifest_bytes, ArchiveManifest, ParsedArchiveManifest};
+use crate::manifest::{
+    assert_auth_policy_commitment, parse_archive_manifest_bytes, parse_manifest_bundle_bytes,
+    ArchiveManifest,
+};
 use crate::policy::validate_container_policy_metadata;
 use crate::qcont::shard::QcontShard;
 use crate::qenc::build_qenc_header;
@@ -14,6 +22,9 @@ use zeroize::Zeroize;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RestoreQcontOptions {
     pub manifest_bytes: Option<Vec<u8>>,
+    pub bundle_bytes: Option<Vec<u8>>,
+    pub verification: VerificationInputs,
+    pub strict: bool,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -31,7 +42,11 @@ pub struct RestoredQcont {
     pub manifest: ArchiveManifest,
     pub manifest_bytes: Vec<u8>,
     pub manifest_digest_hex: String,
+    pub bundle: crate::manifest::ManifestBundle,
+    pub bundle_bytes: Vec<u8>,
+    pub bundle_digest_hex: String,
     pub manifest_source: String,
+    pub authenticity: AuthenticityReport,
     pub warnings: Vec<String>,
 }
 
@@ -46,13 +61,46 @@ impl std::fmt::Debug for RestoredQcont {
             .field("recovered_qenc_hash", &self.recovered_qenc_hash)
             .field("recovered_priv_hash", &self.recovered_priv_hash)
             .field("rejected_shard_indices", &self.rejected_shard_indices)
-            .field("qenc_ok", &self.qenc_ok)
-            .field("qkey_ok", &self.qkey_ok)
             .field("manifest_digest_hex", &self.manifest_digest_hex)
+            .field("bundle_digest_hex", &self.bundle_digest_hex)
             .field("manifest_source", &self.manifest_source)
-            .field("warnings", &self.warnings)
             .finish()
     }
+}
+
+#[derive(Debug, Clone)]
+struct CandidateCohort<'a> {
+    manifest_digest_hex: String,
+    bundle_digest_hex: String,
+    manifest_bytes: &'a [u8],
+    bundle_bytes: &'a [u8],
+}
+
+#[derive(Debug, Clone)]
+struct EnrichedCandidate {
+    manifest_digest_hex: String,
+    bundle_digest_hex: String,
+    embedded_bundle_digest_hex: String,
+    manifest: ArchiveManifest,
+    manifest_bytes: Vec<u8>,
+    bundle: crate::manifest::ManifestBundle,
+    bundle_bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+struct CandidateAuthenticity {
+    verification: crate::auth::SignatureVerificationReport,
+    policy: ArchivePolicyEvaluation,
+    timestamp_evidence: Vec<crate::auth::TimestampEvidence>,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ArchiveContext {
+    candidate: EnrichedCandidate,
+    authenticity: CandidateAuthenticity,
+    source: String,
+    use_manifest_wide_shard_selection: bool,
 }
 
 pub fn restore_from_shards(
@@ -62,23 +110,41 @@ pub fn restore_from_shards(
     if shards.is_empty() {
         return Err(err("No shards provided"));
     }
+    if options.manifest_bytes.is_some() && options.bundle_bytes.is_some() {
+        return Err(err(
+            "manifest_bytes and bundle_bytes are mutually exclusive restore selectors",
+        ));
+    }
 
-    let manifest_context = resolve_manifest_context(shards, options.manifest_bytes.as_deref())?;
-    let manifest = &manifest_context.parsed.manifest;
-    let manifest_digest_hex = manifest_context.parsed.digest_hex.clone();
+    let archive_context = resolve_archive_context(shards, options)?;
+    let candidate = &archive_context.candidate;
+    let manifest = &candidate.manifest;
+    let bundle = &candidate.bundle;
+    let manifest_digest_hex = candidate.manifest_digest_hex.clone();
+    let bundle_digest_hex = candidate.bundle_digest_hex.clone();
+    let use_manifest_wide_shard_selection = archive_context.use_manifest_wide_shard_selection;
+    let selected_embedded_bundle_digest_hex = candidate.embedded_bundle_digest_hex.clone();
 
     let group = shards
         .iter()
-        .filter(|shard| shard.manifest_digest_hex == manifest_digest_hex)
+        .filter(|shard| {
+            shard.manifest_digest_hex == manifest_digest_hex
+                && (use_manifest_wide_shard_selection
+                    || shard.bundle_digest_hex == selected_embedded_bundle_digest_hex)
+        })
         .cloned()
         .collect::<Vec<_>>();
     let rejected_shard_indices = shards
         .iter()
-        .filter(|shard| shard.manifest_digest_hex != manifest_digest_hex)
+        .filter(|shard| {
+            shard.manifest_digest_hex != manifest_digest_hex
+                || (!use_manifest_wide_shard_selection
+                    && shard.bundle_digest_hex != selected_embedded_bundle_digest_hex)
+        })
         .map(|shard| shard.shard_index)
         .collect::<Vec<_>>();
     if group.is_empty() {
-        return Err(err("No shard matches selected manifest digest"));
+        return Err(err("No shard matches selected archive context"));
     }
 
     let n = ensure_positive_integer(
@@ -146,6 +212,9 @@ pub fn restore_from_shards(
     }
 
     let base = &group[0];
+    if base.key_commit.len() != 32 {
+        return Err(err("Shard is missing required key commitment"));
+    }
     let base_key_commit = base.key_commit;
     let mut shard_by_index = BTreeMap::new();
     for shard in &group {
@@ -163,11 +232,16 @@ pub fn restore_from_shards(
         ensure_equal(&(shard.meta_json.k as usize), &k, "k")?;
         ensure_equal(&(shard.meta_json.m as usize), &m, "m")?;
         ensure_equal(&(shard.meta_json.t as usize), &t, "t")?;
-        if !shard.meta_json.manifest_digest.is_empty() {
+        ensure_equal(
+            &normalize_hex_string(&shard.meta_json.manifest_digest),
+            &manifest_digest_hex,
+            "manifestDigest",
+        )?;
+        if !use_manifest_wide_shard_selection {
             ensure_equal(
-                &normalize_hex_string(&shard.meta_json.manifest_digest),
-                &manifest_digest_hex,
-                "manifestDigest",
+                &normalize_hex_string(&shard.meta_json.bundle_digest),
+                &selected_embedded_bundle_digest_hex,
+                "bundleDigest",
             )?;
         }
         if !bytes_equal(&shard.encapsulated_key, &base.encapsulated_key) {
@@ -209,7 +283,7 @@ pub fn restore_from_shards(
 
     let qenc_meta_json = &base.qenc_meta_json;
     validate_container_policy_metadata(qenc_meta_json, false)?;
-    assert_manifest_matches_qenc_metadata(&manifest_context.parsed, qenc_meta_json)?;
+    assert_manifest_matches_qenc_metadata(&candidate.manifest_bytes, qenc_meta_json)?;
 
     let ciphertext_length = ensure_positive_integer(
         base.meta_json.ciphertext_length as usize,
@@ -251,35 +325,28 @@ pub fn restore_from_shards(
     }
 
     let encap_hash = sha3_512_hex(&base.encapsulated_key);
-    if !base.meta_json.encap_blob_hash.is_empty()
-        && normalize_hex_string(&base.meta_json.encap_blob_hash)
-            != normalize_hex_string(&encap_hash)
-    {
+    if normalize_hex_string(&base.meta_json.encap_blob_hash) != normalize_hex_string(&encap_hash) {
         return Err(err("encapBlobHash mismatch"));
     }
     if group.len() < t {
         return Err(err(format!(
-            "Need at least {t} matching shards for selected manifest, got {}",
+            "Need at least {t} matching shards for selected archive cohort, got {}",
             group.len()
         )));
     }
 
-    let share_commitments = manifest_context
-        .parsed
-        .manifest
+    let share_commitments = manifest
         .shard_binding
         .as_ref()
         .and_then(|binding| binding.share_commitments.clone())
         .or_else(|| base.meta_json.share_commitments.clone());
-    let fragment_body_hashes = manifest_context
-        .parsed
-        .manifest
+    let fragment_body_hashes = manifest
         .shard_binding
         .as_ref()
         .and_then(|binding| binding.shard_body_hashes.clone())
         .or_else(|| base.meta_json.fragment_body_hashes.clone());
 
-    let mut warnings = manifest_context.warnings;
+    let mut warnings = archive_context.authenticity.warnings.clone();
     let mut valid_share_shards = group.clone();
     if let Some(share_commitments) = share_commitments {
         if share_commitments.len() != n {
@@ -453,7 +520,7 @@ pub fn restore_from_shards(
     let expected_qenc_hash = normalize_hex_string(&manifest.qenc.qenc_hash);
     if recovered_qenc_hash != expected_qenc_hash {
         return Err(err(
-            "Reconstructed .qenc hash does not match signed manifest",
+            "Reconstructed .qenc hash does not match archive manifest",
         ));
     }
 
@@ -464,6 +531,7 @@ pub fn restore_from_shards(
         warnings.push("Recovered secret key hash does not match shard metadata.".to_string());
     }
 
+    let authenticity = build_authenticity_report(&archive_context.authenticity);
     Ok(RestoredQcont {
         qenc_bytes,
         priv_key,
@@ -480,87 +548,349 @@ pub fn restore_from_shards(
         qenc_ok: true,
         qkey_ok,
         manifest: manifest.clone(),
-        manifest_bytes: manifest_context.parsed.bytes,
+        manifest_bytes: candidate.manifest_bytes.clone(),
         manifest_digest_hex,
-        manifest_source: manifest_context.source.to_string(),
+        bundle: bundle.clone(),
+        bundle_bytes: candidate.bundle_bytes.clone(),
+        bundle_digest_hex,
+        manifest_source: archive_context.source.clone(),
+        authenticity,
         warnings,
     })
 }
 
-#[derive(Debug, Clone)]
-struct ManifestContext {
-    parsed: ParsedArchiveManifest,
-    source: &'static str,
-    warnings: Vec<String>,
+fn build_authenticity_report(source: &CandidateAuthenticity) -> AuthenticityReport {
+    AuthenticityReport {
+        policy: source.policy.clone(),
+        verification: source.verification.clone(),
+        warnings: source.warnings.clone(),
+        status: AuthenticityStatus {
+            integrity_verified: true,
+            signature_verified: source.verification.status.signature_verified,
+            strong_pq_signature_verified: source.verification.status.strong_pq_signature_verified,
+            signer_pinned: source.verification.status.signer_pinned,
+            signer_identity_pinned: source.verification.status.signer_identity_pinned,
+            bundle_pinned: source.verification.status.bundle_pinned,
+            user_pinned: source.verification.status.user_pinned,
+            user_pin_provided: source.verification.status.user_pin_provided,
+            policy_satisfied: source.policy.satisfied,
+            archive_policy_satisfied: source.policy.satisfied,
+        },
+        timestamp_evidence: source.timestamp_evidence.clone(),
+    }
 }
 
-fn resolve_manifest_context(
-    shards: &[QcontShard],
-    uploaded_manifest_bytes: Option<&[u8]>,
-) -> Result<ManifestContext> {
-    let mut by_digest = HashMap::<String, Vec<&QcontShard>>::new();
-    for shard in shards {
-        by_digest
-            .entry(shard.manifest_digest_hex.clone())
-            .or_default()
-            .push(shard);
-    }
-    let mut candidates = Vec::new();
-    for (digest_hex, cohort) in by_digest {
-        let manifest_bytes = &cohort[0].manifest_bytes;
-        if cohort
-            .iter()
-            .any(|shard| !bytes_equal(&shard.manifest_bytes, manifest_bytes))
-        {
-            return Err(err(format!(
-                "Manifest bytes mismatch inside digest cohort {digest_hex}"
-            )));
+fn evaluate_archive_policy(
+    auth_policy: &AuthPolicy,
+    verification: &crate::auth::SignatureVerificationReport,
+) -> Result<ArchivePolicyEvaluation> {
+    let min_valid_signatures = auth_policy.min_valid_signatures.max(1);
+    Ok(match auth_policy.level {
+        AuthPolicyLevel::IntegrityOnly => ArchivePolicyEvaluation {
+            level: auth_policy.level,
+            min_valid_signatures,
+            satisfied: true,
+            reason: "integrity-only policy does not require signatures".to_string(),
+        },
+        AuthPolicyLevel::AnySignature => {
+            let satisfied = verification.counts.pinned_valid_total >= min_valid_signatures;
+            ArchivePolicyEvaluation {
+                level: auth_policy.level,
+                min_valid_signatures,
+                satisfied,
+                reason: if satisfied {
+                    "required trusted signature count satisfied".to_string()
+                } else {
+                    "no valid pinned signature satisfies archive policy".to_string()
+                },
+            }
         }
-        let parsed = parse_archive_manifest_bytes(manifest_bytes)?;
-        if parsed.digest_hex != digest_hex {
-            return Err(err("Embedded manifest digest mismatch"));
+        AuthPolicyLevel::StrongPqSignature => {
+            let satisfied = verification.counts.pinned_valid_total >= min_valid_signatures
+                && verification.counts.pinned_valid_strong_pq >= 1;
+            ArchivePolicyEvaluation {
+                level: auth_policy.level,
+                min_valid_signatures,
+                satisfied,
+                reason: if satisfied {
+                    "required trusted strong PQ signature present".to_string()
+                } else {
+                    "no valid pinned strong PQ signature satisfies archive policy".to_string()
+                },
+            }
         }
-        candidates.push(parsed);
-    }
-    if candidates.is_empty() {
-        return Err(err("No embedded manifests found in shard set"));
-    }
-
-    if let Some(uploaded_manifest_bytes) = uploaded_manifest_bytes {
-        let parsed = parse_archive_manifest_bytes(uploaded_manifest_bytes)?;
-        if !candidates
-            .iter()
-            .any(|item| item.digest_hex == parsed.digest_hex)
-        {
-            return Err(err(
-                "Uploaded manifest does not match any provided shard cohort",
-            ));
-        }
-        return Ok(ManifestContext {
-            parsed,
-            source: "uploaded",
-            warnings: vec!["The content is correct, but may not be authentic.".to_string()],
-        });
-    }
-
-    if candidates.len() != 1 {
-        return Err(err(
-            "Multiple manifest cohorts detected. Provide manifest file to select a cohort.",
-        ));
-    }
-
-    Ok(ManifestContext {
-        parsed: candidates.remove(0),
-        source: "embedded",
-        warnings: vec!["The content is correct, but may not be authentic.".to_string()],
     })
 }
 
+fn collect_candidate_cohorts<'a>(shards: &'a [QcontShard]) -> Result<Vec<CandidateCohort<'a>>> {
+    let mut by_digest = BTreeMap::<String, CandidateCohort<'a>>::new();
+    for shard in shards {
+        let key = format!("{}:{}", shard.manifest_digest_hex, shard.bundle_digest_hex);
+        if let Some(existing) = by_digest.get(&key) {
+            if !bytes_equal(existing.manifest_bytes, &shard.manifest_bytes) {
+                return Err(err(format!("Manifest bytes mismatch inside cohort {key}")));
+            }
+            if !bytes_equal(existing.bundle_bytes, &shard.bundle_bytes) {
+                return Err(err(format!("Bundle bytes mismatch inside cohort {key}")));
+            }
+            continue;
+        }
+        by_digest.insert(
+            key,
+            CandidateCohort {
+                manifest_digest_hex: shard.manifest_digest_hex.clone(),
+                bundle_digest_hex: shard.bundle_digest_hex.clone(),
+                manifest_bytes: &shard.manifest_bytes,
+                bundle_bytes: &shard.bundle_bytes,
+            },
+        );
+    }
+    Ok(by_digest.into_values().collect())
+}
+
+fn enrich_candidate(
+    candidate: &CandidateCohort<'_>,
+    bundle_bytes_override: Option<&[u8]>,
+) -> Result<EnrichedCandidate> {
+    let parsed_manifest = parse_archive_manifest_bytes(candidate.manifest_bytes)?;
+    if parsed_manifest.digest_hex != candidate.manifest_digest_hex {
+        return Err(err("Embedded manifest digest mismatch"));
+    }
+    let selected_bundle_bytes = bundle_bytes_override.unwrap_or(candidate.bundle_bytes);
+    let parsed_bundle = parse_manifest_bundle_bytes(selected_bundle_bytes, true)?;
+    if bundle_bytes_override.is_none() && parsed_bundle.digest_hex != candidate.bundle_digest_hex {
+        return Err(err("Embedded bundle digest mismatch"));
+    }
+    if !bytes_equal(&parsed_bundle.manifest_bytes, &parsed_manifest.bytes) {
+        return Err(err(
+            "Embedded bundle manifest does not match embedded manifest bytes",
+        ));
+    }
+    if parsed_bundle.manifest_digest_hex != parsed_manifest.digest_hex {
+        return Err(err(
+            "Embedded bundle manifestDigest does not match embedded manifest digest",
+        ));
+    }
+    let _ = assert_auth_policy_commitment(
+        &parsed_manifest.manifest.auth_policy_commitment,
+        &parsed_bundle.bundle.auth_policy,
+    )?;
+    assert_manifest_bundle_timestamps(&parsed_bundle.bundle)?;
+    Ok(EnrichedCandidate {
+        manifest_digest_hex: candidate.manifest_digest_hex.clone(),
+        bundle_digest_hex: parsed_bundle.digest_hex.clone(),
+        embedded_bundle_digest_hex: candidate.bundle_digest_hex.clone(),
+        manifest: parsed_manifest.manifest,
+        manifest_bytes: parsed_manifest.bytes,
+        bundle: parsed_bundle.bundle,
+        bundle_bytes: parsed_bundle.bytes,
+    })
+}
+
+fn evaluate_candidate_authenticity(
+    candidate: &EnrichedCandidate,
+    verification_options: &VerificationInputs,
+) -> Result<CandidateAuthenticity> {
+    let verification = verify_manifest_signatures(
+        &candidate.manifest_bytes,
+        &candidate.bundle.attachments.signatures,
+        &candidate.bundle.attachments.public_keys,
+        &verification_options.signatures,
+        verification_options
+            .pinned_pq_public_key_file_bytes
+            .as_deref(),
+        verification_options.expected_ed25519_signer.as_deref(),
+    )?;
+    let policy = evaluate_archive_policy(&candidate.bundle.auth_policy, &verification)?;
+    let timestamp_evidence = inspect_timestamp_evidence(
+        &candidate.bundle,
+        &verification_options.timestamps,
+        &verification.signature_artifacts,
+    )?;
+    let mut warnings = Vec::new();
+    if candidate.bundle.auth_policy.level == AuthPolicyLevel::IntegrityOnly {
+        warnings.push(
+            "Archive policy is integrity-only; provenance is not bound to a verified signer."
+                .to_string(),
+        );
+    }
+    let invalid_signature_count = verification.results.iter().filter(|item| !item.ok).count();
+    if invalid_signature_count > 0 {
+        warnings.push(format!(
+            "{invalid_signature_count} attached signature(s) did not verify and were ignored for policy evaluation."
+        ));
+    }
+    if verification.counts.valid_total > verification.counts.pinned_valid_total {
+        warnings.push(
+            "Verified signatures without a trusted signer binding were ignored for archive policy evaluation."
+                .to_string(),
+        );
+    }
+    Ok(CandidateAuthenticity {
+        verification,
+        policy,
+        timestamp_evidence,
+        warnings,
+    })
+}
+
+fn resolve_archive_context(
+    shards: &[QcontShard],
+    options: &RestoreQcontOptions,
+) -> Result<ArchiveContext> {
+    let raw_candidates = collect_candidate_cohorts(shards)?;
+    if raw_candidates.is_empty() {
+        return Err(err("No valid shard cohorts found"));
+    }
+
+    if let Some(bundle_bytes) = options.bundle_bytes.as_deref() {
+        let parsed_bundle = parse_manifest_bundle_bytes(bundle_bytes, true)?;
+        let matching = raw_candidates
+            .iter()
+            .filter(|candidate| {
+                candidate.manifest_digest_hex == parsed_bundle.manifest_digest_hex
+                    && bytes_equal(candidate.manifest_bytes, &parsed_bundle.manifest_bytes)
+            })
+            .collect::<Vec<_>>();
+        if matching.is_empty() {
+            return Err(err(
+                "Provided manifest bundle does not match any shard manifest",
+            ));
+        }
+        let explicit_candidate = enrich_candidate(matching[0], Some(&parsed_bundle.bytes))?;
+        let authenticity =
+            evaluate_candidate_authenticity(&explicit_candidate, &options.verification)?;
+        if !authenticity.policy.satisfied {
+            return Err(err(authenticity.policy.reason.clone()));
+        }
+        return Ok(ArchiveContext {
+            candidate: explicit_candidate,
+            authenticity,
+            source: "uploaded-bundle".to_string(),
+            use_manifest_wide_shard_selection: true,
+        });
+    }
+
+    let candidates = raw_candidates
+        .iter()
+        .map(|candidate| enrich_candidate(candidate, None))
+        .collect::<Result<Vec<_>>>()?;
+
+    if let Some(manifest_bytes) = options.manifest_bytes.as_deref() {
+        let parsed_manifest = parse_archive_manifest_bytes(manifest_bytes)?;
+        let matching = candidates
+            .iter()
+            .filter(|candidate| candidate.manifest_digest_hex == parsed_manifest.digest_hex)
+            .collect::<Vec<_>>();
+        if matching.is_empty() {
+            return Err(err(
+                "Provided canonical manifest does not match any shard cohort",
+            ));
+        }
+        if matching.len() > 1 {
+            return Err(err(
+                "Canonical manifest matches multiple bundle cohorts. Provide the bundle file or pinned signatures to disambiguate.",
+            ));
+        }
+        let authenticity = evaluate_candidate_authenticity(matching[0], &options.verification)?;
+        if !authenticity.policy.satisfied {
+            return Err(err(authenticity.policy.reason.clone()));
+        }
+        return Ok(ArchiveContext {
+            candidate: matching[0].clone(),
+            authenticity,
+            source: "uploaded-manifest".to_string(),
+            use_manifest_wide_shard_selection: false,
+        });
+    }
+
+    let mut evaluated = Vec::new();
+    for candidate in &candidates {
+        match evaluate_candidate_authenticity(candidate, &options.verification) {
+            Ok(authenticity) => evaluated.push((candidate.clone(), authenticity, None::<String>)),
+            Err(error) => {
+                let empty_verification = crate::auth::SignatureVerificationReport {
+                    provided: false,
+                    results: Vec::new(),
+                    warnings: Vec::new(),
+                    counts: crate::auth::SignatureVerificationCounts {
+                        valid_total: 0,
+                        valid_strong_pq: 0,
+                        pinned_valid_total: 0,
+                        pinned_valid_strong_pq: 0,
+                        bundle_pinned_valid_total: 0,
+                        user_pinned_valid_total: 0,
+                    },
+                    signature_artifacts: Vec::new(),
+                    status: crate::auth::SignatureVerificationStatus {
+                        signature_verified: false,
+                        strong_pq_signature_verified: false,
+                        signer_pinned: false,
+                        signer_identity_pinned: false,
+                        bundle_pinned: false,
+                        user_pinned: false,
+                        user_pin_provided: options
+                            .verification
+                            .pinned_pq_public_key_file_bytes
+                            .is_some()
+                            || options
+                                .verification
+                                .expected_ed25519_signer
+                                .as_ref()
+                                .map(|value| !value.trim().is_empty())
+                                .unwrap_or(false),
+                    },
+                };
+                evaluated.push((
+                    candidate.clone(),
+                    CandidateAuthenticity {
+                        verification: empty_verification,
+                        policy: ArchivePolicyEvaluation {
+                            level: candidate.bundle.auth_policy.level,
+                            min_valid_signatures: candidate.bundle.auth_policy.min_valid_signatures,
+                            satisfied: false,
+                            reason: error.to_string(),
+                        },
+                        timestamp_evidence: Vec::new(),
+                        warnings: Vec::new(),
+                    },
+                    Some(error.to_string()),
+                ));
+            }
+        }
+    }
+
+    let satisfying = evaluated
+        .iter()
+        .filter(|(_, authenticity, _)| authenticity.policy.satisfied)
+        .collect::<Vec<_>>();
+    if satisfying.len() == 1 {
+        let (candidate, authenticity, _) = satisfying[0];
+        return Ok(ArchiveContext {
+            candidate: (*candidate).clone(),
+            authenticity: (*authenticity).clone(),
+            source: "embedded".to_string(),
+            use_manifest_wide_shard_selection: false,
+        });
+    }
+    if satisfying.len() > 1 {
+        return Err(err(
+            "Multiple shard cohorts satisfy archive policy. Provide the manifest bundle, canonical manifest, or signer pins to disambiguate.",
+        ));
+    }
+    if candidates.len() == 1 {
+        return Err(err(evaluated[0].1.policy.reason.clone()));
+    }
+    Err(err("No shard cohort satisfies archive policy."))
+}
+
 fn assert_manifest_matches_qenc_metadata(
-    parsed_manifest: &ParsedArchiveManifest,
+    manifest_bytes: &[u8],
     qenc_meta_json: &crate::qenc::QencMetadata,
 ) -> Result<()> {
+    let parsed_manifest = parse_archive_manifest_bytes(manifest_bytes)?;
     let manifest = &parsed_manifest.manifest;
+
     ensure_equal(
         &manifest.qenc.hash_alg,
         &"SHA3-512".to_string(),

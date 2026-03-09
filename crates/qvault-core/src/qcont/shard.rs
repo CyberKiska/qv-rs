@@ -1,17 +1,23 @@
 use serde::{Deserialize, Serialize};
 
+use crate::auth::AuthPolicyLevel;
 use crate::bytes::to_hex;
 use crate::error::{err, Result};
 use crate::hash::sha3_512;
-use crate::manifest::{parse_archive_manifest_bytes, ParsedArchiveManifest};
+use crate::manifest::{
+    assert_auth_policy_commitment, parse_archive_manifest_bytes, parse_manifest_bundle_bytes,
+    ParsedArchiveManifest, ParsedManifestBundle,
+};
 use crate::qenc::{parse_qenc_metadata_bytes, QencMetadata};
 
 const QCONT_MAGIC: &[u8; 4] = b"QVC1";
-const QCONT_FORMAT_VERSION: &str = "QVqcont-5";
+pub const QCONT_FORMAT_VERSION: &str = "QVqcont-6";
+pub const LEGACY_QCONT_FORMAT_VERSION: &str = "QVqcont-5";
 const KEY_COMMITMENT_MAX_LEN: usize = 32;
-const MANIFEST_DIGEST_LEN: usize = 64;
+const DIGEST_LEN: usize = 64;
 const MAX_META_LEN: usize = 16 * 1024;
 const MAX_MANIFEST_LEN: usize = 1024 * 1024;
+const MAX_BUNDLE_LEN: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QcontShardAlgorithmMetadata {
@@ -71,7 +77,11 @@ pub struct QcontShardMetadata {
     pub encap_blob_hash: String,
     #[serde(rename = "privateKeyHash")]
     pub private_key_hash: String,
-    #[serde(rename = "payloadLength", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "payloadLength",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
     pub payload_length: Option<u64>,
     #[serde(rename = "originalLength")]
     pub original_length: u64,
@@ -91,6 +101,12 @@ pub struct QcontShardMetadata {
     pub has_embedded_manifest: bool,
     #[serde(rename = "manifestDigest")]
     pub manifest_digest: String,
+    #[serde(rename = "hasEmbeddedBundle")]
+    pub has_embedded_bundle: bool,
+    #[serde(rename = "bundleDigest")]
+    pub bundle_digest: String,
+    #[serde(rename = "authPolicyLevel")]
+    pub auth_policy_level: AuthPolicyLevel,
     #[serde(
         rename = "shareCommitments",
         skip_serializing_if = "Option::is_none",
@@ -119,6 +135,9 @@ pub struct QcontShard {
     pub manifest_bytes: Vec<u8>,
     pub manifest_digest_hex: String,
     pub parsed_manifest: ParsedArchiveManifest,
+    pub bundle_bytes: Vec<u8>,
+    pub bundle_digest_hex: String,
+    pub parsed_bundle: ParsedManifestBundle,
     pub encapsulated_key: Vec<u8>,
     pub iv: [u8; 12],
     pub salt: [u8; 16],
@@ -137,6 +156,7 @@ impl std::fmt::Debug for QcontShard {
             .field("shard_index", &self.shard_index)
             .field("container_id", &self.meta_json.container_id)
             .field("manifest_digest_hex", &self.manifest_digest_hex)
+            .field("bundle_digest_hex", &self.bundle_digest_hex)
             .field("share_len", &self.share.len())
             .field("fragments_len", &self.fragments.len())
             .field("diagnostics", &self.diagnostics)
@@ -197,6 +217,11 @@ fn parse_qcont_shard_unsafe(bytes: &[u8]) -> Result<QcontShard> {
     let meta_bytes = read_bytes(bytes, &mut offset, meta_len, "metaJSON")?.to_vec();
     let meta_json: QcontShardMetadata = serde_json::from_slice(&meta_bytes)
         .map_err(|error| err(format!("Invalid shard metadata JSON: {error}")))?;
+    if meta_json.alg.fmt == LEGACY_QCONT_FORMAT_VERSION {
+        return Err(err(
+            "Legacy .qcont format is not supported. Rebuild the archive with the new manifest bundle format.",
+        ));
+    }
     if meta_json.alg.fmt != QCONT_FORMAT_VERSION {
         return Err(err(format!(
             "Unsupported shard format: expected {QCONT_FORMAT_VERSION}, got {}",
@@ -209,14 +234,43 @@ fn parse_qcont_shard_unsafe(bytes: &[u8]) -> Result<QcontShard> {
         return Err(err("Invalid embedded manifest length"));
     }
     let manifest_bytes = read_bytes(bytes, &mut offset, manifest_len, "manifest bytes")?.to_vec();
-    let manifest_digest_bytes =
-        read_bytes(bytes, &mut offset, MANIFEST_DIGEST_LEN, "manifest digest")?;
+    let manifest_digest_bytes = read_bytes(bytes, &mut offset, DIGEST_LEN, "manifest digest")?;
     let computed_manifest_digest = sha3_512(&manifest_bytes);
     if manifest_digest_bytes != computed_manifest_digest {
         return Err(err("Embedded manifest digest mismatch"));
     }
-    let manifest_digest_hex = to_hex(&manifest_digest_bytes);
+    let manifest_digest_hex = to_hex(manifest_digest_bytes);
     let parsed_manifest = parse_archive_manifest_bytes(&manifest_bytes)?;
+
+    let bundle_len = read_u32(bytes, &mut offset, "bundle length")? as usize;
+    if bundle_len == 0 || bundle_len > MAX_BUNDLE_LEN {
+        return Err(err("Invalid embedded bundle length"));
+    }
+    let bundle_bytes = read_bytes(bytes, &mut offset, bundle_len, "bundle bytes")?.to_vec();
+    let bundle_digest_bytes = read_bytes(bytes, &mut offset, DIGEST_LEN, "bundle digest")?;
+    let computed_bundle_digest = sha3_512(&bundle_bytes);
+    if bundle_digest_bytes != computed_bundle_digest {
+        return Err(err("Embedded bundle digest mismatch"));
+    }
+    let bundle_digest_hex = to_hex(bundle_digest_bytes);
+    let parsed_bundle = parse_manifest_bundle_bytes(&bundle_bytes, true)?;
+    if parsed_bundle.digest_hex != bundle_digest_hex {
+        return Err(err("Embedded bundle digest mismatch"));
+    }
+    if parsed_bundle.manifest_bytes != parsed_manifest.bytes {
+        return Err(err(
+            "Embedded bundle manifest does not match embedded manifest bytes",
+        ));
+    }
+    if parsed_bundle.manifest_digest_hex != parsed_manifest.digest_hex {
+        return Err(err(
+            "Embedded bundle manifestDigest does not match embedded manifest digest",
+        ));
+    }
+    let _ = assert_auth_policy_commitment(
+        &parsed_manifest.manifest.auth_policy_commitment,
+        &parsed_bundle.bundle.auth_policy,
+    )?;
 
     let encap_len = read_u32(bytes, &mut offset, "encapsulatedKey length")? as usize;
     if encap_len == 0 {
@@ -248,11 +302,8 @@ fn parse_qcont_shard_unsafe(bytes: &[u8]) -> Result<QcontShard> {
     }
     let key_commit_bytes = read_bytes(bytes, &mut offset, key_commitment_len, "key commitment")?;
     let mut key_commit = [0u8; 32];
-    key_commit.copy_from_slice(&key_commit_bytes);
-    if meta_json.key_commitment_hex.is_empty() {
-        return Err(err("Shard metadata is missing keyCommitmentHex"));
-    }
-    if meta_json.key_commitment_hex.to_lowercase() != to_hex(&key_commit) {
+    key_commit.copy_from_slice(key_commit_bytes);
+    if meta_json.key_commitment_hex.to_ascii_lowercase() != to_hex(&key_commit) {
         return Err(err("Shard metadata keyCommitmentHex mismatch"));
     }
 
@@ -262,7 +313,6 @@ fn parse_qcont_shard_unsafe(bytes: &[u8]) -> Result<QcontShard> {
         return Err(err("Invalid Shamir share length"));
     }
     let share = read_bytes(bytes, &mut offset, share_len, "Shamir share")?.to_vec();
-
     if offset >= bytes.len() {
         return Err(err("Shard fragment payload is empty"));
     }
@@ -274,6 +324,9 @@ fn parse_qcont_shard_unsafe(bytes: &[u8]) -> Result<QcontShard> {
         manifest_bytes,
         manifest_digest_hex,
         parsed_manifest,
+        bundle_bytes,
+        bundle_digest_hex,
+        parsed_bundle,
         encapsulated_key,
         iv,
         salt,
@@ -318,7 +371,7 @@ fn read_bytes<'a>(
     if *offset + length > bytes.len() {
         return Err(err(format!("{field} is truncated")));
     }
-    let output = &bytes[*offset..*offset + length];
+    let out = &bytes[*offset..*offset + length];
     *offset += length;
-    Ok(output)
+    Ok(out)
 }

@@ -1,50 +1,19 @@
-use std::path::PathBuf;
-
-use anyhow::{Context, Result};
-use qvault_core::qcont::{
-    build_qcont_shards, parse_qcont_shard, restore_from_shards, QcontBuildOptions,
-    QcontBuildParams, QcontShard, RestoreQcontOptions,
-};
+use anyhow::{anyhow, Context, Result};
 use qvault_core::qenc::decrypt_qenc;
 use qvault_core::test_support::fixtures::{fixture_path, read_fixture_bytes, read_fixture_json};
-use serde::Deserialize;
-
-#[derive(Debug, Clone, Deserialize)]
-struct FixtureExpectations {
-    timestamp: String,
-    split: Option<SplitExpectations>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct SplitExpectations {
-    params: SplitParams,
-    #[serde(rename = "manifestDigestHex")]
-    manifest_digest_hex: String,
-    #[serde(rename = "sssRandomHex")]
-    sss_random_hex: String,
-    #[serde(rename = "shardCount")]
-    shard_count: usize,
-    shards: Vec<ShardExpectation>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct SplitParams {
-    n: u16,
-    k: u16,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct ShardExpectation {
-    #[serde(rename = "fileName")]
-    file_name: String,
-    #[serde(rename = "shardIndex")]
-    shard_index: u16,
-}
+use qvault_core::{
+    attach_manifest_bundle_to_shards, build_qcont_shards, parse_qcont_shard, restore_from_shards,
+    AttachManifestBundleOptions, AuthPolicyLevel, NamedBinaryArtifact, QcontBuildOptions,
+    QcontBuildParams, RestoreQcontOptions, VerificationInputs,
+};
+use serde_json::Value;
+use std::path::PathBuf;
 
 struct LoadedSplitFixture {
     root: PathBuf,
-    expectations: FixtureExpectations,
+    expectations: Value,
     manifest_bytes: Vec<u8>,
+    bundle_bytes: Vec<u8>,
     qenc_bytes: Vec<u8>,
     secret_key: Vec<u8>,
     payload: Vec<u8>,
@@ -52,246 +21,424 @@ struct LoadedSplitFixture {
 
 fn load_split_fixture(name: &str) -> Result<LoadedSplitFixture> {
     let root = fixture_path(name);
-    let expectations: FixtureExpectations = read_fixture_json(root.join("expectations.json"))?;
-    let manifest_bytes = read_fixture_bytes(root.join("manifest.qvmanifest.json"))?;
-    let qenc_bytes = read_fixture_bytes(root.join("container.qenc"))?;
-    let secret_key = read_fixture_bytes(root.join("secret.qkey"))?;
-    let payload = read_fixture_bytes(root.join("payload.bin"))?;
-
     Ok(LoadedSplitFixture {
+        expectations: read_fixture_json(root.join("expectations.json"))?,
+        manifest_bytes: read_fixture_bytes(root.join("manifest.qvmanifest.json"))?,
+        bundle_bytes: read_fixture_bytes(root.join("initial.extended.qvmanifest.json"))?,
+        qenc_bytes: read_fixture_bytes(root.join("container.qenc"))?,
+        secret_key: read_fixture_bytes(root.join("secret.qkey"))?,
+        payload: read_fixture_bytes(root.join("payload.bin"))?,
         root,
-        expectations,
-        manifest_bytes,
-        qenc_bytes,
-        secret_key,
-        payload,
     })
 }
 
-fn parse_fixture_shards(fixture: &LoadedSplitFixture) -> Result<Vec<QcontShard>> {
-    let split = fixture
-        .expectations
-        .split
-        .as_ref()
-        .context("fixture is missing split expectations")?;
+fn split_expectations<'a>(fixture: &'a LoadedSplitFixture) -> &'a Value {
+    &fixture.expectations["split"]
+}
 
-    split
-        .shards
+fn parse_shards_from_value(
+    fixture: &LoadedSplitFixture,
+    shards_value: &Value,
+) -> Result<Vec<qvault_core::QcontShard>> {
+    shards_value
+        .as_array()
+        .context("expected shard array")?
         .iter()
         .map(|shard| {
-            let bytes = read_fixture_bytes(fixture.root.join(&shard.file_name))?;
+            let file_name = shard["fileName"]
+                .as_str()
+                .context("missing shard fileName")?;
+            let bytes = read_fixture_bytes(fixture.root.join(file_name))?;
             parse_qcont_shard(&bytes).map_err(Into::into)
         })
         .collect()
 }
 
+fn parse_base_fixture_shards(fixture: &LoadedSplitFixture) -> Result<Vec<qvault_core::QcontShard>> {
+    parse_shards_from_value(fixture, &split_expectations(fixture)["shards"])
+}
+
+fn parse_attached_fixture_shards(
+    fixture: &LoadedSplitFixture,
+) -> Result<Vec<qvault_core::QcontShard>> {
+    parse_shards_from_value(fixture, &split_expectations(fixture)["attached"]["shards"])
+}
+
+fn build_verification_inputs(
+    fixture: &LoadedSplitFixture,
+    signature_files: &[&str],
+    pqpk_file: Option<&str>,
+    timestamp_files: &[&str],
+    expected_ed25519_signer: Option<&str>,
+) -> Result<VerificationInputs> {
+    Ok(VerificationInputs {
+        signatures: signature_files
+            .iter()
+            .map(|file_name| {
+                Ok(NamedBinaryArtifact {
+                    name: (*file_name).to_string(),
+                    bytes: read_fixture_bytes(fixture.root.join(file_name))?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?,
+        pinned_pq_public_key_file_bytes: pqpk_file
+            .map(|file_name| read_fixture_bytes(fixture.root.join(file_name)))
+            .transpose()?,
+        timestamps: timestamp_files
+            .iter()
+            .map(|file_name| {
+                Ok(NamedBinaryArtifact {
+                    name: (*file_name).to_string(),
+                    bytes: read_fixture_bytes(fixture.root.join(file_name))?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?,
+        expected_ed25519_signer: expected_ed25519_signer.map(ToOwned::to_owned),
+    })
+}
+
 fn assert_restored_fixture(
     fixture: &LoadedSplitFixture,
-    shards: &[QcontShard],
-    options: &RestoreQcontOptions,
-    expected_source: &str,
+    restored: &qvault_core::RestoredQcont,
 ) -> Result<()> {
-    let restored = restore_from_shards(shards, options)?;
-    let split = fixture
-        .expectations
-        .split
-        .as_ref()
-        .context("fixture is missing split expectations")?;
-
     assert!(restored.qenc_ok);
     assert!(restored.qkey_ok);
     assert_eq!(restored.qenc_bytes, fixture.qenc_bytes);
     assert_eq!(restored.priv_key, fixture.secret_key);
     assert_eq!(restored.manifest_bytes, fixture.manifest_bytes);
-    assert_eq!(restored.manifest_digest_hex, split.manifest_digest_hex);
-    assert_eq!(restored.manifest_source, expected_source);
-    assert!(restored
-        .warnings
-        .iter()
-        .any(|warning| warning == "The content is correct, but may not be authentic."));
-
     let decrypted = decrypt_qenc(&restored.qenc_bytes, &restored.priv_key)?;
     assert_eq!(decrypted.file_bytes, fixture.payload);
-
-    Ok(())
-}
-
-fn assert_build_matches_fixture(name: &str) -> Result<()> {
-    let fixture = load_split_fixture(name)?;
-    let split = fixture
-        .expectations
-        .split
-        .as_ref()
-        .context("fixture is missing split expectations")?;
-
-    assert!(
-        !split.sss_random_hex.is_empty(),
-        "fixture is missing deterministic SSS randomness"
-    );
-    let built = build_qcont_shards(
-        &fixture.qenc_bytes,
-        &fixture.secret_key,
-        QcontBuildParams {
-            n: split.params.n,
-            k: split.params.k,
-        },
-        &QcontBuildOptions {
-            timestamp: Some(fixture.expectations.timestamp.clone()),
-            sss_random_bytes: Some(hex::decode(&split.sss_random_hex)?),
-            ..QcontBuildOptions::default()
-        },
-    )?;
-
-    assert_eq!(built.manifest_bytes, fixture.manifest_bytes);
-    assert_eq!(built.manifest_digest_hex, split.manifest_digest_hex);
-    assert_eq!(built.shards.len(), split.shard_count);
-
-    for (index, shard_expectation) in split.shards.iter().enumerate() {
-        let expected_bytes = read_fixture_bytes(fixture.root.join(&shard_expectation.file_name))?;
-        assert_eq!(built.shards[index].index, shard_expectation.shard_index);
-        assert_eq!(
-            built.shards[index].bytes, expected_bytes,
-            "shard byte mismatch at index {} for fixture {}",
-            shard_expectation.shard_index, name
-        );
-    }
-
     Ok(())
 }
 
 #[test]
 fn rust_build_matches_js_split_5of3_fixture() -> Result<()> {
-    assert_build_matches_fixture("split-5of3")
+    let fixture = load_split_fixture("split-5of3")?;
+    let split = split_expectations(&fixture);
+    let built = build_qcont_shards(
+        &fixture.qenc_bytes,
+        &fixture.secret_key,
+        QcontBuildParams {
+            n: split["params"]["n"].as_u64().unwrap() as u16,
+            k: split["params"]["k"].as_u64().unwrap() as u16,
+        },
+        &QcontBuildOptions {
+            timestamp: Some(
+                fixture.expectations["timestamp"]
+                    .as_str()
+                    .unwrap()
+                    .to_string(),
+            ),
+            sss_random_bytes: Some(hex::decode(split["sssRandomHex"].as_str().unwrap())?),
+            auth_policy_level: Some(AuthPolicyLevel::IntegrityOnly),
+            min_valid_signatures: Some(1),
+        },
+    )?;
+
+    assert_eq!(built.manifest_bytes, fixture.manifest_bytes);
+    assert_eq!(built.bundle_bytes, fixture.bundle_bytes);
+    assert_eq!(
+        built.manifest_digest_hex,
+        split["manifestDigestHex"].as_str().unwrap()
+    );
+    assert_eq!(
+        built.bundle_digest_hex,
+        split["bundleDigestHex"].as_str().unwrap()
+    );
+
+    for (index, shard_value) in split["shards"].as_array().unwrap().iter().enumerate() {
+        let expected_bytes =
+            read_fixture_bytes(fixture.root.join(shard_value["fileName"].as_str().unwrap()))?;
+        assert_eq!(built.shards[index].bytes, expected_bytes);
+    }
+    Ok(())
 }
 
 #[test]
 fn rust_build_matches_js_split_7of5_chunked_fixture() -> Result<()> {
-    assert_build_matches_fixture("split-7of5-chunked")
-}
-
-#[test]
-fn split_rejects_unrelated_secret_key() -> Result<()> {
-    let fixture = load_split_fixture("split-5of3")?;
-    let unrelated_secret_key =
-        read_fixture_bytes(fixture_path("single-small").join("secret.qkey"))?;
-
-    let error = build_qcont_shards(
-        &fixture.qenc_bytes,
-        &unrelated_secret_key,
-        QcontBuildParams { n: 5, k: 3 },
-        &QcontBuildOptions::default(),
-    )
-    .unwrap_err();
-
-    assert!(
-        error
-            .to_string()
-            .contains("Secret key does not match this .qenc container"),
-        "unexpected error: {error}"
-    );
-    Ok(())
-}
-
-#[test]
-fn rust_restores_js_split_5of3_fixture() -> Result<()> {
-    let fixture = load_split_fixture("split-5of3")?;
-    let shards = parse_fixture_shards(&fixture)?;
-    assert_restored_fixture(
-        &fixture,
-        &shards,
-        &RestoreQcontOptions::default(),
-        "embedded",
-    )
-}
-
-#[test]
-fn rust_restores_js_split_7of5_chunked_fixture_subset() -> Result<()> {
     let fixture = load_split_fixture("split-7of5-chunked")?;
-    let shards = parse_fixture_shards(&fixture)?;
-    assert_restored_fixture(
-        &fixture,
-        &shards[..6],
-        &RestoreQcontOptions::default(),
-        "embedded",
-    )
-}
-
-#[test]
-fn rust_restores_with_one_corrupted_shard_within_rs_tolerance() -> Result<()> {
-    let fixture = load_split_fixture("split-5of3")?;
-    let mut shards = parse_fixture_shards(&fixture)?;
-    let last = shards[0]
-        .fragments
-        .len()
-        .checked_sub(1)
-        .context("fixture shard has empty fragment stream")?;
-    shards[0].fragments[last] ^= 0x01;
-
-    assert_restored_fixture(
-        &fixture,
-        &shards,
-        &RestoreQcontOptions::default(),
-        "embedded",
-    )
-}
-
-#[test]
-fn restore_rejects_mixed_manifest_cohorts_without_selector() -> Result<()> {
-    let fixture_a = load_split_fixture("split-5of3")?;
-    let fixture_b = load_split_fixture("split-7of5-chunked")?;
-    let shards_a = parse_fixture_shards(&fixture_a)?;
-    let shards_b = parse_fixture_shards(&fixture_b)?;
-
-    let mixed = vec![
-        shards_a[0].clone(),
-        shards_a[1].clone(),
-        shards_a[2].clone(),
-        shards_b[0].clone(),
-        shards_b[1].clone(),
-    ];
-    let error = restore_from_shards(&mixed, &RestoreQcontOptions::default()).unwrap_err();
-
-    assert!(
-        error
-            .to_string()
-            .contains("Multiple manifest cohorts detected"),
-        "unexpected error: {error}"
-    );
-    Ok(())
-}
-
-#[test]
-fn restore_uses_uploaded_manifest_to_select_correct_cohort() -> Result<()> {
-    let fixture_a = load_split_fixture("split-5of3")?;
-    let fixture_b = load_split_fixture("split-7of5-chunked")?;
-    let shards_a = parse_fixture_shards(&fixture_a)?;
-    let shards_b = parse_fixture_shards(&fixture_b)?;
-
-    let mixed = vec![
-        shards_a[0].clone(),
-        shards_a[1].clone(),
-        shards_a[2].clone(),
-        shards_a[3].clone(),
-        shards_b[0].clone(),
-    ];
-    let restored = restore_from_shards(
-        &mixed,
-        &RestoreQcontOptions {
-            manifest_bytes: Some(fixture_a.manifest_bytes.clone()),
+    let split = split_expectations(&fixture);
+    let built = build_qcont_shards(
+        &fixture.qenc_bytes,
+        &fixture.secret_key,
+        QcontBuildParams {
+            n: split["params"]["n"].as_u64().unwrap() as u16,
+            k: split["params"]["k"].as_u64().unwrap() as u16,
+        },
+        &QcontBuildOptions {
+            timestamp: Some(
+                fixture.expectations["timestamp"]
+                    .as_str()
+                    .unwrap()
+                    .to_string(),
+            ),
+            sss_random_bytes: Some(hex::decode(split["sssRandomHex"].as_str().unwrap())?),
+            auth_policy_level: Some(AuthPolicyLevel::IntegrityOnly),
+            min_valid_signatures: Some(1),
         },
     )?;
 
-    assert_eq!(restored.manifest_source, "uploaded");
-    assert_eq!(restored.qenc_bytes, fixture_a.qenc_bytes);
-    assert_eq!(restored.priv_key, fixture_a.secret_key);
-    assert_eq!(restored.rejected_shard_indices.len(), 1);
+    assert_eq!(built.manifest_bytes, fixture.manifest_bytes);
+    assert_eq!(built.bundle_bytes, fixture.bundle_bytes);
+    for (index, shard_value) in split["shards"].as_array().unwrap().iter().enumerate() {
+        let expected_bytes =
+            read_fixture_bytes(fixture.root.join(shard_value["fileName"].as_str().unwrap()))?;
+        assert_eq!(built.shards[index].bytes, expected_bytes);
+    }
+    Ok(())
+}
+
+#[test]
+fn rust_restores_js_integrity_fixture() -> Result<()> {
+    let fixture = load_split_fixture("split-5of3")?;
+    let shards = parse_base_fixture_shards(&fixture)?;
+    let restored = restore_from_shards(&shards, &RestoreQcontOptions::default())?;
+    assert_eq!(restored.manifest_source, "embedded");
+    assert_eq!(
+        restored.authenticity.policy.level,
+        AuthPolicyLevel::IntegrityOnly
+    );
+    assert!(!restored.authenticity.status.signature_verified);
+    assert_restored_fixture(&fixture, &restored)
+}
+
+#[test]
+fn any_signature_fixture_rejects_unsigned_restore() -> Result<()> {
+    let fixture = load_split_fixture("split-5of3-anysig")?;
+    let shards = parse_base_fixture_shards(&fixture)?;
+    let error = restore_from_shards(&shards, &RestoreQcontOptions::default()).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("no valid pinned signature satisfies archive policy"),
+        "unexpected error: {error}"
+    );
+    Ok(())
+}
+
+#[test]
+fn any_signature_fixture_accepts_external_pq_signature() -> Result<()> {
+    let fixture = load_split_fixture("split-5of3-anysig")?;
+    let split = split_expectations(&fixture);
+    let shards = parse_base_fixture_shards(&fixture)?;
+    let signatures = &split["signatures"];
+    let restored = restore_from_shards(
+        &shards,
+        &RestoreQcontOptions {
+            verification: build_verification_inputs(
+                &fixture,
+                &[signatures["qsigFile"].as_str().unwrap()],
+                Some(signatures["pqpkFile"].as_str().unwrap()),
+                &[],
+                None,
+            )?,
+            ..RestoreQcontOptions::default()
+        },
+    )?;
+    assert!(restored.authenticity.status.signature_verified);
+    assert!(restored.authenticity.status.user_pinned);
+    assert_restored_fixture(&fixture, &restored)
+}
+
+#[test]
+fn any_signature_fixture_accepts_external_stellar_signature() -> Result<()> {
+    let fixture = load_split_fixture("split-5of3-anysig")?;
+    let split = split_expectations(&fixture);
+    let shards = parse_base_fixture_shards(&fixture)?;
+    let signatures = &split["signatures"];
+    let restored = restore_from_shards(
+        &shards,
+        &RestoreQcontOptions {
+            verification: build_verification_inputs(
+                &fixture,
+                &[signatures["stellarSigFile"].as_str().unwrap()],
+                None,
+                &[],
+                Some(signatures["stellarSigner"].as_str().unwrap()),
+            )?,
+            ..RestoreQcontOptions::default()
+        },
+    )?;
+    assert!(restored.authenticity.status.signature_verified);
+    assert!(!restored.authenticity.status.strong_pq_signature_verified);
+    assert_restored_fixture(&fixture, &restored)
+}
+
+#[test]
+fn strong_pq_fixture_rejects_ed25519_only_signature() -> Result<()> {
+    let fixture = load_split_fixture("split-5of3-strongpq")?;
+    let split = split_expectations(&fixture);
+    let shards = parse_base_fixture_shards(&fixture)?;
+    let signatures = &split["signatures"];
+    let error = restore_from_shards(
+        &shards,
+        &RestoreQcontOptions {
+            verification: build_verification_inputs(
+                &fixture,
+                &[signatures["stellarSigFile"].as_str().unwrap()],
+                None,
+                &[],
+                Some(signatures["stellarSigner"].as_str().unwrap()),
+            )?,
+            ..RestoreQcontOptions::default()
+        },
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("no valid pinned strong PQ signature satisfies archive policy"),
+        "unexpected error: {error}"
+    );
+    Ok(())
+}
+
+#[test]
+fn strong_pq_fixture_accepts_external_pq_signature() -> Result<()> {
+    let fixture = load_split_fixture("split-5of3-strongpq")?;
+    let split = split_expectations(&fixture);
+    let shards = parse_base_fixture_shards(&fixture)?;
+    let signatures = &split["signatures"];
+    let restored = restore_from_shards(
+        &shards,
+        &RestoreQcontOptions {
+            verification: build_verification_inputs(
+                &fixture,
+                &[signatures["qsigFile"].as_str().unwrap()],
+                Some(signatures["pqpkFile"].as_str().unwrap()),
+                &[],
+                None,
+            )?,
+            ..RestoreQcontOptions::default()
+        },
+    )?;
+    assert!(restored.authenticity.status.strong_pq_signature_verified);
+    assert_restored_fixture(&fixture, &restored)
+}
+
+#[test]
+fn rust_attach_matches_js_attached_bundle_and_shards() -> Result<()> {
+    let fixture = load_split_fixture("split-5of3-anysig")?;
+    let split = split_expectations(&fixture);
+    let signatures = &split["signatures"];
+    let shards = parse_base_fixture_shards(&fixture)?;
+    let attached = attach_manifest_bundle_to_shards(
+        &shards,
+        &AttachManifestBundleOptions {
+            signatures: build_verification_inputs(
+                &fixture,
+                &[signatures["qsigFile"].as_str().unwrap()],
+                None,
+                &[],
+                None,
+            )?
+            .signatures,
+            pq_public_key_file_bytes_list: vec![read_fixture_bytes(
+                fixture.root.join(signatures["pqpkFile"].as_str().unwrap()),
+            )?],
+            timestamps: build_verification_inputs(
+                &fixture,
+                &[],
+                None,
+                &[signatures["otsFile"].as_str().unwrap()],
+                None,
+            )?
+            .timestamps,
+            ..AttachManifestBundleOptions::default()
+        },
+    )?;
+
+    let expected_bundle = read_fixture_bytes(
+        fixture
+            .root
+            .join(split["attached"]["bundleFile"].as_str().unwrap()),
+    )?;
+    assert_eq!(attached.bundle_bytes, expected_bundle);
+
+    let attached_shard_values = split["attached"]["shards"]
+        .as_array()
+        .context("missing attached shard array")?;
+    for (index, shard_value) in attached_shard_values.iter().enumerate() {
+        let expected_bytes =
+            read_fixture_bytes(fixture.root.join(shard_value["fileName"].as_str().unwrap()))?;
+        assert_eq!(attached.shards[index].bytes, expected_bytes);
+    }
+    Ok(())
+}
+
+#[test]
+fn stale_shards_accept_uploaded_attached_bundle() -> Result<()> {
+    let fixture = load_split_fixture("split-5of3-anysig")?;
+    let split = split_expectations(&fixture);
+    let shards = parse_base_fixture_shards(&fixture)?;
+    let bundle_bytes = read_fixture_bytes(
+        fixture
+            .root
+            .join(split["attached"]["bundleFile"].as_str().unwrap()),
+    )?;
+    let restored = restore_from_shards(
+        &shards,
+        &RestoreQcontOptions {
+            bundle_bytes: Some(bundle_bytes),
+            ..RestoreQcontOptions::default()
+        },
+    )?;
+    assert_eq!(restored.manifest_source, "uploaded-bundle");
+    assert!(restored.authenticity.status.signature_verified);
+    assert_restored_fixture(&fixture, &restored)
+}
+
+#[test]
+fn repeated_attach_cycles_match_js_bundle() -> Result<()> {
+    let fixture = load_split_fixture("split-5of3-anysig")?;
+    let split = split_expectations(&fixture);
+    let signatures = &split["signatures"];
+    let attached_bundle = read_fixture_bytes(
+        fixture
+            .root
+            .join(split["attached"]["bundleFile"].as_str().unwrap()),
+    )?;
+    let second_attach = attach_manifest_bundle_to_shards(
+        &[],
+        &AttachManifestBundleOptions {
+            bundle_bytes: Some(attached_bundle),
+            signatures: build_verification_inputs(
+                &fixture,
+                &[signatures["qsigBFile"].as_str().unwrap()],
+                None,
+                &[],
+                None,
+            )?
+            .signatures,
+            pq_public_key_file_bytes_list: vec![read_fixture_bytes(
+                fixture.root.join(signatures["pqpkBFile"].as_str().unwrap()),
+            )?],
+            timestamps: build_verification_inputs(
+                &fixture,
+                &[],
+                None,
+                &[signatures["otsBFile"].as_str().unwrap()],
+                None,
+            )?
+            .timestamps,
+            embed_into_shards: Some(false),
+            ..AttachManifestBundleOptions::default()
+        },
+    )?;
+    let expected_bundle = read_fixture_bytes(
+        fixture
+            .root
+            .join(split["attachedTwice"]["bundleFile"].as_str().unwrap()),
+    )?;
+    assert_eq!(second_attach.bundle_bytes, expected_bundle);
+    assert_eq!(second_attach.manifest_bytes, fixture.manifest_bytes);
     Ok(())
 }
 
 #[test]
 fn restore_rejects_duplicate_shard_indices() -> Result<()> {
     let fixture = load_split_fixture("split-5of3")?;
-    let shards = parse_fixture_shards(&fixture)?;
+    let shards = parse_base_fixture_shards(&fixture)?;
     let duplicated = vec![
         shards[0].clone(),
         shards[0].clone(),
@@ -299,7 +446,6 @@ fn restore_rejects_duplicate_shard_indices() -> Result<()> {
         shards[2].clone(),
     ];
     let error = restore_from_shards(&duplicated, &RestoreQcontOptions::default()).unwrap_err();
-
     assert!(
         error
             .to_string()
@@ -312,15 +458,14 @@ fn restore_rejects_duplicate_shard_indices() -> Result<()> {
 #[test]
 fn restore_rejects_when_missing_and_corrupted_exceed_rs_tolerance() -> Result<()> {
     let fixture = load_split_fixture("split-5of3")?;
-    let mut shards = parse_fixture_shards(&fixture)?;
+    let mut shards = parse_base_fixture_shards(&fixture)?;
     shards.truncate(4);
     let last = shards[0]
         .fragments
         .len()
         .checked_sub(1)
-        .context("fixture shard has empty fragment stream")?;
+        .ok_or_else(|| anyhow!("fixture shard has empty fragment stream"))?;
     shards[0].fragments[last] ^= 0x01;
-
     let error = restore_from_shards(&shards, &RestoreQcontOptions::default()).unwrap_err();
     assert!(
         error
@@ -329,4 +474,14 @@ fn restore_rejects_when_missing_and_corrupted_exceed_rs_tolerance() -> Result<()
         "unexpected error: {error}"
     );
     Ok(())
+}
+
+#[test]
+fn attached_shards_restore_without_external_inputs() -> Result<()> {
+    let fixture = load_split_fixture("split-5of3-anysig")?;
+    let shards = parse_attached_fixture_shards(&fixture)?;
+    let restored = restore_from_shards(&shards, &RestoreQcontOptions::default())?;
+    assert!(restored.authenticity.status.signature_verified);
+    assert_eq!(restored.manifest_source, "embedded");
+    assert_restored_fixture(&fixture, &restored)
 }

@@ -1,7 +1,9 @@
 use anyhow::Result;
 use serde_json::Value;
 
-use qvault_core::manifest::{canonicalize_archive_manifest, ArchiveManifest};
+use qvault_core::manifest::{
+    canonicalize_archive_manifest, canonicalize_manifest_bundle, ArchiveManifest, ManifestBundle,
+};
 use qvault_core::qcont::{parse_qcont_shard, parse_qcont_shard_non_strict};
 use qvault_core::qenc::parse_qenc_header;
 use qvault_core::test_support::deterministic::{
@@ -88,8 +90,24 @@ fn canonicalizes_manifest_exactly_like_js_oracle() -> Result<()> {
 }
 
 #[test]
-fn parses_qcont_shard_fixture() -> Result<()> {
-    let fixture_dir = fixture_path("split-5of3");
+fn canonicalizes_manifest_bundle_exactly_like_js_oracle() -> Result<()> {
+    let fixture_dir = fixture_path("split-5of3-anysig");
+    let expectations: Value = read_fixture_json(fixture_dir.join("expectations.json"))?;
+    let bundle_bytes = read_fixture_bytes(fixture_dir.join("initial.extended.qvmanifest.json"))?;
+    let bundle: ManifestBundle = serde_json::from_value(expectations["split"]["bundle"].clone())?;
+
+    let canonicalized = canonicalize_manifest_bundle(&bundle)?;
+    assert_eq!(canonicalized.bytes, bundle_bytes);
+    assert_eq!(
+        canonicalized.digest_hex,
+        expectations["split"]["bundleDigestHex"].as_str().unwrap()
+    );
+    Ok(())
+}
+
+#[test]
+fn parses_qcont_v6_shard_fixture() -> Result<()> {
+    let fixture_dir = fixture_path("split-5of3-anysig");
     let expectations: Value = read_fixture_json(fixture_dir.join("expectations.json"))?;
     let shard_name = expectations["split"]["shards"][0]["fileName"]
         .as_str()
@@ -100,6 +118,10 @@ fn parses_qcont_shard_fixture() -> Result<()> {
     assert_eq!(
         parsed.manifest_digest_hex,
         expectations["split"]["manifestDigestHex"].as_str().unwrap()
+    );
+    assert_eq!(
+        parsed.bundle_digest_hex,
+        expectations["split"]["bundleDigestHex"].as_str().unwrap()
     );
     assert_eq!(
         parsed.shard_index as u64,
@@ -119,7 +141,8 @@ fn parses_qcont_shard_fixture() -> Result<()> {
             .as_str()
             .unwrap()
     );
-    assert_eq!(parsed.meta_json.has_key_commitment, true);
+    assert!(parsed.meta_json.has_key_commitment);
+    assert!(parsed.meta_json.has_embedded_bundle);
     assert!(!parsed.fragments.is_empty());
     Ok(())
 }

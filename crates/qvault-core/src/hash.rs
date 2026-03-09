@@ -1,4 +1,15 @@
+use sha2::{Digest, Sha256};
 use tiny_keccak::{Hasher, Sha3};
+
+pub fn sha256(bytes: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hasher.finalize().into()
+}
+
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    hex::encode(sha256(bytes))
+}
 
 pub fn sha3_256(bytes: &[u8]) -> [u8; 32] {
     let mut hasher = Sha3::v256();
