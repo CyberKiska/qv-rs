@@ -28,9 +28,10 @@ mod successor_main {
     use qvault_core::hash::sha3_512_hex;
     use qvault_core::mlkem::validate_secret_key;
     use qvault_core::qcont::{
-        build_qvqcont7_shards, parse_qvqcont7_shard, restore_qvqcont7_from_shards,
-        Qvqcont7BuildOptions, Qvqcont7BuildParams, RestoreQvqcont7Options,
-        RestoreQvqcont7Selection,
+        attach_lifecycle_bundle_to_shards, build_qvqcont7_shards, parse_qvqcont7_shard,
+        restore_qvqcont7_from_shards, AttachLifecycleOptions, LifecycleSignatureFamily,
+        LifecycleSignatureImport, LifecycleSourceEvidenceImport, Qvqcont7BuildOptions,
+        Qvqcont7BuildParams, RestoreQvqcont7Options, RestoreQvqcont7Selection,
     };
 
     #[derive(Parser)]
@@ -45,6 +46,7 @@ mod successor_main {
     enum Command {
         Split(SplitArgs),
         Restore(RestoreArgs),
+        Attach(AttachArgs),
     }
 
     #[derive(Parser)]
@@ -115,6 +117,53 @@ mod successor_main {
         shards: Vec<PathBuf>,
     }
 
+    #[derive(Parser)]
+    struct AttachArgs {
+        #[arg(long = "shards", num_args = 1.., help = "Input QVqcont-7 shard files")]
+        shards: Vec<PathBuf>,
+        #[arg(
+            long,
+            help = "Canonical archive-state JSON bytes used as a consistency check"
+        )]
+        archive_state: Option<PathBuf>,
+        #[arg(long, help = "Existing lifecycle bundle JSON bytes")]
+        bundle: Option<PathBuf>,
+        #[arg(
+            long = "archive-approval-sig",
+            help = "Detached archive-approval signature file"
+        )]
+        archive_approval_signatures: Vec<PathBuf>,
+        #[arg(long = "maintenance-sig", help = "Detached maintenance signature file")]
+        maintenance_signatures: Vec<PathBuf>,
+        #[arg(long, help = "Explicit targetRef for all --maintenance-sig files")]
+        maintenance_target_ref: Option<String>,
+        #[arg(
+            long = "source-evidence-sig",
+            help = "Detached source-evidence signature file"
+        )]
+        source_evidence_signatures: Vec<PathBuf>,
+        #[arg(long, help = "Explicit targetRef for all --source-evidence-sig files")]
+        source_evidence_target_ref: Option<String>,
+        #[arg(long = "source-evidence", help = "Source-evidence JSON file")]
+        source_evidence: Vec<PathBuf>,
+        #[arg(long = "pqpk", help = "Pinned PQ signer key (.pqpk)")]
+        pq_public_keys: Vec<PathBuf>,
+        #[arg(long = "ots", help = "Detached OpenTimestamps proof file")]
+        timestamps: Vec<PathBuf>,
+        #[arg(long, help = "Expected Stellar signer address for Ed25519 signatures")]
+        expected_ed25519_signer: Option<String>,
+        #[arg(long, default_value = "lifecycle-bundle.json")]
+        out_bundle: PathBuf,
+        #[arg(long, default_value = "attached-shards")]
+        out_shards: PathBuf,
+        #[arg(long)]
+        no_embed_into_shards: bool,
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        json: bool,
+    }
+
     #[derive(Clone, Copy, Debug, ValueEnum)]
     enum AuthPolicyLevelArg {
         #[value(name = "integrity-only")]
@@ -140,6 +189,7 @@ mod successor_main {
         match cli.command {
             Command::Split(args) => run_split(args),
             Command::Restore(args) => run_restore(args),
+            Command::Attach(args) => run_attach(args),
         }
     }
 
@@ -290,6 +340,146 @@ mod successor_main {
 
         qenc_bytes.fill(0);
         private_key.fill(0);
+        Ok(())
+    }
+
+    fn run_attach(args: AttachArgs) -> Result<()> {
+        let archive_state_bytes = args
+            .archive_state
+            .as_ref()
+            .map(fs::read)
+            .transpose()
+            .with_context(|| "failed to read --archive-state")?;
+        let lifecycle_bundle_bytes = args
+            .bundle
+            .as_ref()
+            .map(fs::read)
+            .transpose()
+            .with_context(|| "failed to read --bundle")?;
+        let shards = args
+            .shards
+            .iter()
+            .map(|path| {
+                let bytes =
+                    fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+                parse_qvqcont7_shard(&bytes)
+                    .with_context(|| format!("failed to parse shard {}", path.display()))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let source_evidence = args
+            .source_evidence
+            .iter()
+            .map(|path| {
+                Ok(LifecycleSourceEvidenceImport {
+                    bytes: Some(
+                        fs::read(path)
+                            .with_context(|| format!("failed to read {}", path.display()))?,
+                    ),
+                    value: None,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let pq_public_key_file_bytes_list = load_named_artifacts(&args.pq_public_keys)?
+            .into_iter()
+            .map(|artifact| artifact.bytes)
+            .collect::<Vec<_>>();
+        let timestamps = load_named_artifacts(&args.timestamps)?;
+        let signature_imports = build_attach_signature_imports(&args)?;
+
+        let embed_into_shards = !args.no_embed_into_shards && !shards.is_empty();
+        let attached = attach_lifecycle_bundle_to_shards(
+            &shards,
+            &AttachLifecycleOptions {
+                archive_state_bytes,
+                lifecycle_bundle_bytes,
+                signature_imports,
+                source_evidence,
+                pq_public_key_file_bytes_list,
+                timestamps,
+                expected_ed25519_signer: normalize_optional_string(
+                    args.expected_ed25519_signer.as_deref(),
+                ),
+                embed_into_shards,
+                ..AttachLifecycleOptions::default()
+            },
+        )?;
+
+        let mut output_paths = vec![args.out_bundle.clone()];
+        let shard_output_plan = if embed_into_shards {
+            fs::create_dir_all(&args.out_shards)
+                .with_context(|| format!("failed to create {}", args.out_shards.display()))?;
+            attached
+                .shards
+                .iter()
+                .enumerate()
+                .map(|(index, shard)| {
+                    let source_name = args
+                        .shards
+                        .get(index)
+                        .and_then(|path| path.file_name())
+                        .and_then(|name| name.to_str())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("shard-{}.qcont", usize::from(shard.index) + 1));
+                    args.out_shards.join(source_name)
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        output_paths.extend(shard_output_plan.iter().cloned());
+        if !args.force {
+            for path in &output_paths {
+                if path.exists() {
+                    bail!("Refusing to overwrite existing file: {}", path.display());
+                }
+            }
+        }
+        if let Some(parent) = args
+            .out_bundle
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+        {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        fs::write(&args.out_bundle, &attached.lifecycle_bundle_bytes)
+            .with_context(|| format!("failed to write {}", args.out_bundle.display()))?;
+        for (shard, path) in attached.shards.iter().zip(shard_output_plan.iter()) {
+            fs::write(path, &shard.bytes)
+                .with_context(|| format!("failed to write {}", path.display()))?;
+        }
+
+        if args.json {
+            let report = serde_json::json!({
+                "command": "attach",
+                "ok": true,
+                "cliSchemaVersion": 1,
+                "archiveStateDigestHex": attached.archive_state_digest_hex,
+                "stateId": attached.state_id,
+                "cohortBindingDigestHex": attached.cohort_binding_digest_hex,
+                "lifecycleBundlePath": args.out_bundle,
+                "lifecycleBundleDigestHex": attached.lifecycle_bundle_digest_hex,
+                "embeddedIntoShards": embed_into_shards,
+                "embeddedIntoShardsReason": if args.no_embed_into_shards { "opt-out" } else if shards.is_empty() { "no-shards" } else { "embedded" },
+                "shardsRewritten": attached.shards.iter().zip(shard_output_plan.iter()).map(|(shard, path)| {
+                    serde_json::json!({ "index": shard.index, "path": path })
+                }).collect::<Vec<_>>(),
+                "embeddedLifecycleBundleDigests": attached.embedded_lifecycle_bundle_digests,
+                "mixedEmbeddedLifecycleBundleDigests": attached.mixed_embedded_lifecycle_bundle_digests,
+            });
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        } else {
+            println!("Attached lifecycle bundle: {}", args.out_bundle.display());
+            println!("State ID: {}", attached.state_id);
+            println!(
+                "Lifecycle bundle digest: {}",
+                attached.lifecycle_bundle_digest_hex
+            );
+            println!(
+                "Embedded into shards: {}",
+                if embed_into_shards { "yes" } else { "no" }
+            );
+        }
         Ok(())
     }
 
@@ -459,6 +649,65 @@ mod successor_main {
                 })
             })
             .collect()
+    }
+
+    fn build_attach_signature_imports(args: &AttachArgs) -> Result<Vec<LifecycleSignatureImport>> {
+        let mut imports = Vec::new();
+        for artifact in load_named_artifacts(&args.archive_approval_signatures)? {
+            imports.push(signature_import(
+                artifact,
+                LifecycleSignatureFamily::ArchiveApproval,
+                None,
+                None,
+            ));
+        }
+        for artifact in load_named_artifacts(&args.maintenance_signatures)? {
+            imports.push(signature_import(
+                artifact,
+                LifecycleSignatureFamily::Maintenance,
+                args.maintenance_target_ref.clone(),
+                None,
+            ));
+        }
+        let source_evidence_bytes = match args.source_evidence.as_slice() {
+            [single] => Some(fs::read(single).with_context(|| {
+                format!("failed to read source-evidence {}", single.display())
+            })?),
+            [] => None,
+            _ if args.source_evidence_signatures.is_empty() => None,
+            _ => bail!("--source-evidence-sig requires exactly one --source-evidence when no explicit per-signature target is available"),
+        };
+        for artifact in load_named_artifacts(&args.source_evidence_signatures)? {
+            let import = signature_import(
+                artifact,
+                LifecycleSignatureFamily::SourceEvidence,
+                args.source_evidence_target_ref.clone(),
+                source_evidence_bytes.clone(),
+            );
+            if import.source_evidence_bytes.is_none() && import.target_ref.is_none() {
+                bail!("--source-evidence-sig requires --source-evidence or --source-evidence-target-ref");
+            }
+            imports.push(import);
+        }
+        Ok(imports)
+    }
+
+    fn signature_import(
+        artifact: NamedBinaryArtifact,
+        family: LifecycleSignatureFamily,
+        target_ref: Option<String>,
+        source_evidence_bytes: Option<Vec<u8>>,
+    ) -> LifecycleSignatureImport {
+        LifecycleSignatureImport {
+            name: artifact.name,
+            bytes: artifact.bytes,
+            signature_family: family,
+            target_type: Some(family.target_type().to_string()),
+            target_ref,
+            target_digest_hex: None,
+            source_evidence_bytes,
+            source_evidence_value: None,
+        }
     }
 
     fn select_single_pinned_pqpk(public_keys: &[NamedBinaryArtifact]) -> Result<Option<Vec<u8>>> {

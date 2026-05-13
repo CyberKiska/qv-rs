@@ -1,4 +1,5 @@
 pub mod archive_state;
+pub mod attach;
 pub mod attachments;
 pub mod bundle;
 pub mod cohort_binding;
@@ -14,6 +15,11 @@ pub use archive_state::{
     parse_archive_state_descriptor_bytes, ArchiveStateDescriptor,
     BuildArchiveStateDescriptorParams, CanonicalArchiveStateDescriptor,
     ARCHIVE_STATE_CANONICALIZATION, ARCHIVE_STATE_SCHEMA, ARCHIVE_STATE_VERSION,
+};
+pub use attach::{
+    attach_lifecycle_bundle, AttachLifecycleOptions, AttachedLifecycleBundle,
+    AttachedLifecycleShard, LifecycleSignatureFamily, LifecycleSignatureImport,
+    LifecycleSourceEvidenceImport,
 };
 pub use attachments::{
     DetachedSignatureEntry, LifecycleAttachments, PublicKeyEntry, TimestampEntry,

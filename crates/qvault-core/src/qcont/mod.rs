@@ -1,5 +1,6 @@
 #[cfg(feature = "legacy-mvp")]
 pub mod attach;
+pub mod attach_v7;
 #[cfg(feature = "legacy-mvp")]
 pub mod restore;
 pub mod restore_v7;
@@ -13,6 +14,11 @@ pub mod split_v7;
 #[cfg(feature = "legacy-mvp")]
 pub use attach::{
     attach_manifest_bundle_to_shards, AttachManifestBundleOptions, AttachedManifestBundle,
+};
+pub use attach_v7::{
+    attach_lifecycle_bundle_to_shards, AttachLifecycleOptions, AttachedLifecycleBundle,
+    AttachedLifecycleShard, LifecycleSignatureFamily, LifecycleSignatureImport,
+    LifecycleSourceEvidenceImport,
 };
 #[cfg(feature = "legacy-mvp")]
 pub use restore::{restore_from_shards, RestoreQcontOptions, RestoredQcont};
