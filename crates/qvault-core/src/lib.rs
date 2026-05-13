@@ -12,7 +12,6 @@ pub mod lifecycle;
 pub mod manifest;
 pub mod mlkem;
 pub mod policy;
-#[cfg(feature = "legacy-mvp")]
 pub mod qcont;
 pub mod qenc;
 pub mod sss;
