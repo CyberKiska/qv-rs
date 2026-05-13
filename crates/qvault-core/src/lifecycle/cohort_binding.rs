@@ -32,6 +32,19 @@ pub const BODY_DEFINITION_EXCLUDES: &[&str] = &[
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildCohortBindingParams {
+    pub archive_id: String,
+    pub state_id: String,
+    pub shamir_threshold: u64,
+    pub shamir_share_count: u64,
+    pub rs_n: u64,
+    pub rs_k: u64,
+    pub rs_parity: u64,
+    pub shard_body_hashes: Vec<String>,
+    pub share_commitments: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CohortBinding {
     pub value: Value,
 }
@@ -43,6 +56,91 @@ pub struct CanonicalCohortBinding {
     pub bytes: Vec<u8>,
     pub digest: DigestObject,
     pub canonicalization_label: String,
+}
+
+pub fn build_cohort_binding(params: &BuildCohortBindingParams) -> Result<CohortBinding> {
+    let shard_body_hashes = params
+        .shard_body_hashes
+        .iter()
+        .cloned()
+        .map(Value::String)
+        .collect::<Vec<_>>();
+    let share_commitments = params
+        .share_commitments
+        .iter()
+        .cloned()
+        .map(Value::String)
+        .collect::<Vec<_>>();
+    let value = object_from_pairs(vec![
+        ("schema", Value::String(COHORT_BINDING_SCHEMA.to_string())),
+        ("version", number(COHORT_BINDING_VERSION)),
+        ("cohortType", Value::String(COHORT_TYPE_DEFAULT.to_string())),
+        (
+            "canonicalization",
+            Value::String(COHORT_BINDING_CANONICALIZATION.to_string()),
+        ),
+        ("archiveId", Value::String(params.archive_id.clone())),
+        ("stateId", Value::String(params.state_id.clone())),
+        (
+            "sharding",
+            object_from_pairs(vec![
+                (
+                    "shamir",
+                    object_from_pairs(vec![
+                        ("threshold", number(params.shamir_threshold)),
+                        ("shareCount", number(params.shamir_share_count)),
+                    ]),
+                ),
+                (
+                    "reedSolomon",
+                    object_from_pairs(vec![
+                        ("n", number(params.rs_n)),
+                        ("k", number(params.rs_k)),
+                        ("parity", number(params.rs_parity)),
+                        ("codecId", Value::String(REED_SOLOMON_CODEC_ID.to_string())),
+                    ]),
+                ),
+            ]),
+        ),
+        (
+            "bodyDefinitionId",
+            Value::String(SHARD_BODY_DEFINITION_ID.to_string()),
+        ),
+        (
+            "bodyDefinition",
+            object_from_pairs(vec![
+                (
+                    "includes",
+                    Value::Array(
+                        BODY_DEFINITION_INCLUDES
+                            .iter()
+                            .map(|value| Value::String((*value).to_string()))
+                            .collect(),
+                    ),
+                ),
+                (
+                    "excludes",
+                    Value::Array(
+                        BODY_DEFINITION_EXCLUDES
+                            .iter()
+                            .map(|value| Value::String((*value).to_string()))
+                            .collect(),
+                    ),
+                ),
+            ]),
+        ),
+        ("shardBodyHashAlg", Value::String(SHA3_512_ALG.to_string())),
+        ("shardBodyHashes", Value::Array(shard_body_hashes)),
+        (
+            "shareCommitment",
+            object_from_pairs(vec![
+                ("hashAlg", Value::String(SHA3_512_ALG.to_string())),
+                ("input", Value::String(SHARE_COMMITMENT_INPUT.to_string())),
+            ]),
+        ),
+        ("shareCommitments", Value::Array(share_commitments)),
+    ]);
+    validate_cohort_binding_value(&value)
 }
 
 pub fn validate_cohort_binding_value(value: &Value) -> Result<CohortBinding> {

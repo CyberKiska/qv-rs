@@ -1,0 +1,18 @@
+{
+  "schema": "quantum-vault-source-evidence/v1",
+  "version": 1,
+  "sourceEvidenceType": "source-evidence",
+  "canonicalization": "QV-JSON-RFC8785-v1",
+  "relationType": "precursor-object",
+  "sourceObjectType": "transition-record",
+  "sourceDigests": [
+    {
+      "alg": "SHA3-512",
+      "value": "78787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878"
+    },
+    {
+      "alg": "SHA-256",
+      "value": "8989898989898989898989898989898989898989898989898989898989898989"
+    }
+  ]
+}

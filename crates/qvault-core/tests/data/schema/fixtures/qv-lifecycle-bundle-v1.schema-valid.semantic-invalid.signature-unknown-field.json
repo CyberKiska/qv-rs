@@ -1,0 +1,178 @@
+{
+  "type": "QV-Lifecycle-Bundle",
+  "version": 1,
+  "bundleCanonicalization": "QV-BUNDLE-JSON-v1",
+  "archiveStateCanonicalization": "QV-JSON-RFC8785-v1",
+  "archiveState": {
+    "schema": "quantum-vault-archive-state-descriptor/v1",
+    "version": 1,
+    "stateType": "archive-state",
+    "canonicalization": "QV-JSON-RFC8785-v1",
+    "archiveId": "abababababababababababababababababababababababababababababababab",
+    "parentStateId": null,
+    "cryptoProfileId": "QV-MLKEM1024-KMAC256-AES256GCM-SHA3_512-v2",
+    "kdfTreeId": "QV-KDF-TREE-v2",
+    "noncePolicyId": "QV-GCM-KMACPFX64-CTR32-v3",
+    "nonceMode": "kmac-prefix64-ctr32",
+    "counterBits": 32,
+    "maxChunkCount": 4294967295,
+    "aadPolicyId": "QV-AAD-HEADER-CHUNK-v1",
+    "qenc": {
+      "chunkSize": 65536,
+      "chunkCount": 3,
+      "payloadLength": 131072,
+      "hashAlg": "SHA3-512",
+      "primaryAnchor": "qencHash",
+      "qencHash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+      "containerId": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
+      "containerIdRole": "secondary-header-id",
+      "containerIdAlg": "SHA3-512(qenc-header-bytes)"
+    },
+    "authPolicyCommitment": {
+      "alg": "SHA3-512",
+      "canonicalization": "QV-JSON-RFC8785-v1",
+      "value": "2c293897933111ac3037ce108c3ced8f05c0835cc880a3fa8cbcef913bea655ac203dfeca4167aeca4a972e2a7799bc9f08d0d1dbedad99b7afc9e3a61cef05a"
+    }
+  },
+  "archiveStateDigest": {
+    "alg": "SHA3-512",
+    "value": "e72be26038375f48a0de6a43f3d04f2c0988f0c6634b688e60772877066180dbc19a6054ae2220ba202f945aee24e79b99be40171b391f7d91bd904a355e5117"
+  },
+  "currentCohortBinding": {
+    "schema": "quantum-vault-cohort-binding/v1",
+    "version": 1,
+    "cohortType": "shard-cohort",
+    "canonicalization": "QV-JSON-RFC8785-v1",
+    "archiveId": "abababababababababababababababababababababababababababababababab",
+    "stateId": "e72be26038375f48a0de6a43f3d04f2c0988f0c6634b688e60772877066180dbc19a6054ae2220ba202f945aee24e79b99be40171b391f7d91bd904a355e5117",
+    "sharding": {
+      "shamir": {
+        "threshold": 4,
+        "shareCount": 5
+      },
+      "reedSolomon": {
+        "n": 5,
+        "k": 3,
+        "parity": 2,
+        "codecId": "QV-RS-ErasureCodes-v1"
+      }
+    },
+    "bodyDefinitionId": "QV-QCONT-SHARDBODY-v1",
+    "bodyDefinition": {
+      "includes": [
+        "fragment-len32-stream"
+      ],
+      "excludes": [
+        "qcont-header",
+        "embedded-archive-state",
+        "embedded-archive-state-digest",
+        "embedded-cohort-binding",
+        "embedded-cohort-binding-digest",
+        "embedded-lifecycle-bundle",
+        "embedded-lifecycle-bundle-digest",
+        "external-signatures"
+      ]
+    },
+    "shardBodyHashAlg": "SHA3-512",
+    "shardBodyHashes": [
+      "11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111",
+      "22222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222",
+      "33333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333",
+      "44444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444",
+      "55555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555"
+    ],
+    "shareCommitment": {
+      "hashAlg": "SHA3-512",
+      "input": "raw-shamir-share-bytes"
+    },
+    "shareCommitments": [
+      "66666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666",
+      "77777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777",
+      "88888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888",
+      "99999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999",
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ]
+  },
+  "currentCohortBindingDigest": {
+    "alg": "SHA3-512",
+    "value": "711a52b581d6a92e8721f5188c516f7af932f9ef2ae11007b33765126ab23b06a94042e47d2b831f1b29340a7744065b7e946f76c5cba47ffa559cd73b6c794c"
+  },
+  "authPolicy": {
+    "level": "strong-pq-signature",
+    "minValidSignatures": 1
+  },
+  "sourceEvidence": [
+    {
+      "schema": "quantum-vault-source-evidence/v1",
+      "version": 1,
+      "sourceEvidenceType": "source-evidence",
+      "canonicalization": "QV-JSON-RFC8785-v1",
+      "relationType": "reviewed-source",
+      "sourceObjectType": "archive-state-descriptor",
+      "sourceDigests": [
+        {
+          "alg": "SHA3-512",
+          "value": "45454545454545454545454545454545454545454545454545454545454545454545454545454545454545454545454545454545454545454545454545454545"
+        },
+        {
+          "alg": "SHA-256",
+          "value": "6767676767676767676767676767676767676767676767676767676767676767"
+        }
+      ],
+      "externalSourceSignatureRefs": [
+        "sig:external-1"
+      ]
+    }
+  ],
+  "transitions": [
+    {
+      "schema": "quantum-vault-transition-record/v1",
+      "version": 1,
+      "canonicalization": "QV-JSON-RFC8785-v1",
+      "transitionType": "same-state-resharing",
+      "archiveId": "abababababababababababababababababababababababababababababababab",
+      "fromStateId": "e72be26038375f48a0de6a43f3d04f2c0988f0c6634b688e60772877066180dbc19a6054ae2220ba202f945aee24e79b99be40171b391f7d91bd904a355e5117",
+      "toStateId": "e72be26038375f48a0de6a43f3d04f2c0988f0c6634b688e60772877066180dbc19a6054ae2220ba202f945aee24e79b99be40171b391f7d91bd904a355e5117",
+      "fromCohortId": "ebf832f7aff98cbe063b84b6835e58321ce5f932a211c888280511e614ae619b",
+      "toCohortId": "d14b3541103107a1969fb55db486bd3734a7ef5e05e88e6ab6604a7d38e8cc9b",
+      "fromCohortBindingDigest": {
+        "alg": "SHA3-512",
+        "value": "23232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323"
+      },
+      "toCohortBindingDigest": {
+        "alg": "SHA3-512",
+        "value": "711a52b581d6a92e8721f5188c516f7af932f9ef2ae11007b33765126ab23b06a94042e47d2b831f1b29340a7744065b7e946f76c5cba47ffa559cd73b6c794c"
+      },
+      "reasonCode": "cohort-rotation",
+      "performedAt": "2026-03-25T12:34:56.000Z",
+      "operatorRole": "operator",
+      "actorHints": {
+        "ceremony": "reshare-01"
+      },
+      "notes": null
+    }
+  ],
+  "attachments": {
+    "publicKeys": [],
+    "archiveApprovalSignatures": [
+      {
+        "id": "sig-unknown-field",
+        "signatureFamily": "archive-approval",
+        "format": "qsig",
+        "suite": "mldsa-87",
+        "targetType": "archive-state",
+        "targetRef": "state:e72be26038375f48a0de6a43f3d04f2c0988f0c6634b688e60772877066180dbc19a6054ae2220ba202f945aee24e79b99be40171b391f7d91bd904a355e5117",
+        "targetDigest": {
+          "alg": "SHA3-512",
+          "value": "e72be26038375f48a0de6a43f3d04f2c0988f0c6634b688e60772877066180dbc19a6054ae2220ba202f945aee24e79b99be40171b391f7d91bd904a355e5117"
+        },
+        "signatureEncoding": "base64",
+        "signature": "AA==",
+        "unexpectedField": true
+      }
+    ],
+    "maintenanceSignatures": [],
+    "sourceEvidenceSignatures": [],
+    "timestamps": []
+  }
+}

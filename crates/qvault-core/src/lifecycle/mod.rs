@@ -10,20 +10,22 @@ pub mod transition;
 mod validation;
 
 pub use archive_state::{
-    canonicalize_archive_state_descriptor, derive_state_id, parse_archive_state_descriptor_bytes,
-    ArchiveStateDescriptor, CanonicalArchiveStateDescriptor, ARCHIVE_STATE_CANONICALIZATION,
-    ARCHIVE_STATE_SCHEMA, ARCHIVE_STATE_VERSION,
+    build_archive_state_descriptor, canonicalize_archive_state_descriptor, derive_state_id,
+    parse_archive_state_descriptor_bytes, ArchiveStateDescriptor,
+    BuildArchiveStateDescriptorParams, CanonicalArchiveStateDescriptor,
+    ARCHIVE_STATE_CANONICALIZATION, ARCHIVE_STATE_SCHEMA, ARCHIVE_STATE_VERSION,
 };
 pub use attachments::{
     DetachedSignatureEntry, LifecycleAttachments, PublicKeyEntry, TimestampEntry,
 };
 pub use bundle::{
-    canonicalize_lifecycle_bundle, parse_lifecycle_bundle_bytes, CanonicalLifecycleBundle,
-    LifecycleBundle, LIFECYCLE_BUNDLE_CANONICALIZATION, LIFECYCLE_BUNDLE_TYPE,
-    LIFECYCLE_BUNDLE_VERSION,
+    build_lifecycle_bundle, canonicalize_lifecycle_bundle, parse_lifecycle_bundle_bytes,
+    BuildLifecycleBundleParams, CanonicalLifecycleBundle, LifecycleBundle,
+    LIFECYCLE_BUNDLE_CANONICALIZATION, LIFECYCLE_BUNDLE_TYPE, LIFECYCLE_BUNDLE_VERSION,
 };
 pub use cohort_binding::{
-    canonicalize_cohort_binding, parse_cohort_binding_bytes, CanonicalCohortBinding, CohortBinding,
+    build_cohort_binding, canonicalize_cohort_binding, parse_cohort_binding_bytes,
+    BuildCohortBindingParams, CanonicalCohortBinding, CohortBinding,
     COHORT_BINDING_CANONICALIZATION, COHORT_BINDING_SCHEMA, COHORT_BINDING_VERSION,
 };
 pub use digests::{

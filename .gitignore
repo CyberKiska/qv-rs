@@ -22,6 +22,8 @@ test_data/
 *.recovered.*
 fixtures/
 examples/
+!crates/qvault-core/tests/data/
+!crates/qvault-core/tests/data/**
 
 # Backup files
 *.bak

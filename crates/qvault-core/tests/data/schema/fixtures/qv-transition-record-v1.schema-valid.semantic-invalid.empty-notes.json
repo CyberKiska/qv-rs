@@ -1,0 +1,26 @@
+{
+  "schema": "quantum-vault-transition-record/v1",
+  "version": 1,
+  "canonicalization": "QV-JSON-RFC8785-v1",
+  "transitionType": "same-state-resharing",
+  "archiveId": "abababababababababababababababababababababababababababababababab",
+  "fromStateId": "e72be26038375f48a0de6a43f3d04f2c0988f0c6634b688e60772877066180dbc19a6054ae2220ba202f945aee24e79b99be40171b391f7d91bd904a355e5117",
+  "toStateId": "e72be26038375f48a0de6a43f3d04f2c0988f0c6634b688e60772877066180dbc19a6054ae2220ba202f945aee24e79b99be40171b391f7d91bd904a355e5117",
+  "fromCohortId": "ebf832f7aff98cbe063b84b6835e58321ce5f932a211c888280511e614ae619b",
+  "toCohortId": "d14b3541103107a1969fb55db486bd3734a7ef5e05e88e6ab6604a7d38e8cc9b",
+  "fromCohortBindingDigest": {
+    "alg": "SHA3-512",
+    "value": "23232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323"
+  },
+  "toCohortBindingDigest": {
+    "alg": "SHA3-512",
+    "value": "711a52b581d6a92e8721f5188c516f7af932f9ef2ae11007b33765126ab23b06a94042e47d2b831f1b29340a7744065b7e946f76c5cba47ffa559cd73b6c794c"
+  },
+  "reasonCode": "cohort-rotation",
+  "performedAt": "2026-03-25T12:34:56.000Z",
+  "operatorRole": "operator",
+  "actorHints": {
+    "ceremony": "reshare-01"
+  },
+  "notes": ""
+}

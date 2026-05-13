@@ -1,0 +1,293 @@
+{
+  "version": 1,
+  "fixtures": [
+    {
+      "id": "archive-state-v1-valid",
+      "schema": "qv-archive-state-descriptor-v1.schema.json",
+      "file": "fixtures/qv-archive-state-descriptor-v1.valid.json",
+      "expectSchemaValid": true,
+      "expectedDigestHex": "e72be26038375f48a0de6a43f3d04f2c0988f0c6634b688e60772877066180dbc19a6054ae2220ba202f945aee24e79b99be40171b391f7d91bd904a355e5117",
+      "runtime": {
+        "artifact": "archive-state",
+        "expectParseSuccess": true
+      }
+    },
+    {
+      "id": "archive-state-v1-valid-single-container",
+      "schema": "qv-archive-state-descriptor-v1.schema.json",
+      "file": "fixtures/qv-archive-state-descriptor-v1.valid.single-container.json",
+      "expectSchemaValid": true,
+      "expectedDigestHex": "7d058883a3941660102b4f170af70dacfe3ee3118894cfabf126c7923ddca86e4935c19ad34c74ef1c4e1131586889be273be4046c2d4f5694165c1b1771a7fb",
+      "runtime": {
+        "artifact": "archive-state",
+        "expectParseSuccess": true
+      }
+    },
+    {
+      "id": "archive-state-v1-invalid-stateid-field",
+      "schema": "qv-archive-state-descriptor-v1.schema.json",
+      "file": "fixtures/qv-archive-state-descriptor-v1.invalid.state-id-field.json",
+      "expectSchemaValid": false,
+      "runtime": {
+        "artifact": "archive-state",
+        "expectParseSuccess": false
+      }
+    },
+    {
+      "id": "archive-state-v1-invalid-unsafe-integer",
+      "schema": "qv-archive-state-descriptor-v1.schema.json",
+      "file": "fixtures/qv-archive-state-descriptor-v1.invalid.unsafe-integer.json",
+      "expectSchemaValid": false,
+      "runtime": {
+        "artifact": "archive-state",
+        "expectParseSuccess": false
+      }
+    },
+    {
+      "id": "archive-state-v1-invalid-unknown-field",
+      "schema": "qv-archive-state-descriptor-v1.schema.json",
+      "file": "fixtures/qv-archive-state-descriptor-v1.invalid.unknown-field.json",
+      "expectSchemaValid": false,
+      "runtime": {
+        "artifact": "archive-state",
+        "expectParseSuccess": false,
+        "expectErrorIncludes": "Unknown archiveState.unexpectedField"
+      }
+    },
+    {
+      "id": "archive-state-v1-schema-valid-wire-invalid-noncanonical-bytes",
+      "schema": "qv-archive-state-descriptor-v1.schema.json",
+      "file": "fixtures/qv-archive-state-descriptor-v1.valid.json",
+      "expectSchemaValid": true,
+      "runtime": {
+        "artifact": "archive-state",
+        "expectParseSuccess": false,
+        "useRawJsonBytes": true
+      }
+    },
+    {
+      "id": "cohort-binding-v1-valid",
+      "schema": "qv-cohort-binding-v1.schema.json",
+      "file": "fixtures/qv-cohort-binding-v1.valid.json",
+      "expectSchemaValid": true,
+      "expectedDigestHex": "711a52b581d6a92e8721f5188c516f7af932f9ef2ae11007b33765126ab23b06a94042e47d2b831f1b29340a7744065b7e946f76c5cba47ffa559cd73b6c794c",
+      "runtime": {
+        "artifact": "cohort-binding",
+        "expectParseSuccess": true
+      }
+    },
+    {
+      "id": "cohort-binding-v1-invalid-cohortid-field",
+      "schema": "qv-cohort-binding-v1.schema.json",
+      "file": "fixtures/qv-cohort-binding-v1.invalid.cohort-id-field.json",
+      "expectSchemaValid": false,
+      "runtime": {
+        "artifact": "cohort-binding",
+        "expectParseSuccess": false
+      }
+    },
+    {
+      "id": "cohort-binding-v1-invalid-unsafe-integer",
+      "schema": "qv-cohort-binding-v1.schema.json",
+      "file": "fixtures/qv-cohort-binding-v1.invalid.unsafe-integer.json",
+      "expectSchemaValid": false,
+      "runtime": {
+        "artifact": "cohort-binding",
+        "expectParseSuccess": false
+      }
+    },
+    {
+      "id": "cohort-binding-v1-schema-valid-semantic-invalid-rs-parity",
+      "schema": "qv-cohort-binding-v1.schema.json",
+      "file": "fixtures/qv-cohort-binding-v1.schema-valid.semantic-invalid.rs-parity.json",
+      "expectSchemaValid": true,
+      "runtime": {
+        "artifact": "cohort-binding",
+        "expectParseSuccess": false
+      }
+    },
+    {
+      "id": "cohort-binding-v1-schema-valid-wire-invalid-noncanonical-bytes",
+      "schema": "qv-cohort-binding-v1.schema.json",
+      "file": "fixtures/qv-cohort-binding-v1.valid.json",
+      "expectSchemaValid": true,
+      "runtime": {
+        "artifact": "cohort-binding",
+        "expectParseSuccess": false,
+        "useRawJsonBytes": true
+      }
+    },
+    {
+      "id": "transition-record-v1-valid",
+      "schema": "qv-transition-record-v1.schema.json",
+      "file": "fixtures/qv-transition-record-v1.valid.json",
+      "expectSchemaValid": true,
+      "expectedDigestHex": "623be3bc8bf39d1f4ebc4225cd3beacd06b715f7f0d75d73ca0666737ad70ce39846bddc756d783a531afc860aafb26c57b8ce35ef7f051d6d118e26b5efdeb9",
+      "runtime": {
+        "artifact": "transition-record",
+        "expectParseSuccess": true
+      }
+    },
+    {
+      "id": "transition-record-v1-invalid-performed-at-format",
+      "schema": "qv-transition-record-v1.schema.json",
+      "file": "fixtures/qv-transition-record-v1.invalid.performed-at-format.json",
+      "expectSchemaValid": false,
+      "runtime": {
+        "artifact": "transition-record",
+        "expectParseSuccess": false
+      }
+    },
+    {
+      "id": "transition-record-v1-schema-valid-semantic-invalid-empty-notes",
+      "schema": "qv-transition-record-v1.schema.json",
+      "file": "fixtures/qv-transition-record-v1.schema-valid.semantic-invalid.empty-notes.json",
+      "expectSchemaValid": true,
+      "runtime": {
+        "artifact": "transition-record",
+        "expectParseSuccess": false
+      }
+    },
+    {
+      "id": "transition-record-v1-schema-valid-semantic-invalid-state-change",
+      "schema": "qv-transition-record-v1.schema.json",
+      "file": "fixtures/qv-transition-record-v1.schema-valid.semantic-invalid.state-change.json",
+      "expectSchemaValid": true,
+      "runtime": {
+        "artifact": "transition-record",
+        "expectParseSuccess": false,
+        "expectStandaloneParseSuccess": true,
+        "contextualLifecycleBundleFile": "fixtures/qv-lifecycle-bundle-v1.valid.json",
+        "contextualTransitionIndex": 0,
+        "expectErrorIncludes": "changes stateId"
+      }
+    },
+    {
+      "id": "source-evidence-v1-valid",
+      "schema": "qv-source-evidence-v1.schema.json",
+      "file": "fixtures/qv-source-evidence-v1.valid.json",
+      "expectSchemaValid": true,
+      "expectedDigestHex": "a270c000dd344f8cbfd169ca2037de6e1807cfebe555e968a78821966af56a2ee2798a2256ad2ba8837f51b76b681aac63d356d96c9691a8db8333d6bb75babb",
+      "runtime": {
+        "artifact": "source-evidence",
+        "expectParseSuccess": true
+      }
+    },
+    {
+      "id": "source-evidence-v1-valid-precursor-object",
+      "schema": "qv-source-evidence-v1.schema.json",
+      "file": "fixtures/qv-source-evidence-v1.valid.precursor-object.json",
+      "expectSchemaValid": true,
+      "expectedDigestHex": "4d8e633993b37f31d20f06738e9f911344a28b51a39a2c61227d3adeb5b5daf6b6a2a2fc7ff88b028ccb3b31c64662db5d26b2b04b15356cae73153026b888e1",
+      "runtime": {
+        "artifact": "source-evidence",
+        "expectParseSuccess": true
+      }
+    },
+    {
+      "id": "source-evidence-v1-valid-media-type-opt-in",
+      "schema": "qv-source-evidence-v1.schema.json",
+      "file": "fixtures/qv-source-evidence-v1.valid.media-type-opt-in.json",
+      "expectSchemaValid": true,
+      "expectedDigestHex": "db8cfddff6ce4a42e94585654746b83f3f7ebee67bc4dd6951ad407763b823a6b187767d5de0362924649a641a286b2236d3719ec0b8c5637230cb1906d098f1",
+      "runtime": {
+        "artifact": "source-evidence",
+        "expectParseSuccess": true
+      }
+    },
+    {
+      "id": "source-evidence-v1-schema-valid-semantic-invalid-digest-length",
+      "schema": "qv-source-evidence-v1.schema.json",
+      "file": "fixtures/qv-source-evidence-v1.schema-valid.semantic-invalid.digest-length.json",
+      "expectSchemaValid": true,
+      "runtime": {
+        "artifact": "source-evidence",
+        "expectParseSuccess": false
+      }
+    },
+    {
+      "id": "source-evidence-v1-invalid-local-path-field",
+      "schema": "qv-source-evidence-v1.schema.json",
+      "file": "fixtures/qv-source-evidence-v1.invalid.local-path-field.json",
+      "expectSchemaValid": false,
+      "runtime": {
+        "artifact": "source-evidence",
+        "expectParseSuccess": false
+      }
+    },
+    {
+      "id": "source-evidence-v1-schema-valid-semantic-invalid-duplicate-signature-refs",
+      "schema": "qv-source-evidence-v1.schema.json",
+      "file": "fixtures/qv-source-evidence-v1.schema-valid.semantic-invalid.duplicate-signature-refs.json",
+      "expectSchemaValid": true,
+      "runtime": {
+        "artifact": "source-evidence",
+        "expectParseSuccess": false,
+        "expectErrorIncludes": "Duplicate sourceEvidence.externalSourceSignatureRefs value"
+      }
+    },
+    {
+      "id": "source-evidence-v1-schema-valid-semantic-invalid-duplicate-digest-alg",
+      "schema": "qv-source-evidence-v1.schema.json",
+      "file": "fixtures/qv-source-evidence-v1.schema-valid.semantic-invalid.duplicate-digest-alg.json",
+      "expectSchemaValid": true,
+      "runtime": {
+        "artifact": "source-evidence",
+        "expectParseSuccess": false,
+        "expectErrorIncludes": "Duplicate sourceEvidence.sourceDigests.alg"
+      }
+    },
+    {
+      "id": "lifecycle-bundle-v1-valid",
+      "schema": "qv-lifecycle-bundle-v1.schema.json",
+      "file": "fixtures/qv-lifecycle-bundle-v1.valid.json",
+      "expectSchemaValid": true,
+      "expectedDigestHex": "8bb5b59ca01e5bac80babd9f8ec894bcd34d17f75b653ff265656108a449ebebecf5a76ec9c88799646eec3a029033f2391a9e0eea069f57868a57a28c5bf4ab",
+      "runtime": {
+        "artifact": "lifecycle-bundle",
+        "expectParseSuccess": true
+      }
+    },
+    {
+      "id": "lifecycle-bundle-v1-invalid-authpolicy-unsafe-integer",
+      "schema": "qv-lifecycle-bundle-v1.schema.json",
+      "file": "fixtures/qv-lifecycle-bundle-v1.invalid.authpolicy-unsafe-integer.json",
+      "expectSchemaValid": false,
+      "runtime": {
+        "artifact": "lifecycle-bundle",
+        "expectParseSuccess": false
+      }
+    },
+    {
+      "id": "lifecycle-bundle-v1-schema-valid-semantic-invalid-archive-state-digest",
+      "schema": "qv-lifecycle-bundle-v1.schema.json",
+      "file": "fixtures/qv-lifecycle-bundle-v1.schema-valid.semantic-invalid.archive-state-digest.json",
+      "expectSchemaValid": true,
+      "runtime": {
+        "artifact": "lifecycle-bundle",
+        "expectParseSuccess": false
+      }
+    },
+    {
+      "id": "lifecycle-bundle-v1-schema-valid-wire-invalid-noncanonical-bytes",
+      "schema": "qv-lifecycle-bundle-v1.schema.json",
+      "file": "fixtures/qv-lifecycle-bundle-v1.valid.json",
+      "expectSchemaValid": true,
+      "runtime": {
+        "artifact": "lifecycle-bundle",
+        "expectParseSuccess": false,
+        "useRawJsonBytes": true
+      }
+    },
+    {
+      "id": "lifecycle-bundle-v1-schema-valid-semantic-invalid-signature-unknown-field",
+      "schema": "qv-lifecycle-bundle-v1.schema.json",
+      "file": "fixtures/qv-lifecycle-bundle-v1.schema-valid.semantic-invalid.signature-unknown-field.json",
+      "expectSchemaValid": false,
+      "runtime": {
+        "artifact": "lifecycle-bundle",
+        "expectParseSuccess": false
+      }
+    }
+  ]
+}

@@ -15,8 +15,8 @@ use super::archive_state::{
 use super::attachments::validate_lifecycle_attachments_value;
 use super::cohort_binding::{canonicalize_cohort_binding, validate_cohort_binding_value};
 use super::digests::{
-    compute_auth_policy_commitment, normalize_auth_policy, normalize_digest_object,
-    sha3_512_digest, DigestObject, SHA3_512_ALG,
+    auth_policy_level_to_value, compute_auth_policy_commitment, normalize_auth_policy,
+    normalize_digest_object, sha3_512_digest, DigestObject, SHA3_512_ALG,
 };
 use super::identity::derive_cohort_id;
 use super::source_evidence::{canonicalize_source_evidence, validate_source_evidence_value};
@@ -32,6 +32,14 @@ pub const LIFECYCLE_BUNDLE_VERSION: u64 = 1;
 pub const LIFECYCLE_BUNDLE_CANONICALIZATION: &str = BUNDLE_CANONICALIZATION_LABEL;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildLifecycleBundleParams {
+    pub archive_state: Value,
+    pub current_cohort_binding: Value,
+    pub auth_policy_level: crate::auth::AuthPolicyLevel,
+    pub min_valid_signatures: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LifecycleBundle {
     pub value: Value,
 }
@@ -43,6 +51,49 @@ pub struct CanonicalLifecycleBundle {
     pub bytes: Vec<u8>,
     pub digest: DigestObject,
     pub canonicalization_label: String,
+}
+
+pub fn build_lifecycle_bundle(params: &BuildLifecycleBundleParams) -> Result<LifecycleBundle> {
+    let archive_state = validate_archive_state_descriptor_value(&params.archive_state)?;
+    let archive_state_canonical = canonicalize_archive_state_descriptor(&archive_state.value)?;
+    let cohort_binding = validate_cohort_binding_value(&params.current_cohort_binding)?;
+    let cohort_binding_canonical = canonicalize_cohort_binding(&cohort_binding.value)?;
+    let auth_policy =
+        auth_policy_level_to_value(params.auth_policy_level, params.min_valid_signatures.max(1));
+    let empty_attachments = object_from_pairs(vec![
+        ("publicKeys", Value::Array(Vec::new())),
+        ("archiveApprovalSignatures", Value::Array(Vec::new())),
+        ("maintenanceSignatures", Value::Array(Vec::new())),
+        ("sourceEvidenceSignatures", Value::Array(Vec::new())),
+        ("timestamps", Value::Array(Vec::new())),
+    ]);
+    let value = object_from_pairs(vec![
+        ("type", Value::String(LIFECYCLE_BUNDLE_TYPE.to_string())),
+        ("version", number(LIFECYCLE_BUNDLE_VERSION)),
+        (
+            "bundleCanonicalization",
+            Value::String(LIFECYCLE_BUNDLE_CANONICALIZATION.to_string()),
+        ),
+        (
+            "archiveStateCanonicalization",
+            Value::String(ARCHIVE_STATE_CANONICALIZATION.to_string()),
+        ),
+        ("archiveState", archive_state.value),
+        (
+            "archiveStateDigest",
+            serde_json::to_value(archive_state_canonical.digest)?,
+        ),
+        ("currentCohortBinding", cohort_binding.value),
+        (
+            "currentCohortBindingDigest",
+            serde_json::to_value(cohort_binding_canonical.digest)?,
+        ),
+        ("authPolicy", auth_policy),
+        ("sourceEvidence", Value::Array(Vec::new())),
+        ("transitions", Value::Array(Vec::new())),
+        ("attachments", empty_attachments),
+    ]);
+    validate_lifecycle_bundle_value(&value)
 }
 
 pub fn validate_lifecycle_bundle_value(value: &Value) -> Result<LifecycleBundle> {

@@ -1,0 +1,31 @@
+{
+  "schema": "quantum-vault-archive-state-descriptor/v1",
+  "version": 1,
+  "stateType": "archive-state",
+  "canonicalization": "QV-JSON-RFC8785-v1",
+  "archiveId": "1212121212121212121212121212121212121212121212121212121212121212",
+  "parentStateId": null,
+  "cryptoProfileId": "QV-MLKEM1024-KMAC256-AES256GCM-SHA3_512-v2",
+  "kdfTreeId": "QV-KDF-TREE-v2",
+  "noncePolicyId": "QV-GCM-RAND96-v1",
+  "nonceMode": "random96",
+  "counterBits": 0,
+  "maxChunkCount": 1,
+  "aadPolicyId": "QV-AAD-HEADER-CHUNK-v1",
+  "qenc": {
+    "chunkSize": 2048,
+    "chunkCount": 1,
+    "payloadLength": 2048,
+    "hashAlg": "SHA3-512",
+    "primaryAnchor": "qencHash",
+    "qencHash": "34343434343434343434343434343434343434343434343434343434343434343434343434343434343434343434343434343434343434343434343434343434",
+    "containerId": "56565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656",
+    "containerIdRole": "secondary-header-id",
+    "containerIdAlg": "SHA3-512(qenc-header-bytes)"
+  },
+  "authPolicyCommitment": {
+    "alg": "SHA3-512",
+    "canonicalization": "QV-JSON-RFC8785-v1",
+    "value": "2c293897933111ac3037ce108c3ced8f05c0835cc880a3fa8cbcef913bea655ac203dfeca4167aeca4a972e2a7799bc9f08d0d1dbedad99b7afc9e3a61cef05a"
+  }
+}

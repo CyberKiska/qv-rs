@@ -504,6 +504,7 @@ dependencies = [
  "anyhow",
  "clap",
  "qvault-core",
+ "serde_json",
 ]
 
 [[package]]

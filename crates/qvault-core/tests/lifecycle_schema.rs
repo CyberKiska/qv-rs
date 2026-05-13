@@ -13,9 +13,9 @@ use serde_json::Value;
 
 fn oracle_schema_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../qv-work/quantum-vault/docs/schema")
+        .join("tests/data/schema")
         .canonicalize()
-        .expect("oracle schema dir")
+        .expect("self-contained schema fixture dir")
 }
 
 fn read_fixture_json(relative: &str) -> Result<Value> {

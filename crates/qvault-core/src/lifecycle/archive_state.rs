@@ -8,7 +8,8 @@ use crate::manifest::strict_json::{assert_canonical_bytes, parse_json_bytes_stri
 use crate::policy::{get_crypto_profile, get_nonce_contract_for_aead_mode};
 
 use super::digests::{
-    sha3_512_digest, validate_auth_policy_commitment_shape, DigestObject, SHA3_512_ALG,
+    auth_policy_level_to_value, compute_auth_policy_commitment, sha3_512_digest,
+    validate_auth_policy_commitment_shape, DigestObject, SHA3_512_ALG,
 };
 use super::validation::{
     exact_keys, exact_string, hex_string, integer, nullable_hex, number, object_from_pairs,
@@ -24,6 +25,27 @@ pub const CONTAINER_ID_ROLE: &str = "secondary-header-id";
 pub const CONTAINER_ID_ALG: &str = "SHA3-512(qenc-header-bytes)";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildArchiveStateDescriptorParams {
+    pub archive_id: String,
+    pub parent_state_id: Option<String>,
+    pub state_type: Option<String>,
+    pub crypto_profile_id: String,
+    pub kdf_tree_id: String,
+    pub nonce_policy_id: String,
+    pub nonce_mode: String,
+    pub counter_bits: u32,
+    pub max_chunk_count: u64,
+    pub aad_policy_id: String,
+    pub chunk_size: u64,
+    pub chunk_count: u64,
+    pub payload_length: u64,
+    pub qenc_hash: String,
+    pub container_id: String,
+    pub auth_policy_level: crate::auth::AuthPolicyLevel,
+    pub min_valid_signatures: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArchiveStateDescriptor {
     pub value: Value,
 }
@@ -36,6 +58,76 @@ pub struct CanonicalArchiveStateDescriptor {
     pub digest: DigestObject,
     pub state_id: String,
     pub canonicalization_label: String,
+}
+
+pub fn build_archive_state_descriptor(
+    params: &BuildArchiveStateDescriptorParams,
+) -> Result<ArchiveStateDescriptor> {
+    let auth_policy =
+        auth_policy_level_to_value(params.auth_policy_level, params.min_valid_signatures.max(1));
+    let auth_policy_commitment = compute_auth_policy_commitment(&auth_policy)?;
+    let parent_state_id = params
+        .parent_state_id
+        .as_ref()
+        .map(|value| Value::String(value.clone()))
+        .unwrap_or(Value::Null);
+    let value = object_from_pairs(vec![
+        ("schema", Value::String(ARCHIVE_STATE_SCHEMA.to_string())),
+        ("version", number(ARCHIVE_STATE_VERSION)),
+        (
+            "stateType",
+            Value::String(
+                params
+                    .state_type
+                    .clone()
+                    .unwrap_or_else(|| ARCHIVE_STATE_TYPE_DEFAULT.to_string()),
+            ),
+        ),
+        (
+            "canonicalization",
+            Value::String(ARCHIVE_STATE_CANONICALIZATION.to_string()),
+        ),
+        ("archiveId", Value::String(params.archive_id.clone())),
+        ("parentStateId", parent_state_id),
+        (
+            "cryptoProfileId",
+            Value::String(params.crypto_profile_id.clone()),
+        ),
+        ("kdfTreeId", Value::String(params.kdf_tree_id.clone())),
+        (
+            "noncePolicyId",
+            Value::String(params.nonce_policy_id.clone()),
+        ),
+        ("nonceMode", Value::String(params.nonce_mode.clone())),
+        ("counterBits", number(u64::from(params.counter_bits))),
+        ("maxChunkCount", number(params.max_chunk_count)),
+        ("aadPolicyId", Value::String(params.aad_policy_id.clone())),
+        (
+            "qenc",
+            object_from_pairs(vec![
+                ("chunkSize", number(params.chunk_size)),
+                ("chunkCount", number(params.chunk_count)),
+                ("payloadLength", number(params.payload_length)),
+                ("hashAlg", Value::String(SHA3_512_ALG.to_string())),
+                ("primaryAnchor", Value::String(PRIMARY_ANCHOR.to_string())),
+                ("qencHash", Value::String(params.qenc_hash.clone())),
+                ("containerId", Value::String(params.container_id.clone())),
+                (
+                    "containerIdRole",
+                    Value::String(CONTAINER_ID_ROLE.to_string()),
+                ),
+                (
+                    "containerIdAlg",
+                    Value::String(CONTAINER_ID_ALG.to_string()),
+                ),
+            ]),
+        ),
+        (
+            "authPolicyCommitment",
+            serde_json::to_value(auth_policy_commitment)?,
+        ),
+    ]);
+    validate_archive_state_descriptor_value(&value)
 }
 
 pub fn validate_archive_state_descriptor_value(value: &Value) -> Result<ArchiveStateDescriptor> {

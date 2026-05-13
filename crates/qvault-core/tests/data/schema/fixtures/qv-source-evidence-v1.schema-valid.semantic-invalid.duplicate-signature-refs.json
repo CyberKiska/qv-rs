@@ -1,0 +1,22 @@
+{
+  "schema": "quantum-vault-source-evidence/v1",
+  "version": 1,
+  "sourceEvidenceType": "source-evidence",
+  "canonicalization": "QV-JSON-RFC8785-v1",
+  "relationType": "reviewed-source",
+  "sourceObjectType": "archive-state-descriptor",
+  "sourceDigests": [
+    {
+      "alg": "SHA3-512",
+      "value": "45454545454545454545454545454545454545454545454545454545454545454545454545454545454545454545454545454545454545454545454545454545"
+    },
+    {
+      "alg": "SHA-256",
+      "value": "6767676767676767676767676767676767676767676767676767676767676767"
+    }
+  ],
+  "externalSourceSignatureRefs": [
+    "sig:external-1",
+    "sig:external-1"
+  ]
+}
