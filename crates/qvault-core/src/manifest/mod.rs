@@ -3,6 +3,7 @@ pub mod archive;
 #[cfg(feature = "legacy-mvp")]
 pub mod bundle;
 pub mod jcs;
+pub mod strict_json;
 
 #[cfg(feature = "legacy-mvp")]
 pub use archive::{

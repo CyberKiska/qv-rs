@@ -8,6 +8,7 @@ pub mod hash;
 pub mod kdf;
 #[cfg(feature = "legacy-mvp")]
 pub mod legacy;
+pub mod lifecycle;
 pub mod manifest;
 pub mod mlkem;
 pub mod policy;
