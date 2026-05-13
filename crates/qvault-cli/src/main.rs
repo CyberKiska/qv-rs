@@ -7,8 +7,11 @@ fn main() -> anyhow::Result<()> {
 }
 
 #[cfg(not(feature = "legacy-mvp"))]
-fn main() -> anyhow::Result<()> {
-    successor_main::main()
+fn main() {
+    if let Err(error) = successor_main::main() {
+        eprintln!("Error: {error:#}");
+        std::process::exit(successor_main::exit_code(&error));
+    }
 }
 
 #[cfg(not(feature = "legacy-mvp"))]
@@ -19,10 +22,16 @@ mod successor_main {
     use anyhow::{bail, Context, Result};
     use clap::{Parser, Subcommand, ValueEnum};
     use qvault_core::auth::AuthPolicyLevel;
+    use qvault_core::auth::{NamedBinaryArtifact, VerificationInputs};
     use qvault_core::bytes::from_hex;
+    use qvault_core::error::{QvCode, QvError};
     use qvault_core::hash::sha3_512_hex;
     use qvault_core::mlkem::validate_secret_key;
-    use qvault_core::qcont::{build_qvqcont7_shards, Qvqcont7BuildOptions, Qvqcont7BuildParams};
+    use qvault_core::qcont::{
+        build_qvqcont7_shards, parse_qvqcont7_shard, restore_qvqcont7_from_shards,
+        Qvqcont7BuildOptions, Qvqcont7BuildParams, RestoreQvqcont7Options,
+        RestoreQvqcont7Selection,
+    };
 
     #[derive(Parser)]
     #[command(name = "qvault-cli")]
@@ -35,6 +44,7 @@ mod successor_main {
     #[derive(Subcommand)]
     enum Command {
         Split(SplitArgs),
+        Restore(RestoreArgs),
     }
 
     #[derive(Parser)]
@@ -67,6 +77,44 @@ mod successor_main {
         state_type: Option<String>,
     }
 
+    #[derive(Parser)]
+    struct RestoreArgs {
+        #[arg(long, help = "Reconstructed .qenc output path")]
+        output_qenc: Option<PathBuf>,
+        #[arg(long, help = "Reconstructed ML-KEM private key output path")]
+        output_secret_key: Option<PathBuf>,
+        #[arg(
+            long,
+            help = "Canonical archive-state JSON bytes used as a selection filter"
+        )]
+        archive_state: Option<PathBuf>,
+        #[arg(
+            long,
+            help = "Canonical lifecycle bundle JSON bytes used as a selection filter"
+        )]
+        lifecycle_bundle: Option<PathBuf>,
+        #[arg(long, help = "Explicit archiveId selection filter")]
+        archive_id: Option<String>,
+        #[arg(long, help = "Explicit stateId selection filter")]
+        state_id: Option<String>,
+        #[arg(long, help = "Explicit cohortId selection filter")]
+        cohort_id: Option<String>,
+        #[arg(long, help = "Explicit lifecycle bundle digest selection filter")]
+        lifecycle_bundle_digest: Option<String>,
+        #[arg(long = "signature", help = "Detached archive-approval signature file")]
+        signatures: Vec<PathBuf>,
+        #[arg(long = "pqpk", help = "Pinned PQ signer key (.pqpk)")]
+        pq_public_keys: Vec<PathBuf>,
+        #[arg(long = "ots", help = "Detached OpenTimestamps proof file")]
+        timestamps: Vec<PathBuf>,
+        #[arg(long, help = "Expected Stellar signer address for Ed25519 signatures")]
+        expected_ed25519_signer: Option<String>,
+        #[arg(long)]
+        json: bool,
+        #[arg(required = true, help = "Input QVqcont-7 shard files")]
+        shards: Vec<PathBuf>,
+    }
+
     #[derive(Clone, Copy, Debug, ValueEnum)]
     enum AuthPolicyLevelArg {
         #[value(name = "integrity-only")]
@@ -91,7 +139,29 @@ mod successor_main {
         let cli = Cli::parse();
         match cli.command {
             Command::Split(args) => run_split(args),
+            Command::Restore(args) => run_restore(args),
         }
+    }
+
+    pub fn exit_code(error: &anyhow::Error) -> i32 {
+        for cause in error.chain() {
+            if let Some(qv_error) = cause.downcast_ref::<QvError>() {
+                return match qv_error.qv_code() {
+                    Some(
+                        QvCode::InvalidFormat
+                        | QvCode::InvalidSelection
+                        | QvCode::UnsupportedFormat,
+                    ) => 2,
+                    Some(QvCode::AmbiguousInputs) => 3,
+                    Some(
+                        QvCode::NotEnoughShards | QvCode::IntegrityMismatch | QvCode::RestoreFailed,
+                    ) => 4,
+                    Some(QvCode::VerificationFailed | QvCode::PolicyNotSatisfied) => 5,
+                    None => 1,
+                };
+            }
+        }
+        1
     }
 
     fn run_split(args: SplitArgs) -> Result<()> {
@@ -223,6 +293,123 @@ mod successor_main {
         Ok(())
     }
 
+    fn run_restore(args: RestoreArgs) -> Result<()> {
+        let archive_state_bytes = args
+            .archive_state
+            .as_ref()
+            .map(fs::read)
+            .transpose()
+            .with_context(|| "failed to read --archive-state")?;
+        let lifecycle_bundle_bytes = args
+            .lifecycle_bundle
+            .as_ref()
+            .map(fs::read)
+            .transpose()
+            .with_context(|| "failed to read --lifecycle-bundle")?;
+        let signatures = load_named_artifacts(&args.signatures)?;
+        let pq_public_keys = load_named_artifacts(&args.pq_public_keys)?;
+        let timestamps = load_named_artifacts(&args.timestamps)?;
+        let pinned_pq_public_key_file_bytes = select_single_pinned_pqpk(&pq_public_keys)?;
+
+        let shards = args
+            .shards
+            .iter()
+            .map(|path| {
+                let bytes =
+                    fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+                parse_qvqcont7_shard(&bytes)
+                    .with_context(|| format!("failed to parse shard {}", path.display()))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let restored = match restore_qvqcont7_from_shards(
+            &shards,
+            &RestoreQvqcont7Options {
+                selection: RestoreQvqcont7Selection {
+                    selected_archive_id: args.archive_id.clone(),
+                    selected_state_id: args.state_id.clone(),
+                    selected_cohort_id: args.cohort_id.clone(),
+                    archive_state_bytes,
+                    lifecycle_bundle_bytes,
+                    selected_lifecycle_bundle_digest_hex: args.lifecycle_bundle_digest.clone(),
+                },
+                verification: VerificationInputs {
+                    signatures,
+                    pinned_pq_public_key_file_bytes,
+                    timestamps,
+                    expected_ed25519_signer: normalize_optional_string(
+                        args.expected_ed25519_signer.as_deref(),
+                    ),
+                },
+                enforce_policy: true,
+            },
+        ) {
+            Ok(restored) => restored,
+            Err(error) if args.json => {
+                let report = restore_error_json(&error);
+                println!("{}", serde_json::to_string_pretty(&report)?);
+                return Err(error.into());
+            }
+            Err(error) => return Err(error.into()),
+        };
+
+        let default_base = default_restore_output_base(&args.shards);
+        let output_qenc = args
+            .output_qenc
+            .clone()
+            .unwrap_or_else(|| append_file_name_suffix(&default_base, ".qenc"));
+        let output_secret_key = args
+            .output_secret_key
+            .clone()
+            .unwrap_or_else(|| append_file_name_suffix(&default_base, ".qkey"));
+        fs::write(&output_qenc, &restored.qenc_bytes)
+            .with_context(|| format!("failed to write {}", output_qenc.display()))?;
+        fs::write(&output_secret_key, &restored.priv_key)
+            .with_context(|| format!("failed to write {}", output_secret_key.display()))?;
+
+        if args.json {
+            let report = serde_json::json!({
+                "command": "restore",
+                "ok": true,
+                "cliSchemaVersion": 1,
+                "archiveId": restored.archive_id,
+                "stateId": restored.state_id,
+                "cohortId": restored.cohort_id,
+                "archiveStateDigestHex": restored.archive_state_digest_hex,
+                "cohortBindingDigestHex": restored.cohort_binding_digest_hex,
+                "lifecycleBundleDigestHex": restored.lifecycle_bundle_digest_hex,
+                "containerHashHex": restored.container_hash,
+                "containerId": restored.container_id,
+                "recoveredQencHashHex": restored.recovered_qenc_hash,
+                "recoveredPrivateKeyHashHex": restored.recovered_priv_hash,
+                "qencOk": restored.qenc_ok,
+                "qkeyOk": restored.qkey_ok,
+                "rejectedShardIndices": restored.rejected_shard_indices,
+                "outputQenc": output_qenc,
+                "outputSecretKey": output_secret_key,
+                "authenticity": restored.authenticity,
+                "warnings": restored.warnings,
+            });
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        } else {
+            for warning in &restored.warnings {
+                eprintln!("warning: {warning}");
+            }
+            println!("Restored successor container successfully.");
+            println!("Archive ID: {}", restored.archive_id);
+            println!("State ID: {}", restored.state_id);
+            println!("Cohort ID: {}", restored.cohort_id);
+            println!(
+                "Lifecycle bundle digest: {}",
+                restored.lifecycle_bundle_digest_hex
+            );
+            println!("Container output: {}", output_qenc.display());
+            println!("Secret key output: {}", output_secret_key.display());
+        }
+
+        Ok(())
+    }
+
     fn validate_deterministic_flags(args: &SplitArgs) -> Result<()> {
         let has_deterministic = args.archive_id.is_some()
             || args.archive_id_random.is_some()
@@ -254,5 +441,81 @@ mod successor_main {
             bail!("split input filename must produce a safe output basename");
         }
         Ok(base.to_string())
+    }
+
+    fn load_named_artifacts(paths: &[PathBuf]) -> Result<Vec<NamedBinaryArtifact>> {
+        paths
+            .iter()
+            .map(|path| {
+                let bytes =
+                    fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+                Ok(NamedBinaryArtifact {
+                    name: path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("artifact")
+                        .to_string(),
+                    bytes,
+                })
+            })
+            .collect()
+    }
+
+    fn select_single_pinned_pqpk(public_keys: &[NamedBinaryArtifact]) -> Result<Option<Vec<u8>>> {
+        let Some(first) = public_keys.first() else {
+            return Ok(None);
+        };
+        for key in public_keys.iter().skip(1) {
+            if key.bytes != first.bytes {
+                bail!("restore accepts at most one distinct --pqpk pinned PQ signer key");
+            }
+        }
+        Ok(Some(first.bytes.clone()))
+    }
+
+    fn normalize_optional_string(value: Option<&str>) -> Option<String> {
+        value
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    }
+
+    fn default_restore_output_base(shards: &[PathBuf]) -> PathBuf {
+        let Some(first) = shards.first() else {
+            return PathBuf::from("restored");
+        };
+        let parent = first.parent().unwrap_or_else(|| Path::new(""));
+        let file_name = first
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("restored");
+        let base = file_name
+            .split(".part")
+            .next()
+            .filter(|value| !value.is_empty())
+            .unwrap_or("restored");
+        parent.join(base)
+    }
+
+    fn append_file_name_suffix(path: &Path, suffix: &str) -> PathBuf {
+        let mut file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("restored")
+            .to_string();
+        file_name.push_str(suffix);
+        path.parent()
+            .map(|parent| parent.join(&file_name))
+            .unwrap_or_else(|| PathBuf::from(file_name))
+    }
+
+    fn restore_error_json(error: &QvError) -> serde_json::Value {
+        serde_json::json!({
+            "command": "restore",
+            "ok": false,
+            "cliSchemaVersion": 1,
+            "qvCode": error.qv_code().map(|code| code.as_str()).unwrap_or("QV_ERROR"),
+            "error": error.to_string()
+        })
     }
 }

@@ -1,4 +1,3 @@
-#[cfg(feature = "legacy-mvp")]
 pub mod opentimestamps;
 pub mod qsig;
 pub mod signature_suites;
@@ -241,10 +240,8 @@ pub struct AuthenticityReport {
 }
 
 #[cfg(feature = "legacy-mvp")]
-pub use opentimestamps::{
-    assert_manifest_bundle_timestamps, inspect_timestamp_evidence, parse_open_timestamp_proof,
-    resolve_open_timestamp_target,
-};
+pub use opentimestamps::{assert_manifest_bundle_timestamps, inspect_timestamp_evidence};
+pub use opentimestamps::{parse_open_timestamp_proof, resolve_open_timestamp_target};
 pub use qsig::{unpack_pqpk, unpack_qsig, verify_qsig_against_bytes, ParsedPqpk, ParsedQsig};
 pub use signature_suites::{
     get_signature_suite_info, is_strong_pq_suite, list_supported_signature_suites,

@@ -1,9 +1,14 @@
+#[cfg(feature = "legacy-mvp")]
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+#[cfg(feature = "legacy-mvp")]
 use base64::Engine;
 
-use crate::auth::{SignatureArtifact, TimestampEvidence};
+use crate::auth::SignatureArtifact;
+#[cfg(feature = "legacy-mvp")]
+use crate::auth::TimestampEvidence;
 use crate::error::{err, Result};
 use crate::hash::sha256_hex;
+#[cfg(feature = "legacy-mvp")]
 use crate::manifest::ManifestBundle;
 
 const OTS_PREFIX: &[u8] =
@@ -127,10 +132,12 @@ pub fn resolve_open_timestamp_target(
     })
 }
 
+#[cfg(feature = "legacy-mvp")]
 pub fn assert_manifest_bundle_timestamps(bundle: &ManifestBundle) -> Result<()> {
     inspect_manifest_bundle_timestamps(bundle).map(|_| ())
 }
 
+#[cfg(feature = "legacy-mvp")]
 fn decode_bundle_signature_bytes(
     signature: &crate::manifest::ManifestBundleSignatureAttachment,
 ) -> Result<Vec<u8>> {
@@ -145,6 +152,7 @@ fn decode_bundle_signature_bytes(
         .map_err(|error| err(format!("Invalid base64 signature payload: {error}")))
 }
 
+#[cfg(feature = "legacy-mvp")]
 fn inspect_manifest_bundle_timestamps(bundle: &ManifestBundle) -> Result<Vec<TimestampEvidence>> {
     let signatures = bundle
         .attachments
@@ -213,6 +221,7 @@ fn inspect_manifest_bundle_timestamps(bundle: &ManifestBundle) -> Result<Vec<Tim
         .collect()
 }
 
+#[cfg(feature = "legacy-mvp")]
 pub fn inspect_timestamp_evidence(
     bundle: &ManifestBundle,
     external_timestamps: &[crate::auth::NamedBinaryArtifact],
