@@ -1,7 +1,9 @@
+#[cfg(feature = "legacy-mvp")]
 pub mod opentimestamps;
 pub mod qsig;
 pub mod signature_suites;
 pub mod stellar_sig;
+#[cfg(feature = "legacy-mvp")]
 pub mod verify;
 
 use serde::{Deserialize, Serialize};
@@ -238,6 +240,7 @@ pub struct AuthenticityReport {
     pub timestamp_evidence: Vec<TimestampEvidence>,
 }
 
+#[cfg(feature = "legacy-mvp")]
 pub use opentimestamps::{
     assert_manifest_bundle_timestamps, inspect_timestamp_evidence, parse_open_timestamp_proof,
     resolve_open_timestamp_target,
@@ -248,4 +251,5 @@ pub use signature_suites::{
     normalize_signature_suite, SignatureSuiteInfo,
 };
 pub use stellar_sig::verify_stellar_sig_against_bytes;
+#[cfg(feature = "legacy-mvp")]
 pub use verify::verify_manifest_signatures;

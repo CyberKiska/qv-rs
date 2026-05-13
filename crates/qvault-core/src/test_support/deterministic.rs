@@ -1,3 +1,4 @@
+#[cfg(feature = "legacy-mvp")]
 use crate::qcont::parse_qcont_shard;
 use crate::qenc::parse_qenc_header;
 
@@ -18,6 +19,7 @@ pub fn remove_qenc_key_commitment_bytes(container_bytes: &[u8]) -> Vec<u8> {
     output
 }
 
+#[cfg(feature = "legacy-mvp")]
 pub fn mutate_qcont_manifest_byte(bytes: &[u8], delta: u8) -> Vec<u8> {
     let parsed = parse_qcont_shard(bytes).expect("valid qcont shard");
     let mut output = bytes.to_vec();

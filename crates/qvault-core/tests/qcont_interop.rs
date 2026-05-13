@@ -1,11 +1,14 @@
+#![cfg(feature = "legacy-mvp")]
+
 use anyhow::{anyhow, Context, Result};
+use qvault_core::legacy::predecessor::{
+    attach_manifest_bundle_to_shards, build_qcont_shards, parse_qcont_shard, restore_from_shards,
+    AttachManifestBundleOptions, QcontBuildOptions, QcontBuildParams, QcontShard,
+    RestoreQcontOptions, RestoredQcont,
+};
 use qvault_core::qenc::decrypt_qenc;
 use qvault_core::test_support::fixtures::{fixture_path, read_fixture_bytes, read_fixture_json};
-use qvault_core::{
-    attach_manifest_bundle_to_shards, build_qcont_shards, parse_qcont_shard, restore_from_shards,
-    AttachManifestBundleOptions, AuthPolicyLevel, NamedBinaryArtifact, QcontBuildOptions,
-    QcontBuildParams, RestoreQcontOptions, VerificationInputs,
-};
+use qvault_core::{AuthPolicyLevel, NamedBinaryArtifact, VerificationInputs};
 use serde_json::Value;
 use std::path::PathBuf;
 
@@ -39,7 +42,7 @@ fn split_expectations<'a>(fixture: &'a LoadedSplitFixture) -> &'a Value {
 fn parse_shards_from_value(
     fixture: &LoadedSplitFixture,
     shards_value: &Value,
-) -> Result<Vec<qvault_core::QcontShard>> {
+) -> Result<Vec<QcontShard>> {
     shards_value
         .as_array()
         .context("expected shard array")?
@@ -54,13 +57,11 @@ fn parse_shards_from_value(
         .collect()
 }
 
-fn parse_base_fixture_shards(fixture: &LoadedSplitFixture) -> Result<Vec<qvault_core::QcontShard>> {
+fn parse_base_fixture_shards(fixture: &LoadedSplitFixture) -> Result<Vec<QcontShard>> {
     parse_shards_from_value(fixture, &split_expectations(fixture)["shards"])
 }
 
-fn parse_attached_fixture_shards(
-    fixture: &LoadedSplitFixture,
-) -> Result<Vec<qvault_core::QcontShard>> {
+fn parse_attached_fixture_shards(fixture: &LoadedSplitFixture) -> Result<Vec<QcontShard>> {
     parse_shards_from_value(fixture, &split_expectations(fixture)["attached"]["shards"])
 }
 
@@ -97,10 +98,7 @@ fn build_verification_inputs(
     })
 }
 
-fn assert_restored_fixture(
-    fixture: &LoadedSplitFixture,
-    restored: &qvault_core::RestoredQcont,
-) -> Result<()> {
+fn assert_restored_fixture(fixture: &LoadedSplitFixture, restored: &RestoredQcont) -> Result<()> {
     assert!(restored.qenc_ok);
     assert!(restored.qkey_ok);
     assert_eq!(restored.qenc_bytes, fixture.qenc_bytes);

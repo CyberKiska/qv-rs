@@ -1,6 +1,9 @@
+#![cfg(feature = "legacy-mvp")]
+
 use anyhow::{Context, Result};
+use qvault_core::legacy::predecessor::{build_qcont_shards, QcontBuildOptions, QcontBuildParams};
 use qvault_core::test_support::fixtures::{fixture_path, read_fixture_bytes, read_fixture_json};
-use qvault_core::{build_qcont_shards, AuthPolicyLevel, QcontBuildOptions, QcontBuildParams};
+use qvault_core::AuthPolicyLevel;
 use serde_json::Value;
 
 struct LoadedSplitFixture {

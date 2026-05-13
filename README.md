@@ -2,20 +2,17 @@
 
 `qv-cli` is a compatibility-first local Rust CLI for the current Quantum Vault container standard.
 
-It is not a protocol redesign. The neighboring `../qv-work/quantum-vault` project is the behavior and wire-format oracle, and this repo aims to match its current `.qenc`, manifest, bundle, `.qcont`, restore, and attach behavior as closely as practical.
+The neighboring Quantum Vault JS project is the behavior and wire-format oracle. Default builds are successor-only; retired manifest-v2 / manifest-bundle-v1 / `QVqcont-6` code is available only with `--features legacy-mvp`.
 
 ## Current Status
 
-Implemented today:
+Default build status:
 
-- `keygen`
-- `encrypt`
-- `decrypt`
-- `split`
-- `restore`
-- `attach`
+- current `.qenc` container primitives remain available
+- predecessor split/restore/attach CLI commands are disabled
+- successor lifecycle artifacts and `QVqcont-7` are staged but not implemented yet
 
-Implemented in `qvault-core` today:
+Implemented in `qvault-core` default builds:
 
 - ML-KEM-1024 key generation via `fips203`
 - current KMAC256 derivation tree with customization strings
@@ -23,30 +20,29 @@ Implemented in `qvault-core` today:
 - current `wrapped-v1` payload wrapping and unwrapping
 - current `QVB1` multi-file bundle payload (`.qvpack`) parsing and building
 - current `.qenc` header parse/build with mandatory key commitment
-- archive manifest v2 generation and validation
-- manifest bundle v1 generation and validation
-- current `.qcont` v6 parse/build/restore
 - detached signature verification for `.qsig` / `.pqpk` and Stellar `.sig`
-- OpenTimestamps linkage and reporting
-- bundle attach workflow for extended manifests and embedded shard bundles
 - direct Rust mirrors of the pinned JS Shamir and Reed-Solomon behavior used by Quantum Vault
 
-Verified today:
+Verified in default tests:
 
 - Rust decrypts current JS-produced `.qenc` fixtures
 - Rust reproduces current JS `.qenc` fixture bytes exactly when RNG inputs and timestamps are fixed
-- Rust reproduces current JS `.qcont` v6 shard bytes exactly for deterministic integrity-only fixtures
-- Rust restores JS-produced integrity-only, `any-signature`, and `strong-pq-signature` shard fixtures when the required signer binding is present through bundled keys or explicit user pins
-- Rust attach reproduces the JS attached bundle and attached shard fixtures
-- repeated attach cycles preserve the canonical manifest and match the JS bundle fixture
 - malformed and tampered inputs fail closed in the covered negative cases
+
+Legacy MVP checks are still available explicitly:
+
+```bash
+cargo test -p qvault-core --features legacy-mvp
+cargo run -p qvault-cli --features legacy-mvp -- --help
+```
 
 ## Repository Layout
 
-- `crates/qvault-core`: wire formats, crypto, manifests, bundle/auth logic, split/restore/attach, validation
+- `crates/qvault-core`: current container crypto plus staged successor migration modules
 - `crates/qvault-cli`: thin CLI over `qvault-core`
-- `fixtures/js-oracle`: deterministic JS-produced fixtures checked into the repo
-- `tools/gen-js-fixtures.mjs`: fixture exporter driven by the JS oracle
+- `fixtures/legacy-mvp/js-oracle`: retired predecessor fixtures, feature-gated
+- `fixtures/successor`: successor fixture root for later stages
+- `tools/gen-js-fixtures.mjs`: disabled until rewritten for successor lifecycle modules
 
 ## Build And Test
 
@@ -67,151 +63,37 @@ Run the Rust test suite:
 cargo test
 ```
 
-Regenerate the JS oracle fixtures:
+The old fixture generator is disabled because it targeted removed predecessor JS modules:
 
 ```bash
 node tools/gen-js-fixtures.mjs
 ```
 
-Note: the chunked `.qcont` parity and restore tests are intentionally heavy and take noticeably longer than the small-container tests.
-
 ## CLI Usage
 
 The binary built by Cargo is `qvault-cli`.
 
-Show help:
+Default CLI builds intentionally refuse predecessor split/restore/attach commands until
+the successor CLI is implemented.
+
+For migration-only legacy help:
 
 ```bash
-cargo run -p qvault-cli -- --help
-```
-
-Generate a keypair:
-
-```bash
-cargo run -p qvault-cli -- keygen
-```
-
-Defaults:
-
-- `keygen` writes `public.qkey` and `secret.qkey`
-- `encrypt` reads `public.qkey` by default
-- `decrypt` and `split` read `secret.qkey` by default
-- `split` writes to `<input-stem>-shards/` by default
-- `restore` writes `<shard-base>.qenc` and `<shard-base>.qkey` by default
-- `attach` writes to `<base>-attached/` by default
-
-Override paths only when needed:
-
-```bash
-cargo run -p qvault-cli -- keygen \
-  --public-key favorite-public.qkey \
-  --secret-key favorite-secret.qkey
-```
-
-Encrypt a single file into `.qenc`:
-
-```bash
-cargo run -p qvault-cli -- encrypt \
-  --input input.bin
-```
-
-Encrypt multiple files into one Quantum Vault bundle container:
-
-```bash
-cargo run -p qvault-cli -- encrypt \
-  --input a.txt \
-  --input b.bin
-```
-
-With multiple `--input` values, `qvault-cli` follows the JS oracle and first builds an internal `QVB1` bundle payload with a `.qvpack` original filename, then encrypts that bundle into one `.qenc`.
-
-Decrypt a `.qenc` container:
-
-```bash
-cargo run -p qvault-cli -- decrypt \
-  --input input.bin.qenc
-```
-
-For single-file payloads, the CLI restores the safe `originalFilename` from wrapped metadata when available, otherwise it falls back to the input stem.
-
-For bundle payloads, the CLI automatically extracts the bundled files into a directory derived from the stored `.qvpack` name.
-
-Split a `.qenc` plus matching secret key into `.qcont` shards:
-
-```bash
-cargo run -p qvault-cli -- split \
-  --input-qenc output.qenc \
-  --n 5 \
-  --k 3
-```
-
-Set a stronger archive policy explicitly:
-
-```bash
-cargo run -p qvault-cli -- split \
-  --input-qenc output.qenc \
-  --n 5 \
-  --k 3 \
-  --auth-policy-level strong-pq-signature \
-  --min-valid-signatures 1
-```
-
-Restore from shards using only embedded bundle data:
-
-```bash
-cargo run -p qvault-cli -- restore \
-  shards/*.qcont
-```
-
-Restore an archive that requires a detached PQ signature:
-
-```bash
-cargo run -p qvault-cli -- restore \
-  --signature archive.qsig \
-  --pqpk archive.pqpk \
-  shards/*.qcont
-```
-
-Restore using an uploaded extended manifest bundle to select a stale shard cohort:
-
-```bash
-cargo run -p qvault-cli -- restore \
-  --bundle archive.extended.qvmanifest.json \
-  shards/*.qcont
-```
-
-Attach detached signature material into a bundle and updated shards:
-
-```bash
-cargo run -p qvault-cli -- attach \
-  --signature archive.qsig \
-  --pqpk archive.pqpk \
-  --ots archive.qsig.ots \
-  shards/*.qcont
-```
-
-Write only the extended manifest bundle:
-
-```bash
-cargo run -p qvault-cli -- attach \
-  --bundle archive.extended.qvmanifest.json \
-  --signature archive-b.qsig \
-  --pqpk archive-b.pqpk \
-  --ots archive-b.qsig.ots \
-  --bundle-only
+cargo run -p qvault-cli --features legacy-mvp -- --help
 ```
 
 ## Compatibility Notes
 
-Current compatibility target:
+Current successor target:
 
 - `.qenc`: `QVv1-5-0`
-- archive manifest: `quantum-vault-archive-manifest/v2`
-- manifest bundle: `QV-Manifest-Bundle` v1
-- `.qcont`: `QVqcont-6`
+- archive-state descriptor: `quantum-vault-archive-state-descriptor/v1`
+- cohort binding: `quantum-vault-cohort-binding/v1`
+- lifecycle bundle: `QV-Lifecycle-Bundle` v1
+- `.qcont`: `QVqcont-7`
 - crypto profile: `QV-MLKEM1024-KMAC256-AES256GCM-SHA3_512-v2`
 - KDF tree: `QV-KDF-TREE-v2`
-- canonical JSON label: `QV-C14N-v1`
+- canonical JSON labels: `QV-JSON-RFC8785-v1`, `QV-BUNDLE-JSON-v1`
 
 Important compatibility rules:
 

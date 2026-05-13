@@ -1,12 +1,13 @@
+#![cfg(feature = "legacy-mvp")]
+
 use anyhow::{Context, Result};
-use qvault_core::auth::verify_manifest_signatures;
-use qvault_core::test_support::fixtures::{fixture_path, read_fixture_bytes, read_fixture_json};
-use qvault_core::{
-    parse_manifest_bundle_bytes, parse_qcont_shard, restore_from_shards, NamedBinaryArtifact,
-    RestoreQcontOptions, VerificationInputs,
+use qvault_core::legacy::predecessor::{
+    parse_qcont_shard, restore_from_shards, QcontShard, RestoreQcontOptions,
 };
+use qvault_core::test_support::fixtures::{fixture_path, read_fixture_bytes, read_fixture_json};
+use qvault_core::{NamedBinaryArtifact, VerificationInputs};
 use serde_json::Value;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 struct LoadedSplitFixture {
     root: PathBuf,
@@ -21,7 +22,7 @@ fn load_split_fixture(name: &str) -> Result<LoadedSplitFixture> {
     })
 }
 
-fn parse_base_fixture_shards(fixture: &LoadedSplitFixture) -> Result<Vec<qvault_core::QcontShard>> {
+fn parse_base_fixture_shards(fixture: &LoadedSplitFixture) -> Result<Vec<QcontShard>> {
     fixture.expectations["split"]["shards"]
         .as_array()
         .context("expected shard array")?
@@ -58,12 +59,6 @@ fn build_verification_inputs(
         timestamps: Vec::new(),
         expected_ed25519_signer: expected_ed25519_signer.map(ToOwned::to_owned),
     })
-}
-
-fn example_path(relative: impl AsRef<Path>) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../examples")
-        .join(relative)
 }
 
 #[test]
@@ -179,41 +174,6 @@ fn uploaded_bundle_rejects_qsig_public_key_ref_suite_mismatch() -> Result<()> {
             .to_string()
             .contains("no valid pinned signature satisfies archive policy"),
         "unexpected error: {error}"
-    );
-    Ok(())
-}
-
-#[test]
-fn stellar_public_key_ref_requires_stellar_address_encoding() -> Result<()> {
-    let bundle_path = example_path("single/The Cranberries - Zombie.extended.qvmanifest.json");
-    let bundle_bytes = std::fs::read(bundle_path)?;
-    let mut bundle_json: Value = serde_json::from_slice(&bundle_bytes)?;
-    bundle_json["attachments"]["publicKeys"][0]["encoding"] = Value::String("base64".to_string());
-
-    let parsed_bundle = parse_manifest_bundle_bytes(&serde_json::to_vec(&bundle_json)?, true)?;
-    let verification = verify_manifest_signatures(
-        &parsed_bundle.manifest_bytes,
-        &parsed_bundle.bundle.attachments.signatures,
-        &parsed_bundle.bundle.attachments.public_keys,
-        &[],
-        None,
-        None,
-    )?;
-
-    let stellar_result = verification
-        .results
-        .iter()
-        .find(|result| result.format == "stellar-sig")
-        .context("missing stellar-sig result")?;
-    assert!(!stellar_result.ok);
-    assert!(
-        stellar_result
-            .error
-            .as_deref()
-            .unwrap_or_default()
-            .contains("stellar-address"),
-        "unexpected stellar error: {:?}",
-        stellar_result.error
     );
     Ok(())
 }

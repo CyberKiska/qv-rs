@@ -1,3 +1,5 @@
+#![cfg(feature = "legacy-mvp")]
+
 use anyhow::Result;
 use serde_json::Value;
 

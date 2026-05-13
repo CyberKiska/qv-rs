@@ -1,7 +1,10 @@
+#[cfg(feature = "legacy-mvp")]
 pub mod archive;
+#[cfg(feature = "legacy-mvp")]
 pub mod bundle;
 pub mod jcs;
 
+#[cfg(feature = "legacy-mvp")]
 pub use archive::{
     build_archive_manifest, canonicalize_archive_manifest, parse_archive_manifest_bytes,
     ArchiveManifest, ArchiveManifestCanonicalized, ArchiveManifestQenc, ArchiveManifestReedSolomon,
@@ -11,6 +14,7 @@ pub use archive::{
     ARCHIVE_MANIFEST_VERSION, LEGACY_ARCHIVE_MANIFEST_SCHEMA, LEGACY_ARCHIVE_MANIFEST_VERSION,
     QV_CANONICALIZATION_LABEL,
 };
+#[cfg(feature = "legacy-mvp")]
 pub use bundle::{
     assert_auth_policy_commitment, build_initial_manifest_bundle, canonicalize_manifest_bundle,
     compute_auth_policy_commitment, compute_manifest_digest, normalize_auth_policy,

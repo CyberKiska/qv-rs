@@ -13,7 +13,7 @@ pub fn repo_root() -> PathBuf {
 }
 
 pub fn fixtures_root() -> PathBuf {
-    repo_root().join("fixtures/js-oracle")
+    repo_root().join("fixtures/legacy-mvp/js-oracle")
 }
 
 pub fn fixture_path(name: &str) -> PathBuf {

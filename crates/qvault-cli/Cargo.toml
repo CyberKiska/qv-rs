@@ -4,6 +4,10 @@ edition.workspace = true
 license.workspace = true
 version.workspace = true
 
+[features]
+default = []
+legacy-mvp = ["qvault-core/legacy-mvp"]
+
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
