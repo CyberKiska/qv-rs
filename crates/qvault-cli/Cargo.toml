@@ -10,6 +10,7 @@ legacy-mvp = ["qvault-core/legacy-mvp"]
 
 [dependencies]
 anyhow.workspace = true
+base64.workspace = true
 clap.workspace = true
 qvault-core = { path = "../qvault-core" }
 serde_json.workspace = true
