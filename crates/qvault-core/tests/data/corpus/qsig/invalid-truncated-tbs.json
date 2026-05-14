@@ -1,0 +1,12 @@
+{
+  "id": "qsig-invalid-truncated-tbs",
+  "description": "Invalid .qsig truncated inside the TBS framing region",
+  "artifactType": ".qsig",
+  "artifactVersion": "PQSG-v2",
+  "encoding": "base64",
+  "bytes": "UFFTRwIAAQEBAQcALchMxvcVmG0=",
+  "expectedDigestAlg": "SHA3-512",
+  "expectedDigest": "0d7b1ad6ca7c144cf0e2fbb457f71e7d455632af7791add879430269be0f3f4247be9c496e99fd257e69670a3015aafe3d5c093a258ba1642d52757fc5b8b06f",
+  "valid": false,
+  "rejectionReason": "Truncated payloadDigest"
+}

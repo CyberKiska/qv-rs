@@ -1,0 +1,14 @@
+{
+  "id": "pqpk-slhdsa-shake-256f-valid",
+  "description": "Valid .pqpk detached PQ public key for slhdsa-shake-256f",
+  "artifactType": ".pqpk",
+  "artifactVersion": "PQPK-v1",
+  "encoding": "base64",
+  "bytes": "UFFQSwEBFABAAAAAsLGys7S1tre4ubq7vL2+v8DBwsPExcbHyMnKy8zNzs9Zc5frLNwrC7XUjMrkqCZBG+od8RDXZeH93zy6okzzQBD2Kd0=",
+  "expectedDigestAlg": "SHA3-512",
+  "expectedDigest": "6e9c6d7beeb526beefa0518f28a1117acb7c6ddac06c9c25633f5300759b6084bd0532cee755dc2f8dae7ad845cef8b17af5088a2d8cc299eb6f48c29aaf3c7e",
+  "valid": true,
+  "runtime": {
+    "expectedSuiteId": 20
+  }
+}

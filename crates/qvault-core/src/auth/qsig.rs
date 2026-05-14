@@ -11,10 +11,19 @@ const MAGIC_QSIG: &[u8; 4] = b"PQSG";
 const MAGIC_TBS: &[u8; 4] = b"QSTB";
 const MAGIC_PQPK: &[u8; 4] = b"PQPK";
 const FILE_HASH_LEN: usize = 64;
+const AUTH_META_DIGEST_LEN: usize = 32;
 const SIG_HASH_ALG_ID_SHA3_512: u8 = 0x01;
+const AUTH_DIGEST_ALG_ID_SHA3_256: u8 = 0x01;
+const SIGNATURE_PROFILE_ID_PQ_DETACHED_PURE_CONTEXT_V2: u8 = 0x01;
+const QSIG_FORMAT_VERSION_MAJOR: u8 = 0x02;
+const QSIG_TBS_VERSION_MAJOR: u8 = 0x02;
+const SUPPORTED_QSIG_CONTEXT: &[u8] = b"quantum-signer/v2";
 const FP_ALG_ID_SHA3_256: u8 = 0x01;
 const FP_RECORD_LEN: usize = 33;
-const QSIG_FLAG_PROFILE_MVP_V1: u16 = 0x000f;
+const QSIG_FLAG_CTX_PRESENT: u16 = 0x0001;
+const QSIG_KNOWN_FLAGS: u16 = 0x000f;
+#[cfg(feature = "legacy-mvp")]
+const LEGACY_QSIG_FLAG_PROFILE_MVP_V1: u16 = 0x000f;
 const META_TAG_SIGNER_PUBLIC_KEY: u8 = 0x10;
 const META_TAG_SIGNER_FINGERPRINT: u8 = 0x11;
 
@@ -106,7 +115,11 @@ pub(crate) fn qsig_suite_name(suite_id: u8) -> Result<&'static str> {
         SUITE_ID_SLH_DSA_SHAKE_192S => "slhdsa-shake-192s",
         SUITE_ID_SLH_DSA_SHAKE_256S => "slhdsa-shake-256s",
         SUITE_ID_SLH_DSA_SHAKE_256F => "slhdsa-shake-256f",
-        _ => return Err(err(format!("Unsupported .qsig suiteId: {suite_id}"))),
+        _ => {
+            return Err(err(format!(
+                "Unsupported detached PQ signature suiteId: {suite_id}"
+            )))
+        }
     })
 }
 
@@ -142,6 +155,33 @@ fn decode_metadata_tlv(bytes: &[u8]) -> Result<QsigMetadata> {
     })
 }
 
+fn decode_display_metadata_tlv(bytes: &[u8]) -> Result<()> {
+    let mut reader = Reader::new(bytes);
+    let mut last_tag = 0i32 - 1;
+
+    while reader.remaining() > 0 {
+        let tag = reader.u8("displayMeta.tag")?;
+        let len = usize::from(reader.u16le("displayMeta.len")?);
+        let _value = reader.take(len, &format!("displayMeta.tag.{tag}"))?;
+
+        if i32::from(tag) <= last_tag {
+            return Err(err("Non-canonical displayMeta TLV order"));
+        }
+        last_tag = i32::from(tag);
+
+        match tag {
+            0x01..=0x03 => {}
+            other if other >= 0x80 => {
+                return Err(err(format!(
+                    "Unknown critical displayMeta TLV tag: {other}"
+                )))
+            }
+            other => return Err(err(format!("Unexpected displayMeta tag: {other}"))),
+        }
+    }
+    Ok(())
+}
+
 fn unpack_signer_fingerprint(record: &[u8]) -> Result<SignerFingerprint> {
     if record.len() != FP_RECORD_LEN {
         return Err(err("Invalid signer fingerprint record length"));
@@ -158,6 +198,34 @@ fn unpack_signer_fingerprint(record: &[u8]) -> Result<SignerFingerprint> {
 }
 
 fn build_tbs(
+    version_major: u8,
+    version_minor: u8,
+    suite_id: u8,
+    hash_alg_id: u8,
+    signature_profile_id: u8,
+    auth_digest_alg_id: u8,
+    file_hash: &[u8; 64],
+    auth_meta_digest: &[u8; AUTH_META_DIGEST_LEN],
+) -> Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(4 + 8 + file_hash.len() + auth_meta_digest.len());
+    out.extend_from_slice(MAGIC_TBS);
+    out.extend_from_slice(&[
+        QSIG_TBS_VERSION_MAJOR,
+        0x00,
+        version_major,
+        version_minor,
+        suite_id,
+        signature_profile_id,
+        hash_alg_id,
+        auth_digest_alg_id,
+    ]);
+    out.extend_from_slice(file_hash);
+    out.extend_from_slice(auth_meta_digest);
+    Ok(out)
+}
+
+#[cfg(feature = "legacy-mvp")]
+fn build_legacy_tbs_v1(
     version_major: u8,
     version_minor: u8,
     suite_id: u8,
@@ -192,12 +260,141 @@ pub fn unpack_qsig(sig_bytes: &[u8]) -> Result<ParsedQsig> {
 
     let version_major = reader.u8("versionMajor")?;
     let version_minor = reader.u8("versionMinor")?;
-    if version_major != 0x01 {
+    #[cfg(feature = "legacy-mvp")]
+    if version_major == 0x01 {
+        return unpack_legacy_qsig_v1(reader, version_major, version_minor);
+    }
+    if version_major != QSIG_FORMAT_VERSION_MAJOR {
         return Err(err(format!(
-            "Unsupported .qsig major version: {version_major}"
+            "Unsupported detached PQ signature major version: {version_major}"
         )));
     }
 
+    let suite_id = reader.u8("suiteId")?;
+    qsig_suite_name(suite_id)?;
+
+    let signature_profile_id = reader.u8("signatureProfileId")?;
+    if signature_profile_id != SIGNATURE_PROFILE_ID_PQ_DETACHED_PURE_CONTEXT_V2 {
+        return Err(err(format!(
+            "Unsupported detached PQ signature profile: {signature_profile_id}"
+        )));
+    }
+
+    let hash_alg_id = reader.u8("payloadDigestAlgId")?;
+    if hash_alg_id != SIG_HASH_ALG_ID_SHA3_512 {
+        return Err(err(format!(
+            "Unsupported detached PQ signature hashAlgId: {hash_alg_id}"
+        )));
+    }
+
+    let auth_digest_alg_id = reader.u8("authDigestAlgId")?;
+    if auth_digest_alg_id != AUTH_DIGEST_ALG_ID_SHA3_256 {
+        return Err(err(format!(
+            "Unsupported detached PQ signature authDigestAlgId: {auth_digest_alg_id}"
+        )));
+    }
+
+    let flags = reader.u16le("flags")?;
+    if flags & !QSIG_KNOWN_FLAGS != 0 {
+        return Err(err(format!(
+            "Unsupported detached PQ signature flags: {flags}"
+        )));
+    }
+
+    let mut file_hash = [0u8; FILE_HASH_LEN];
+    file_hash.copy_from_slice(reader.take(FILE_HASH_LEN, "payloadDigest")?);
+    let mut auth_meta_digest = [0u8; AUTH_META_DIGEST_LEN];
+    auth_meta_digest.copy_from_slice(reader.take(AUTH_META_DIGEST_LEN, "authMetaDigest")?);
+    let ctx_len = usize::from(reader.u8("ctxLen")?);
+    let reserved = reader.u8("reserved")?;
+    if reserved != 0 {
+        return Err(err("Invalid detached PQ signature reserved field"));
+    }
+    let auth_meta_len = usize::from(reader.u16le("authMetaLen")?);
+    let display_meta_len = usize::from(reader.u16le("displayMetaLen")?);
+    let sig_len = reader.u32le("sigLen")? as usize;
+
+    let expected_remaining = ctx_len + auth_meta_len + display_meta_len + sig_len;
+    if reader.remaining() != expected_remaining {
+        return Err(err("Invalid detached PQ signature length framing"));
+    }
+
+    let ctx_bytes = reader.take(ctx_len, "ctxBytes")?.to_vec();
+    if ctx_bytes.is_empty() {
+        return Err(err("Detached PQ signature context is required"));
+    }
+    if flags & QSIG_FLAG_CTX_PRESENT == 0 {
+        return Err(err("Detached PQ signature context flag is missing"));
+    }
+    if ctx_bytes != SUPPORTED_QSIG_CONTEXT {
+        return Err(err(format!(
+            "Unsupported detached PQ signature context: {}",
+            String::from_utf8_lossy(&ctx_bytes)
+        )));
+    }
+
+    let auth_meta_bytes = reader.take(auth_meta_len, "authMetaBytes")?;
+    let display_meta_bytes = reader.take(display_meta_len, "displayMetaBytes")?;
+    let signature = reader.take(sig_len, "signature")?.to_vec();
+
+    let recomputed_auth_meta_digest = sha3_256(auth_meta_bytes);
+    if !timing_safe_equal(&recomputed_auth_meta_digest, &auth_meta_digest) {
+        return Err(err("Detached PQ signature authMetaDigest mismatch"));
+    }
+    let metadata = decode_metadata_tlv(auth_meta_bytes)?;
+    if metadata.signer_public_key.is_none() || metadata.signer_fingerprint_record.is_none() {
+        return Err(err(
+            "Detached PQ signature authMeta is missing signer binding",
+        ));
+    }
+    let _display_metadata = decode_display_metadata_tlv(display_meta_bytes)?;
+    let signer_fingerprint = metadata
+        .signer_fingerprint_record
+        .as_deref()
+        .map(unpack_signer_fingerprint)
+        .transpose()?;
+    if let (Some(public_key), Some(fingerprint)) =
+        (&metadata.signer_public_key, &signer_fingerprint)
+    {
+        if !timing_safe_equal(&sha3_256(public_key), &fingerprint.digest) {
+            return Err(err(
+                "Signer fingerprint does not match signer public key in authMeta",
+            ));
+        }
+    }
+
+    let tbs = build_tbs(
+        version_major,
+        version_minor,
+        suite_id,
+        hash_alg_id,
+        signature_profile_id,
+        auth_digest_alg_id,
+        &file_hash,
+        &auth_meta_digest,
+    )?;
+
+    Ok(ParsedQsig {
+        version_major,
+        version_minor,
+        suite_id,
+        hash_alg_id,
+        flags,
+        file_hash,
+        ctx_bytes,
+        signature,
+        metadata,
+        signer_fingerprint,
+        tbs,
+    })
+}
+
+#[cfg(feature = "legacy-mvp")]
+fn unpack_legacy_qsig_v1(
+    mut reader: Reader<'_>,
+    version_major: u8,
+    version_minor: u8,
+) -> Result<ParsedQsig> {
     let suite_id = reader.u8("suiteId")?;
     qsig_suite_name(suite_id)?;
 
@@ -207,7 +404,7 @@ pub fn unpack_qsig(sig_bytes: &[u8]) -> Result<ParsedQsig> {
     }
 
     let flags = reader.u16le("flags")?;
-    if flags != 0 && flags != QSIG_FLAG_PROFILE_MVP_V1 {
+    if flags != 0 && flags != LEGACY_QSIG_FLAG_PROFILE_MVP_V1 {
         return Err(err(format!("Unsupported .qsig flags value: {flags}")));
     }
 
@@ -233,7 +430,7 @@ pub fn unpack_qsig(sig_bytes: &[u8]) -> Result<ParsedQsig> {
         .map(unpack_signer_fingerprint)
         .transpose()?;
 
-    let tbs = build_tbs(
+    let tbs = build_legacy_tbs_v1(
         version_major,
         version_minor,
         suite_id,
@@ -249,7 +446,7 @@ pub fn unpack_qsig(sig_bytes: &[u8]) -> Result<ParsedQsig> {
         hash_alg_id,
         flags,
         file_hash,
-        ctx_bytes,
+        ctx_bytes: Vec::new(),
         signature,
         metadata,
         signer_fingerprint,
@@ -266,14 +463,14 @@ fn crc32(bytes: &[u8]) -> u32 {
 pub fn unpack_pqpk(public_key_file_bytes: &[u8]) -> Result<ParsedPqpk> {
     let mut reader = Reader::new(public_key_file_bytes);
     if reader.take(4, "magic")? != MAGIC_PQPK {
-        return Err(err("Invalid .pqpk magic"));
+        return Err(err("Invalid detached PQ public key magic"));
     }
 
     let version_major = reader.u8("versionMajor")?;
     let _version_minor = reader.u8("versionMinor")?;
     if version_major != 0x01 {
         return Err(err(format!(
-            "Unsupported .pqpk major version: {version_major}"
+            "Unsupported detached PQ public key major version: {version_major}"
         )));
     }
 
@@ -282,17 +479,17 @@ pub fn unpack_pqpk(public_key_file_bytes: &[u8]) -> Result<ParsedPqpk> {
 
     let reserved = reader.u8("reserved")?;
     if reserved != 0 {
-        return Err(err("Invalid .pqpk reserved field"));
+        return Err(err("Invalid detached PQ public key flags"));
     }
 
     let key_len = reader.u32le("keyLen")? as usize;
     let key_bytes = reader.take(key_len, "keyBytes")?.to_vec();
     let checksum = reader.u32le("crc32")?;
     if reader.remaining() != 0 {
-        return Err(err("Trailing bytes in .pqpk"));
+        return Err(err("Trailing bytes in detached PQ public key"));
     }
     if checksum != crc32(&public_key_file_bytes[..public_key_file_bytes.len() - 4]) {
-        return Err(err("Invalid .pqpk CRC32"));
+        return Err(err("Invalid detached PQ public key CRC32"));
     }
 
     Ok(ParsedPqpk {
@@ -301,15 +498,29 @@ pub fn unpack_pqpk(public_key_file_bytes: &[u8]) -> Result<ParsedPqpk> {
     })
 }
 
-fn verify_by_suite(suite_id: u8, signature: &[u8], message: &[u8], public_key: &[u8]) -> bool {
+fn verify_by_suite(
+    suite_id: u8,
+    signature: &[u8],
+    message: &[u8],
+    public_key: &[u8],
+    context: &[u8],
+) -> bool {
     match suite_id {
-        SUITE_ID_ML_DSA_44 => verify_ml_dsa_44(signature, message, public_key),
-        SUITE_ID_ML_DSA_65 => verify_ml_dsa_65(signature, message, public_key),
-        SUITE_ID_ML_DSA_87 => verify_ml_dsa_87(signature, message, public_key),
-        SUITE_ID_SLH_DSA_SHAKE_128S => verify_slh_dsa_shake_128s(signature, message, public_key),
-        SUITE_ID_SLH_DSA_SHAKE_192S => verify_slh_dsa_shake_192s(signature, message, public_key),
-        SUITE_ID_SLH_DSA_SHAKE_256S => verify_slh_dsa_shake_256s(signature, message, public_key),
-        SUITE_ID_SLH_DSA_SHAKE_256F => verify_slh_dsa_shake_256f(signature, message, public_key),
+        SUITE_ID_ML_DSA_44 => verify_ml_dsa_44(signature, message, public_key, context),
+        SUITE_ID_ML_DSA_65 => verify_ml_dsa_65(signature, message, public_key, context),
+        SUITE_ID_ML_DSA_87 => verify_ml_dsa_87(signature, message, public_key, context),
+        SUITE_ID_SLH_DSA_SHAKE_128S => {
+            verify_slh_dsa_shake_128s(signature, message, public_key, context)
+        }
+        SUITE_ID_SLH_DSA_SHAKE_192S => {
+            verify_slh_dsa_shake_192s(signature, message, public_key, context)
+        }
+        SUITE_ID_SLH_DSA_SHAKE_256S => {
+            verify_slh_dsa_shake_256s(signature, message, public_key, context)
+        }
+        SUITE_ID_SLH_DSA_SHAKE_256F => {
+            verify_slh_dsa_shake_256f(signature, message, public_key, context)
+        }
         _ => false,
     }
 }
@@ -431,6 +642,7 @@ pub fn verify_qsig_against_bytes(
             &parsed.signature,
             &parsed.tbs,
             &bundled_key,
+            &parsed.ctx_bytes,
         ) {
             return Ok(fail_result(
                 "PQ signature did not verify with bundled public key",
@@ -493,7 +705,13 @@ pub fn verify_qsig_against_bytes(
     let verified_candidate = candidates
         .iter()
         .find(|(public_key, _)| {
-            verify_by_suite(parsed.suite_id, &parsed.signature, &parsed.tbs, public_key)
+            verify_by_suite(
+                parsed.suite_id,
+                &parsed.signature,
+                &parsed.tbs,
+                public_key,
+                &parsed.ctx_bytes,
+            )
         })
         .cloned();
 
@@ -552,7 +770,7 @@ pub fn verify_qsig_against_bytes(
     })
 }
 
-fn verify_ml_dsa_44(signature: &[u8], message: &[u8], public_key: &[u8]) -> bool {
+fn verify_ml_dsa_44(signature: &[u8], message: &[u8], public_key: &[u8], context: &[u8]) -> bool {
     if signature.len() != fips204::ml_dsa_44::SIG_LEN
         || public_key.len() != fips204::ml_dsa_44::PK_LEN
     {
@@ -567,10 +785,10 @@ fn verify_ml_dsa_44(signature: &[u8], message: &[u8], public_key: &[u8]) -> bool
     let Ok(pk) = fips204::ml_dsa_44::PublicKey::try_from_bytes(pk_bytes) else {
         return false;
     };
-    pk.verify(message, &sig, &[])
+    pk.verify(message, &sig, context)
 }
 
-fn verify_ml_dsa_65(signature: &[u8], message: &[u8], public_key: &[u8]) -> bool {
+fn verify_ml_dsa_65(signature: &[u8], message: &[u8], public_key: &[u8], context: &[u8]) -> bool {
     if signature.len() != fips204::ml_dsa_65::SIG_LEN
         || public_key.len() != fips204::ml_dsa_65::PK_LEN
     {
@@ -585,10 +803,10 @@ fn verify_ml_dsa_65(signature: &[u8], message: &[u8], public_key: &[u8]) -> bool
     let Ok(pk) = fips204::ml_dsa_65::PublicKey::try_from_bytes(pk_bytes) else {
         return false;
     };
-    pk.verify(message, &sig, &[])
+    pk.verify(message, &sig, context)
 }
 
-fn verify_ml_dsa_87(signature: &[u8], message: &[u8], public_key: &[u8]) -> bool {
+fn verify_ml_dsa_87(signature: &[u8], message: &[u8], public_key: &[u8], context: &[u8]) -> bool {
     if signature.len() != fips204::ml_dsa_87::SIG_LEN
         || public_key.len() != fips204::ml_dsa_87::PK_LEN
     {
@@ -603,10 +821,15 @@ fn verify_ml_dsa_87(signature: &[u8], message: &[u8], public_key: &[u8]) -> bool
     let Ok(pk) = fips204::ml_dsa_87::PublicKey::try_from_bytes(pk_bytes) else {
         return false;
     };
-    pk.verify(message, &sig, &[])
+    pk.verify(message, &sig, context)
 }
 
-fn verify_slh_dsa_shake_128s(signature: &[u8], message: &[u8], public_key: &[u8]) -> bool {
+fn verify_slh_dsa_shake_128s(
+    signature: &[u8],
+    message: &[u8],
+    public_key: &[u8],
+    context: &[u8],
+) -> bool {
     if signature.len() != fips205::slh_dsa_shake_128s::SIG_LEN
         || public_key.len() != fips205::slh_dsa_shake_128s::PK_LEN
     {
@@ -621,10 +844,15 @@ fn verify_slh_dsa_shake_128s(signature: &[u8], message: &[u8], public_key: &[u8]
     let Ok(pk) = fips205::slh_dsa_shake_128s::PublicKey::try_from_bytes(&pk_bytes) else {
         return false;
     };
-    pk.verify(message, &sig, b"")
+    pk.verify(message, &sig, context)
 }
 
-fn verify_slh_dsa_shake_192s(signature: &[u8], message: &[u8], public_key: &[u8]) -> bool {
+fn verify_slh_dsa_shake_192s(
+    signature: &[u8],
+    message: &[u8],
+    public_key: &[u8],
+    context: &[u8],
+) -> bool {
     if signature.len() != fips205::slh_dsa_shake_192s::SIG_LEN
         || public_key.len() != fips205::slh_dsa_shake_192s::PK_LEN
     {
@@ -639,10 +867,15 @@ fn verify_slh_dsa_shake_192s(signature: &[u8], message: &[u8], public_key: &[u8]
     let Ok(pk) = fips205::slh_dsa_shake_192s::PublicKey::try_from_bytes(&pk_bytes) else {
         return false;
     };
-    pk.verify(message, &sig, b"")
+    pk.verify(message, &sig, context)
 }
 
-fn verify_slh_dsa_shake_256s(signature: &[u8], message: &[u8], public_key: &[u8]) -> bool {
+fn verify_slh_dsa_shake_256s(
+    signature: &[u8],
+    message: &[u8],
+    public_key: &[u8],
+    context: &[u8],
+) -> bool {
     if signature.len() != fips205::slh_dsa_shake_256s::SIG_LEN
         || public_key.len() != fips205::slh_dsa_shake_256s::PK_LEN
     {
@@ -657,10 +890,15 @@ fn verify_slh_dsa_shake_256s(signature: &[u8], message: &[u8], public_key: &[u8]
     let Ok(pk) = fips205::slh_dsa_shake_256s::PublicKey::try_from_bytes(&pk_bytes) else {
         return false;
     };
-    pk.verify(message, &sig, b"")
+    pk.verify(message, &sig, context)
 }
 
-fn verify_slh_dsa_shake_256f(signature: &[u8], message: &[u8], public_key: &[u8]) -> bool {
+fn verify_slh_dsa_shake_256f(
+    signature: &[u8],
+    message: &[u8],
+    public_key: &[u8],
+    context: &[u8],
+) -> bool {
     if signature.len() != fips205::slh_dsa_shake_256f::SIG_LEN
         || public_key.len() != fips205::slh_dsa_shake_256f::PK_LEN
     {
@@ -675,5 +913,5 @@ fn verify_slh_dsa_shake_256f(signature: &[u8], message: &[u8], public_key: &[u8]
     let Ok(pk) = fips205::slh_dsa_shake_256f::PublicKey::try_from_bytes(&pk_bytes) else {
         return false;
     };
-    pk.verify(message, &sig, b"")
+    pk.verify(message, &sig, context)
 }
