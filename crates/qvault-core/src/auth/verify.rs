@@ -42,6 +42,7 @@ fn detect_external_signature_type(signature: &NamedBinaryArtifact) -> &'static s
 fn failed_signature_check(format: &str, error: impl Into<String>) -> SignatureCheckResult {
     SignatureCheckResult {
         ok: false,
+        self_signed: false,
         bundle_pinned: false,
         user_pinned: false,
         signer_pinned: false,
@@ -62,6 +63,8 @@ fn failed_signature_check(format: &str, error: impl Into<String>) -> SignatureCh
         signature_content_digest_hex: None,
         ots_stamped_digest_alg: None,
         ots_stamped_digest_hex: None,
+        proof_identity_digest_alg: None,
+        proof_identity_digest_hex: None,
         counted_for_policy: false,
         signature_bytes: None,
     }
@@ -304,6 +307,13 @@ fn build_counts(
         pinned_valid_strong_pq: 0,
         bundle_pinned_valid_total: 0,
         user_pinned_valid_total: 0,
+        valid_archive_approval: 0,
+        valid_archive_approval_strong_pq: 0,
+        archive_approval_pinned_valid_total: 0,
+        archive_approval_bundle_pinned_valid_total: 0,
+        archive_approval_user_pinned_valid_total: 0,
+        valid_maintenance: 0,
+        valid_source_evidence: 0,
     };
     let mut duplicate_warnings = Vec::new();
     let mut unique_valid =

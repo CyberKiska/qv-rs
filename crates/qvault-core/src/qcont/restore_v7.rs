@@ -12,6 +12,7 @@ use crate::auth::{
     SignatureVerificationReport, SignatureVerificationStatus, TimestampEvidence,
     VerificationInputs,
 };
+use crate::auth::successor_policy::finalize_successor_archive_approval_verification;
 use crate::erasure;
 use crate::error::{coded, err, QvCode, Result};
 use crate::hash::{sha256_hex, sha3_512_hex};
@@ -853,10 +854,9 @@ fn evaluate_successor_authenticity(
             &archive_state_digest_hex,
             verification_inputs,
         ) {
-            Ok(mut result) => {
+            Ok(result) => {
                 push_signature_artifact(&mut signature_artifacts, &result);
                 warnings.extend(result.warnings.iter().cloned());
-                result.counted_for_policy = result.ok && result.signer_pinned;
                 results.push(result);
             }
             Err(error) => {
@@ -868,7 +868,7 @@ fn evaluate_successor_authenticity(
     }
 
     for (index, signature) in verification_inputs.signatures.iter().enumerate() {
-        let mut result = verify_external_archive_approval_signature(
+        let result = verify_external_archive_approval_signature(
             signature,
             index,
             archive_state_bytes,
@@ -876,7 +876,6 @@ fn evaluate_successor_authenticity(
         )?;
         push_signature_artifact(&mut signature_artifacts, &result);
         warnings.extend(result.warnings.iter().cloned());
-        result.counted_for_policy = result.ok && result.signer_pinned;
         results.push(result);
     }
 
@@ -886,7 +885,7 @@ fn evaluate_successor_authenticity(
         &signature_artifacts,
         &mut warnings,
     )?;
-    let counts = signature_counts(&results);
+    let counts = finalize_successor_archive_approval_verification(&mut results, &mut warnings);
     let status = signature_status(&counts, verification_inputs);
     let verification = SignatureVerificationReport {
         provided: !results.is_empty(),
@@ -897,9 +896,12 @@ fn evaluate_successor_authenticity(
         status,
     };
     let policy = evaluate_archive_policy(&auth_policy, &verification);
-    if auth_policy.level == AuthPolicyLevel::IntegrityOnly && verification.results.is_empty() {
-        warnings
-            .push("integrity-only archive policy has no archive-approval signatures".to_string());
+    if auth_policy.level == AuthPolicyLevel::IntegrityOnly && verification.counts.valid_archive_approval == 0
+    {
+        warnings.push(
+            "Archive policy is integrity-only; archive approval is not bound to a verified signer."
+                .to_string(),
+        );
     }
     if !policy.satisfied {
         warnings.push(policy.reason.clone());
@@ -1252,50 +1254,17 @@ fn public_key_to_stellar_address(public_key: &Value) -> Result<String> {
     string_field(public_key, "value", "publicKeys.value")
 }
 
-fn signature_counts(results: &[SignatureCheckResult]) -> SignatureVerificationCounts {
-    let mut counts = SignatureVerificationCounts {
-        valid_total: 0,
-        valid_strong_pq: 0,
-        pinned_valid_total: 0,
-        pinned_valid_strong_pq: 0,
-        bundle_pinned_valid_total: 0,
-        user_pinned_valid_total: 0,
-    };
-    for result in results {
-        if !result.ok || !result.counted_for_policy {
-            continue;
-        }
-        counts.valid_total += 1;
-        if result.strong_pq {
-            counts.valid_strong_pq += 1;
-        }
-        if result.signer_pinned {
-            counts.pinned_valid_total += 1;
-            if result.strong_pq {
-                counts.pinned_valid_strong_pq += 1;
-            }
-        }
-        if result.bundle_pinned {
-            counts.bundle_pinned_valid_total += 1;
-        }
-        if result.user_pinned {
-            counts.user_pinned_valid_total += 1;
-        }
-    }
-    counts
-}
-
 fn signature_status(
     counts: &SignatureVerificationCounts,
     inputs: &VerificationInputs,
 ) -> SignatureVerificationStatus {
     SignatureVerificationStatus {
-        signature_verified: counts.pinned_valid_total > 0,
-        strong_pq_signature_verified: counts.pinned_valid_strong_pq > 0,
-        signer_pinned: counts.pinned_valid_total > 0,
-        signer_identity_pinned: counts.pinned_valid_total > 0,
-        bundle_pinned: counts.bundle_pinned_valid_total > 0,
-        user_pinned: counts.user_pinned_valid_total > 0,
+        signature_verified: counts.valid_archive_approval > 0,
+        strong_pq_signature_verified: counts.valid_archive_approval_strong_pq > 0,
+        signer_pinned: counts.archive_approval_pinned_valid_total > 0,
+        signer_identity_pinned: counts.archive_approval_pinned_valid_total > 0,
+        bundle_pinned: counts.archive_approval_bundle_pinned_valid_total > 0,
+        user_pinned: counts.archive_approval_user_pinned_valid_total > 0,
         user_pin_provided: inputs.pinned_pq_public_key_file_bytes.is_some()
             || inputs.expected_ed25519_signer.is_some(),
     }
@@ -1314,30 +1283,29 @@ fn evaluate_archive_policy(
             reason: "integrity-only policy does not require signatures".to_string(),
         },
         AuthPolicyLevel::AnySignature => {
-            let satisfied = verification.counts.pinned_valid_total >= min_valid_signatures;
+            let satisfied = verification.counts.valid_archive_approval >= min_valid_signatures;
             ArchivePolicyEvaluation {
                 level: auth_policy.level,
                 min_valid_signatures,
                 satisfied,
                 reason: if satisfied {
-                    "required trusted archive-approval signature count satisfied".to_string()
+                    "required archive-approval signature count satisfied".to_string()
                 } else {
-                    "no valid trusted archive-approval signature satisfies archive policy"
-                        .to_string()
+                    "no verified archive-approval signature satisfies archive policy".to_string()
                 },
             }
         }
         AuthPolicyLevel::StrongPqSignature => {
-            let satisfied = verification.counts.pinned_valid_total >= min_valid_signatures
-                && verification.counts.pinned_valid_strong_pq >= 1;
+            let satisfied = verification.counts.valid_archive_approval >= min_valid_signatures
+                && verification.counts.valid_archive_approval_strong_pq >= 1;
             ArchivePolicyEvaluation {
                 level: auth_policy.level,
                 min_valid_signatures,
                 satisfied,
                 reason: if satisfied {
-                    "required trusted strong PQ archive-approval signature present".to_string()
+                    "required strong PQ archive-approval signature present".to_string()
                 } else {
-                    "no valid trusted strong PQ archive-approval signature satisfies archive policy"
+                    "no verified strong PQ archive-approval signature satisfies archive policy"
                         .to_string()
                 },
             }

@@ -528,6 +528,7 @@ fn verify_by_suite(
 fn fail_result(error: impl Into<String>, warnings: Vec<String>) -> SignatureCheckResult {
     SignatureCheckResult {
         ok: false,
+        self_signed: false,
         bundle_pinned: false,
         user_pinned: false,
         signer_pinned: false,
@@ -548,6 +549,8 @@ fn fail_result(error: impl Into<String>, warnings: Vec<String>) -> SignatureChec
         signature_content_digest_hex: None,
         ots_stamped_digest_alg: None,
         ots_stamped_digest_hex: None,
+        proof_identity_digest_alg: None,
+        proof_identity_digest_hex: None,
         counted_for_policy: false,
         signature_bytes: None,
     }
@@ -670,6 +673,7 @@ pub fn verify_qsig_against_bytes(
         let computed_fp_hex = hex::encode(computed_fp);
         return Ok(SignatureCheckResult {
             ok: true,
+            self_signed: false,
             bundle_pinned: true,
             user_pinned,
             signer_pinned: true,
@@ -690,6 +694,8 @@ pub fn verify_qsig_against_bytes(
             signature_content_digest_hex: None,
             ots_stamped_digest_alg: None,
             ots_stamped_digest_hex: None,
+            proof_identity_digest_alg: None,
+            proof_identity_digest_hex: None,
             counted_for_policy: false,
             signature_bytes: Some(qsig_bytes.to_vec()),
         });
@@ -743,8 +749,10 @@ pub fn verify_qsig_against_bytes(
         }
     }
     let computed_fp_hex = hex::encode(computed_fp);
+    let self_signed = key_source == "embedded-signature-key" && !user_pinned;
     Ok(SignatureCheckResult {
         ok: true,
+        self_signed,
         bundle_pinned: false,
         user_pinned,
         signer_pinned: user_pinned,
@@ -765,6 +773,8 @@ pub fn verify_qsig_against_bytes(
         signature_content_digest_hex: None,
         ots_stamped_digest_alg: None,
         ots_stamped_digest_hex: None,
+        proof_identity_digest_alg: None,
+        proof_identity_digest_hex: None,
         counted_for_policy: false,
         signature_bytes: Some(qsig_bytes.to_vec()),
     })

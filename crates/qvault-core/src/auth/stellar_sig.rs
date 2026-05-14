@@ -43,6 +43,7 @@ struct StellarHashEntry {
 fn fail_result(error: impl Into<String>, warnings: Vec<String>) -> SignatureCheckResult {
     SignatureCheckResult {
         ok: false,
+        self_signed: false,
         bundle_pinned: false,
         user_pinned: false,
         signer_pinned: false,
@@ -63,6 +64,8 @@ fn fail_result(error: impl Into<String>, warnings: Vec<String>) -> SignatureChec
         signature_content_digest_hex: None,
         ots_stamped_digest_alg: None,
         ots_stamped_digest_hex: None,
+        proof_identity_digest_alg: None,
+        proof_identity_digest_hex: None,
         counted_for_policy: false,
         signature_bytes: None,
     }
@@ -344,6 +347,7 @@ pub fn verify_stellar_sig_against_bytes(
 
     Ok(SignatureCheckResult {
         ok: true,
+        self_signed: false,
         bundle_pinned: !declared_signer.is_empty(),
         user_pinned,
         signer_pinned: !declared_signer.is_empty() || user_pinned,
@@ -364,6 +368,8 @@ pub fn verify_stellar_sig_against_bytes(
         signature_content_digest_hex: None,
         ots_stamped_digest_alg: None,
         ots_stamped_digest_hex: None,
+        proof_identity_digest_alg: None,
+        proof_identity_digest_hex: None,
         counted_for_policy: false,
         signature_bytes: Some(sig_json_bytes.to_vec()),
     })

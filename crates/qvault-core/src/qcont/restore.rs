@@ -813,14 +813,7 @@ fn resolve_archive_context(
                     provided: false,
                     results: Vec::new(),
                     warnings: Vec::new(),
-                    counts: crate::auth::SignatureVerificationCounts {
-                        valid_total: 0,
-                        valid_strong_pq: 0,
-                        pinned_valid_total: 0,
-                        pinned_valid_strong_pq: 0,
-                        bundle_pinned_valid_total: 0,
-                        user_pinned_valid_total: 0,
-                    },
+                    counts: crate::auth::SignatureVerificationCounts::default(),
                     signature_artifacts: Vec::new(),
                     status: crate::auth::SignatureVerificationStatus {
                         signature_verified: false,

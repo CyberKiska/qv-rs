@@ -1,6 +1,8 @@
 pub mod opentimestamps;
 pub mod qsig;
+pub mod signature_identity;
 pub mod signature_suites;
+pub(crate) mod successor_policy;
 pub mod stellar_sig;
 #[cfg(feature = "legacy-mvp")]
 pub mod verify;
@@ -48,7 +50,7 @@ pub struct VerificationInputs {
     pub expected_ed25519_signer: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct SignatureVerificationCounts {
     #[serde(rename = "validTotal")]
     pub valid_total: u64,
@@ -62,6 +64,21 @@ pub struct SignatureVerificationCounts {
     pub bundle_pinned_valid_total: u64,
     #[serde(rename = "userPinnedValidTotal")]
     pub user_pinned_valid_total: u64,
+    /// Successor archive-approval family only (oracle `validArchiveApproval`).
+    #[serde(rename = "validArchiveApproval", default)]
+    pub valid_archive_approval: u64,
+    #[serde(rename = "validArchiveApprovalStrongPq", default)]
+    pub valid_archive_approval_strong_pq: u64,
+    #[serde(rename = "archiveApprovalPinnedValidTotal", default)]
+    pub archive_approval_pinned_valid_total: u64,
+    #[serde(rename = "archiveApprovalBundlePinnedValidTotal", default)]
+    pub archive_approval_bundle_pinned_valid_total: u64,
+    #[serde(rename = "archiveApprovalUserPinnedValidTotal", default)]
+    pub archive_approval_user_pinned_valid_total: u64,
+    #[serde(rename = "validMaintenance", default)]
+    pub valid_maintenance: u64,
+    #[serde(rename = "validSourceEvidence", default)]
+    pub valid_source_evidence: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,6 +123,8 @@ pub struct SignatureVerificationStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignatureCheckResult {
     pub ok: bool,
+    #[serde(default, rename = "selfSigned")]
+    pub self_signed: bool,
     #[serde(rename = "bundlePinned")]
     pub bundle_pinned: bool,
     #[serde(rename = "userPinned")]
@@ -157,6 +176,18 @@ pub struct SignatureCheckResult {
         skip_serializing_if = "Option::is_none"
     )]
     pub ots_stamped_digest_hex: Option<String>,
+    #[serde(
+        rename = "proofIdentityDigestAlg",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub proof_identity_digest_alg: Option<String>,
+    #[serde(
+        rename = "proofIdentityDigestHex",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub proof_identity_digest_hex: Option<String>,
     #[serde(rename = "countedForPolicy", default)]
     pub counted_for_policy: bool,
     #[serde(skip)]
@@ -243,6 +274,7 @@ pub struct AuthenticityReport {
 pub use opentimestamps::{assert_manifest_bundle_timestamps, inspect_timestamp_evidence};
 pub use opentimestamps::{parse_open_timestamp_proof, resolve_open_timestamp_target};
 pub use qsig::{unpack_pqpk, unpack_qsig, verify_qsig_against_bytes, ParsedPqpk, ParsedQsig};
+pub use signature_identity::compute_detached_signature_identity_digest_hex;
 pub use signature_suites::{
     get_signature_suite_info, is_strong_pq_suite, list_supported_signature_suites,
     normalize_signature_suite, SignatureSuiteInfo,
