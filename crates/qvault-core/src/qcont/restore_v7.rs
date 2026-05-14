@@ -1205,9 +1205,10 @@ fn inspect_lifecycle_timestamps(
                 "value",
                 "attachments.timestamps.targetDigest.value",
             )?;
-            if signature.ots_stamped_digest_hex.as_deref() != Some(expected.as_str()) {
+            let computed_digest = sha256_hex(&signature.bytes);
+            if computed_digest != expected {
                 warnings.push(format!(
-                    "Lifecycle OTS proof ignored: targetDigest does not match detached signature bytes for {target_ref}"
+                    "Lifecycle OTS proof ignored: targetDigest does not match SHA-256(detached signature bytes) for {target_ref}"
                 ));
                 continue;
             }
