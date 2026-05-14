@@ -327,6 +327,11 @@ mod successor_main {
         maintenance_pq_public_keys: Vec<PathBuf>,
         #[arg(long = "maintenance-ots")]
         maintenance_timestamps: Vec<PathBuf>,
+        #[arg(
+            long = "maintenance-ed25519-signer",
+            help = "Expected Stellar signer for maintenance detached .sig imports (reshare same-run)"
+        )]
+        maintenance_ed25519_signer: Option<String>,
     }
 
     #[derive(Parser)]
@@ -1071,12 +1076,30 @@ mod successor_main {
     }
 
     fn run_reshare(args: ReshareArgs, ctx: CliContext) -> Result<()> {
-        if !args.maintenance_signatures.is_empty()
-            || !args.maintenance_pq_public_keys.is_empty()
-            || !args.maintenance_timestamps.is_empty()
-        {
-            bail!("same-run maintenance evidence import is not wired in this Rust CLI stage; use attach after reshare");
+        if !args.maintenance_pq_public_keys.is_empty() && args.maintenance_signatures.is_empty() {
+            bail!("--maintenance-pqpk requires at least one --maintenance-sig");
         }
+        if !args.maintenance_timestamps.is_empty() && args.maintenance_signatures.is_empty() {
+            bail!("--maintenance-ots requires at least one --maintenance-sig");
+        }
+        let maintenance_signature_imports = load_named_artifacts(&args.maintenance_signatures, ctx)?
+            .into_iter()
+            .map(|artifact| {
+                signature_import(
+                    artifact,
+                    LifecycleSignatureFamily::Maintenance,
+                    None,
+                    None,
+                )
+            })
+            .collect::<Vec<_>>();
+        let maintenance_pq_public_key_file_bytes_list =
+            load_named_artifacts(&args.maintenance_pq_public_keys, ctx)?
+                .into_iter()
+                .map(|artifact| artifact.bytes)
+                .collect::<Vec<_>>();
+        let maintenance_timestamps =
+            load_named_artifacts(&args.maintenance_timestamps, ctx)?;
         let predecessor_shards = args
             .shards
             .iter()
@@ -1120,6 +1143,12 @@ mod successor_main {
                 },
                 sss_random_bytes: None,
                 maintenance_artifacts: Vec::new(),
+                maintenance_signature_imports,
+                maintenance_pq_public_key_file_bytes_list,
+                maintenance_timestamps,
+                maintenance_expected_ed25519_signer: normalize_optional_string(
+                    args.maintenance_ed25519_signer.as_deref(),
+                ),
                 forbidden_overrides: Vec::new(),
             },
         )?;

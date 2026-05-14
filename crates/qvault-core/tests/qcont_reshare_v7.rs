@@ -143,6 +143,10 @@ fn reshare_options() -> ReshareSameStateOptions {
         },
         sss_random_bytes: Some(vec![0x24; 30_000]),
         maintenance_artifacts: Vec::new(),
+        maintenance_signature_imports: Vec::new(),
+        maintenance_pq_public_key_file_bytes_list: Vec::new(),
+        maintenance_timestamps: Vec::new(),
+        maintenance_expected_ed25519_signer: None,
         forbidden_overrides: Vec::new(),
     }
 }

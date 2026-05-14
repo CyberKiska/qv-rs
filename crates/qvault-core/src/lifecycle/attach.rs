@@ -15,7 +15,7 @@ use crate::lifecycle::{
     canonicalize_archive_state_descriptor, canonicalize_cohort_binding,
     canonicalize_lifecycle_bundle, canonicalize_source_evidence, canonicalize_transition_record,
     parse_archive_state_descriptor_bytes, parse_lifecycle_bundle_bytes,
-    parse_source_evidence_bytes, CanonicalLifecycleBundle,
+    parse_source_evidence_bytes, CanonicalLifecycleBundle, CanonicalTransitionRecord,
 };
 use crate::manifest::jcs::canonicalize_json;
 use crate::manifest::strict_json::parse_json_bytes_strict;
@@ -988,6 +988,159 @@ fn build_signature_artifacts(bundle: &Value) -> Result<Vec<SignatureArtifact>> {
         }
     }
     Ok(out)
+}
+
+/// Public keys, maintenance signature attachment entries, and timestamp attachment entries produced
+/// when importing same-run maintenance evidence over a newly emitted transition record (oracle:
+/// `quantum-vault` `reshare.js` attach phase).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MaintenanceEvidenceAttachments {
+    pub public_keys: Vec<Value>,
+    pub maintenance_signatures: Vec<Value>,
+    pub timestamps: Vec<Value>,
+}
+
+fn maintenance_signature_artifacts(entries: &[Value]) -> Result<Vec<SignatureArtifact>> {
+    let mut out = Vec::new();
+    for signature in entries {
+        let id = string_field(signature, "id", "maintenanceSignature.id")?;
+        let format = string_field(signature, "format", "maintenanceSignature.format")?;
+        let bytes = BASE64_STANDARD
+            .decode(string_field(
+                signature,
+                "signature",
+                "maintenanceSignature.signature",
+            )?)
+            .map_err(|error| err(format!("Invalid detached signature base64: {error}")))?;
+        out.push(SignatureArtifact {
+            id: id.clone(),
+            name: id,
+            source: "reshare-maintenance".to_string(),
+            format,
+            signature_content_digest_hex: Some(sha3_512_hex(&bytes)),
+            ots_stamped_digest_hex: Some(sha256_hex(&bytes)),
+            bytes,
+            ok: true,
+        });
+    }
+    Ok(out)
+}
+
+/// Import detached maintenance signatures (and optional `.pqpk` pins plus `.ots` proofs) over the
+/// **new** same-state transition record bytes produced by resharing.
+///
+/// When each [`LifecycleSignatureImport`] omits `targetRef` / `targetDigestHex`, they default to
+/// this transition. If present, they must match exactly (fail closed).
+pub fn import_maintenance_evidence_for_new_transition(
+    transition: &CanonicalTransitionRecord,
+    imports: &[LifecycleSignatureImport],
+    pq_public_key_file_bytes_list: &[Vec<u8>],
+    timestamps: &[NamedBinaryArtifact],
+    expected_ed25519_signer: Option<&str>,
+) -> Result<MaintenanceEvidenceAttachments> {
+    if !pq_public_key_file_bytes_list.is_empty() && imports.is_empty() {
+        return Err(err(
+            "maintenance signer keys require at least one maintenance signature import",
+        ));
+    }
+    if !timestamps.is_empty() && imports.is_empty() {
+        return Err(err(
+            "maintenance OpenTimestamps proofs require at least one maintenance signature import",
+        ));
+    }
+    if imports.is_empty() {
+        return Ok(MaintenanceEvidenceAttachments::default());
+    }
+
+    let expected_ref = format!("transition:sha3-512:{}", transition.digest.value);
+    let pins = normalize_pq_pins(pq_public_key_file_bytes_list)?;
+    let target = ResolvedTarget {
+        target_type: "transition-record".to_string(),
+        target_ref: expected_ref.clone(),
+        digest_hex: transition.digest.value.clone(),
+        bytes: transition.bytes.clone(),
+    };
+
+    let mut public_keys_out = Vec::<Value>::new();
+    let mut signatures_out = Vec::<Value>::new();
+
+    for (index, import) in imports.iter().enumerate() {
+        if import.signature_family != LifecycleSignatureFamily::Maintenance {
+            return Err(err(format!(
+                "reshare maintenance import {} must use signature family maintenance",
+                index + 1
+            )));
+        }
+        let target_type = import
+            .target_type
+            .as_deref()
+            .unwrap_or(LifecycleSignatureFamily::Maintenance.target_type());
+        if target_type != LifecycleSignatureFamily::Maintenance.target_type() {
+            return Err(err(format!(
+                "reshare maintenance import {}: wrong targetType (expected transition-record)",
+                index + 1
+            )));
+        }
+        if let Some(declared_ref) = import.target_ref.as_deref() {
+            if declared_ref != expected_ref.as_str() {
+                return Err(err(format!(
+                    "reshare maintenance import {}: targetRef must match the newly emitted transition (expected {expected_ref})",
+                    index + 1
+                )));
+            }
+        }
+        if let Some(declared_digest) = import.target_digest_hex.as_deref() {
+            if declared_digest != transition.digest.value {
+                return Err(err(format!(
+                    "reshare maintenance import {}: targetDigest must equal the newly emitted transition-record digest",
+                    index + 1
+                )));
+            }
+        }
+
+        let label = import_label(&import.name, &format!("maintenance-sig-{}", index + 1));
+        let imported = import_external_lifecycle_signature(
+            LifecycleSignatureFamily::Maintenance,
+            &target,
+            &label,
+            &import.bytes,
+            &pins,
+            expected_ed25519_signer.map(str::trim).filter(|s| !s.is_empty()),
+        )?;
+        public_keys_out.extend(imported.public_keys);
+        signatures_out.push(imported.signature);
+    }
+
+    let signature_artifacts = maintenance_signature_artifacts(&signatures_out)?;
+    let mut timestamps_out = Vec::<Value>::new();
+    for timestamp in timestamps {
+        if timestamp.bytes.is_empty() {
+            return Err(err(format!(
+                "Invalid maintenance timestamp file: {}",
+                import_label(&timestamp.name, "timestamp")
+            )));
+        }
+        let name = import_label(&timestamp.name, "maintenance-ots");
+        let resolved =
+            resolve_open_timestamp_target(&timestamp.bytes, Some(&name), &signature_artifacts)?;
+        timestamps_out.push(serde_json::json!({
+            "id": attachment_id("ots", &timestamp.bytes),
+            "type": "opentimestamps",
+            "targetRef": resolved.target_ref,
+            "targetDigest": {
+                "alg": "SHA-256",
+                "value": resolved.stamped_digest_hex,
+            },
+            "proofEncoding": "base64",
+            "proof": BASE64_STANDARD.encode(&timestamp.bytes),
+        }));
+    }
+
+    Ok(MaintenanceEvidenceAttachments {
+        public_keys: public_keys_out,
+        maintenance_signatures: signatures_out,
+        timestamps: timestamps_out,
+    })
 }
 
 fn merge_entries_by_id(existing: &[Value], next: &[Value]) -> Result<Vec<Value>> {

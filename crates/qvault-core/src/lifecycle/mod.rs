@@ -20,9 +20,10 @@ pub use archive_state::{
     ARCHIVE_STATE_CANONICALIZATION, ARCHIVE_STATE_SCHEMA, ARCHIVE_STATE_VERSION,
 };
 pub use attach::{
-    attach_lifecycle_bundle, AttachLifecycleOptions, AttachedLifecycleBundle,
-    AttachedLifecycleShard, LifecycleSignatureFamily, LifecycleSignatureImport,
-    LifecycleSourceEvidenceImport,
+    attach_lifecycle_bundle, import_maintenance_evidence_for_new_transition,
+    AttachLifecycleOptions, AttachedLifecycleBundle, AttachedLifecycleShard,
+    LifecycleSignatureFamily, LifecycleSignatureImport, LifecycleSourceEvidenceImport,
+    MaintenanceEvidenceAttachments,
 };
 pub use attachments::{
     DetachedSignatureEntry, LifecycleAttachments, PublicKeyEntry, TimestampEntry,

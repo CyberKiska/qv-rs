@@ -1,7 +1,10 @@
 use serde_json::Value;
 use zeroize::Zeroize;
 
-use crate::auth::AuthPolicyLevel;
+use super::attach::{
+    import_maintenance_evidence_for_new_transition, LifecycleSignatureImport,
+};
+use crate::auth::{AuthPolicyLevel, NamedBinaryArtifact};
 use crate::error::{coded, err, QvCode, Result};
 use crate::lifecycle::{
     canonicalize_cohort_binding, canonicalize_lifecycle_bundle, canonicalize_transition_record,
@@ -68,6 +71,12 @@ pub struct ReshareSameStateOptions {
     pub transition: ReshareTransitionOptions,
     pub sss_random_bytes: Option<Vec<u8>>,
     pub maintenance_artifacts: Vec<ReshareMaintenanceArtifacts>,
+    /// Detached maintenance signatures over the **new** transition (same semantics as attach
+    /// `--maintenance-sig` after resharing; `targetRef` / `targetDigestHex` may be omitted).
+    pub maintenance_signature_imports: Vec<LifecycleSignatureImport>,
+    pub maintenance_pq_public_key_file_bytes_list: Vec<Vec<u8>>,
+    pub maintenance_timestamps: Vec<NamedBinaryArtifact>,
+    pub maintenance_expected_ed25519_signer: Option<String>,
     pub forbidden_overrides: Vec<String>,
 }
 
@@ -148,8 +157,30 @@ pub fn reshare_same_state(
     let transition_record =
         build_transition_record(&restored, &successor_base, &options.transition)?;
     let canonical_transition = canonicalize_transition_record(&transition_record)?;
+    let mut maintenance_sources = options.maintenance_artifacts.clone();
+    if !options.maintenance_signature_imports.is_empty()
+        || !options.maintenance_pq_public_key_file_bytes_list.is_empty()
+        || !options.maintenance_timestamps.is_empty()
+    {
+        let imported = import_maintenance_evidence_for_new_transition(
+            &canonical_transition,
+            &options.maintenance_signature_imports,
+            &options.maintenance_pq_public_key_file_bytes_list,
+            &options.maintenance_timestamps,
+            options
+                .maintenance_expected_ed25519_signer
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+        )?;
+        maintenance_sources.push(ReshareMaintenanceArtifacts {
+            public_keys: imported.public_keys,
+            maintenance_signatures: imported.maintenance_signatures,
+            timestamps: imported.timestamps,
+        });
+    }
     let maintenance_artifacts =
-        collect_new_maintenance_artifacts(&options.maintenance_artifacts, &canonical_transition)?;
+        collect_new_maintenance_artifacts(&maintenance_sources, &canonical_transition)?;
     let final_bundle = build_reshared_lifecycle_bundle(
         &predecessor_bundle,
         &successor_base,
