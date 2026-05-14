@@ -26,7 +26,7 @@ mod successor_main {
     use base64::Engine as _;
     use clap::{Parser, Subcommand, ValueEnum};
     use qvault_core::auth::AuthPolicyLevel;
-    use qvault_core::auth::{NamedBinaryArtifact, VerificationInputs};
+    use qvault_core::auth::{AuthenticityReport, NamedBinaryArtifact, VerificationInputs};
     use qvault_core::bytes::from_hex;
     use qvault_core::error::{coded, QvCode, QvError};
     use qvault_core::hash::sha3_512_hex;
@@ -222,7 +222,10 @@ mod successor_main {
         expected_ed25519_signer: Option<String>,
         #[arg(long)]
         dry_run: bool,
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Acknowledge restore warnings that do not change policy.satisfied (e.g. multiple embedded lifecycle-bundle digests in the selected cohort); required before write-mode restore in that case"
+        )]
         accept_policy_warnings: bool,
         #[arg(long)]
         force: bool,
@@ -393,7 +396,7 @@ mod successor_main {
                         "command": command_name_from_args(),
                         "ok": false,
                         "cliSchemaVersion": 1,
-                        "qvCode": "QV_USAGE",
+                        "qvCode": "USAGE",
                         "error": error.to_string()
                     });
                     println!("{}", serde_json::to_string_pretty(&report)?);
@@ -436,7 +439,7 @@ mod successor_main {
             match serde_json::to_string_pretty(&report) {
                 Ok(text) => println!("{text}"),
                 Err(_) => println!(
-                    r#"{{"command":null,"ok":false,"cliSchemaVersion":1,"qvCode":"QV_ERROR","error":"failed to serialize error"}}"#
+                    r#"{{"command":null,"ok":false,"cliSchemaVersion":1,"qvCode":"UNEXPECTED","error":"failed to serialize error"}}"#
                 ),
             }
         } else {
@@ -444,23 +447,23 @@ mod successor_main {
         }
     }
 
+    /// Maps `QvCode` to process exit status per `quantum-vault/src/core/cli/lib/exit.js` (`QV_CODE_TO_EXIT`).
+    fn map_qv_code_to_exit(code: QvCode) -> i32 {
+        match code {
+            QvCode::PolicyNotSatisfied | QvCode::VerificationFailed | QvCode::RestoreFailed => 1,
+            QvCode::InvalidFormat | QvCode::UnsupportedFormat => 4,
+            QvCode::NotEnoughShards | QvCode::IntegrityMismatch => 7,
+            QvCode::InvalidSelection | QvCode::AmbiguousInputs => 9,
+            QvCode::ReshareContractViolation => 10,
+            QvCode::RestoredIntegrityFailed => 11,
+            QvCode::RestoreLifecycleVariantAckRequired => 12,
+        }
+    }
+
     pub fn exit_code(error: &anyhow::Error) -> i32 {
         for cause in error.chain() {
             if let Some(qv_error) = cause.downcast_ref::<QvError>() {
-                return match qv_error.qv_code() {
-                    Some(
-                        QvCode::InvalidFormat
-                        | QvCode::InvalidSelection
-                        | QvCode::UnsupportedFormat,
-                    ) => 2,
-                    Some(QvCode::AmbiguousInputs) => 3,
-                    Some(
-                        QvCode::NotEnoughShards | QvCode::IntegrityMismatch | QvCode::RestoreFailed,
-                    ) => 4,
-                    Some(QvCode::VerificationFailed | QvCode::PolicyNotSatisfied) => 5,
-                    Some(QvCode::ReshareContractViolation) => 10,
-                    None => 1,
-                };
+                return qv_error.qv_code().map(map_qv_code_to_exit).unwrap_or(1);
             }
         }
         1
@@ -943,14 +946,24 @@ mod successor_main {
             Err(error) => return Err(error.into()),
         };
 
+        let variant_ack_required =
+            restored.mixed_lifecycle_bundle_variants_within_selected_cohort;
+        let policy_ok = restored.authenticity.policy.satisfied;
+        let base_ok = restored.qenc_ok && restored.qkey_ok && policy_ok;
+        let variant_ok = !variant_ack_required || args.accept_policy_warnings;
+        let would_succeed = base_ok && variant_ok;
+
         if args.dry_run {
             if ctx.json {
                 let report = serde_json::json!({
                     "command": "restore",
-                    "ok": true,
+                    "ok": would_succeed,
                     "cliSchemaVersion": 1,
                     "dryRun": true,
-                    "wouldSucceed": true,
+                    "wouldSucceed": would_succeed,
+                    "policyWarningsAcknowledged": args.accept_policy_warnings,
+                    "lifecycleBundleVariantAcknowledgementRequired": variant_ack_required,
+                    "embeddedLifecycleBundleDigestsUsed": restored.embedded_lifecycle_bundle_digests_used,
                     "archiveId": restored.archive_id,
                     "stateId": restored.state_id,
                     "cohortId": restored.cohort_id,
@@ -965,13 +978,31 @@ mod successor_main {
                     "outputs": Value::Null
                 });
                 println!("{}", serde_json::to_string_pretty(&report)?);
+                if !would_succeed {
+                    std::process::exit(1);
+                }
             } else if !ctx.quiet {
-                println!("Restore dry run succeeded.");
+                if would_succeed {
+                    println!("Restore dry run succeeded.");
+                } else {
+                    eprintln!("Restore dry run completed without success (see warnings and policy).");
+                }
                 println!("Archive ID: {}", restored.archive_id);
                 println!("State ID: {}", restored.state_id);
                 println!("Cohort ID: {}", restored.cohort_id);
             }
+            if !would_succeed && !ctx.json {
+                std::process::exit(1);
+            }
             return Ok(());
+        }
+
+        if variant_ack_required && !args.accept_policy_warnings {
+            return Err(coded(
+                QvCode::RestoreLifecycleVariantAckRequired,
+                "Restore refused: the selected cohort embeds multiple lifecycle-bundle digests in its shards. Review authenticity.warnings and embeddedLifecycleBundleDigestsUsed, then re-run with --accept-policy-warnings only if the operator accepts residual bundle-variant risk. Archive policy satisfaction alone does not waive this check.",
+            )
+            .into());
         }
 
         let default_base = args
@@ -1271,23 +1302,6 @@ mod successor_main {
                 ..AttachLifecycleOptions::default()
             },
         )?;
-        let verified_bundle = parse_lifecycle_bundle_bytes(&attached.lifecycle_bundle_bytes)?;
-        let auth_policy = verified_bundle
-            .lifecycle_bundle
-            .value
-            .get("authPolicy")
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!({ "level": "unresolved" }));
-        if let Some(required) = args.required_policy_level {
-            let declared = auth_policy
-                .get("level")
-                .and_then(Value::as_str)
-                .unwrap_or("unresolved");
-            if policy_strength(declared) < policy_strength(AuthPolicyLevel::from(required).as_str())
-            {
-                bail!("Archive policy level {declared} is weaker than required policy");
-            }
-        }
 
         let authenticity = verify_successor_lifecycle_authenticity(
             &archive_state.bytes,
@@ -1301,6 +1315,9 @@ mod successor_main {
                 ),
             },
         )?;
+
+        let required_policy = build_required_policy_report(&authenticity, args.required_policy_level);
+        let verify_ok = verify_cli_report_satisfied(&authenticity, required_policy.as_ref());
 
         let detached_summary = if args.include_detached_summary {
             let rows: Vec<Value> = authenticity
@@ -1325,9 +1342,9 @@ mod successor_main {
         };
 
         if ctx.json {
-            let report = serde_json::json!({
+            let mut report = serde_json::json!({
                 "command": "verify",
-                "ok": authenticity.policy.satisfied,
+                "ok": verify_ok,
                 "cliSchemaVersion": 1,
                 "verification": serde_json::to_value(&authenticity.verification)?,
                 "policy": serde_json::to_value(&authenticity.policy)?,
@@ -1338,19 +1355,23 @@ mod successor_main {
                 "status": serde_json::to_value(&authenticity.status)?,
                 "detachedSummary": detached_summary,
             });
+            if let Some(ref req) = required_policy {
+                report["requiredPolicy"] = req.clone();
+            }
             println!("{}", serde_json::to_string_pretty(&report)?);
-            if !authenticity.policy.satisfied {
-                std::process::exit(5);
+            if !verify_ok {
+                std::process::exit(map_qv_code_to_exit(QvCode::PolicyNotSatisfied));
             }
             return Ok(());
         }
 
-        if !authenticity.policy.satisfied {
-            return Err(coded(
-                QvCode::PolicyNotSatisfied,
-                authenticity.policy.reason.clone(),
-            )
-            .into());
+        if !verify_ok {
+            let reason = required_policy
+                .as_ref()
+                .and_then(|value| value.get("reason").and_then(Value::as_str))
+                .map(str::to_string)
+                .unwrap_or_else(|| authenticity.policy.reason.clone());
+            return Err(coded(QvCode::PolicyNotSatisfied, reason).into());
         }
 
         if !ctx.quiet {
@@ -1870,7 +1891,7 @@ mod successor_main {
                 return qv_error
                     .qv_code()
                     .map(|code| code.as_str().to_string())
-                    .unwrap_or_else(|| "QV_ERROR".to_string());
+                    .unwrap_or_else(|| "UNEXPECTED".to_string());
             }
         }
         let text = error.to_string();
@@ -1879,10 +1900,54 @@ mod successor_main {
             || text.contains("must")
             || text.contains("not wired")
         {
-            "QV_USAGE".to_string()
+            "USAGE".to_string()
         } else {
-            "QV_ERROR".to_string()
+            "UNEXPECTED".to_string()
         }
+    }
+
+    fn build_required_policy_report(
+        authenticity: &AuthenticityReport,
+        required_level: Option<AuthPolicyLevelArg>,
+    ) -> Option<Value> {
+        let required = required_level?;
+        let declared_level = authenticity.policy.level.as_str();
+        let declared_strength = policy_strength(declared_level);
+        let required_strength = policy_strength(AuthPolicyLevel::from(required).as_str());
+        let declared_at_least = declared_strength >= required_strength;
+        let archive_policy_satisfied = authenticity.policy.satisfied;
+        let satisfied = archive_policy_satisfied && declared_at_least;
+        let required_level_str = AuthPolicyLevel::from(required).as_str();
+        let reason = if satisfied {
+            format!("Archive policy satisfies required policy level {required_level_str}.")
+        } else if archive_policy_satisfied {
+            format!(
+                "Archive policy level {declared_level} is weaker than required policy level {required_level_str}."
+            )
+        } else {
+            format!("Archive policy did not satisfy its declared level {declared_level}.")
+        };
+        Some(serde_json::json!({
+            "level": required_level_str,
+            "declaredPolicyLevel": declared_level,
+            "declaredPolicySatisfiesRequired": declared_at_least,
+            "archivePolicySatisfied": archive_policy_satisfied,
+            "satisfied": satisfied,
+            "reason": reason,
+        }))
+    }
+
+    fn verify_cli_report_satisfied(
+        authenticity: &AuthenticityReport,
+        required_policy: Option<&Value>,
+    ) -> bool {
+        if authenticity.policy.satisfied != true {
+            return false;
+        }
+        let Some(req) = required_policy else {
+            return true;
+        };
+        req.get("satisfied").and_then(Value::as_bool) == Some(true)
     }
 
     fn policy_strength(level: &str) -> u8 {

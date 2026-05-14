@@ -12,21 +12,26 @@ pub enum QvCode {
     ReshareContractViolation,
     UnsupportedFormat,
     RestoreFailed,
+    /// Reconstructed `.qenc` / private key material failed hash or header binding checks.
+    RestoredIntegrityFailed,
+    /// Selected cohort embeds multiple lifecycle-bundle digests; operator must pass explicit acknowledgement.
+    RestoreLifecycleVariantAckRequired,
 }
 
 impl QvCode {
+    /// Stable `qvCode` strings aligned with `quantum-vault` `src/core/cli/lib/exit.js` (`QV_CODE`).
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::InvalidFormat => "QV_INVALID_FORMAT",
-            Self::InvalidSelection => "QV_INVALID_SELECTION",
-            Self::AmbiguousInputs => "QV_AMBIGUOUS_INPUTS",
-            Self::NotEnoughShards => "QV_NOT_ENOUGH_SHARDS",
-            Self::IntegrityMismatch => "QV_INTEGRITY_MISMATCH",
-            Self::VerificationFailed => "QV_VERIFICATION_FAILED",
-            Self::PolicyNotSatisfied => "QV_POLICY_NOT_SATISFIED",
-            Self::ReshareContractViolation => "QV_RESHARE_CONTRACT_VIOLATION",
-            Self::UnsupportedFormat => "QV_UNSUPPORTED_FORMAT",
-            Self::RestoreFailed => "QV_RESTORE_FAILED",
+            Self::InvalidFormat | Self::UnsupportedFormat => "FORMAT_POLICY_REJECT",
+            Self::InvalidSelection | Self::AmbiguousInputs => "AMBIGUOUS_INPUTS",
+            Self::NotEnoughShards => "QUORUM_UNREACHABLE",
+            Self::IntegrityMismatch => "QUORUM_UNREACHABLE",
+            Self::VerificationFailed => "UNEXPECTED",
+            Self::PolicyNotSatisfied => "POLICY_NOT_SATISFIED",
+            Self::ReshareContractViolation => "RESHARE_CONTRACT_VIOLATION",
+            Self::RestoreFailed => "UNEXPECTED",
+            Self::RestoredIntegrityFailed => "RESTORED_INTEGRITY_FAILED",
+            Self::RestoreLifecycleVariantAckRequired => "RESTORE_LIFECYCLE_VARIANT_ACK_REQUIRED",
         }
     }
 }

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
@@ -79,6 +79,10 @@ pub struct RestoredQvqcont7 {
     pub lifecycle_bundle_digest_hex: String,
     pub authenticity: AuthenticityReport,
     pub warnings: Vec<String>,
+    /// Sorted unique `lifecycleBundleDigestHex` values observed on input shards for the selected cohort.
+    pub embedded_lifecycle_bundle_digests_used: Vec<String>,
+    /// True when `embedded_lifecycle_bundle_digests_used.len() > 1` (oracle `mixedLifecycleBundleVariantsWithinSelectedCohort`).
+    pub mixed_lifecycle_bundle_variants_within_selected_cohort: bool,
 }
 
 impl std::fmt::Debug for RestoredQvqcont7 {
@@ -161,6 +165,17 @@ pub fn restore_qvqcont7_from_shards(
     let mut warnings = reconstruction.warnings;
     warnings.extend(authenticity.warnings.iter().cloned());
 
+    let embedded_lifecycle_bundle_digests_used =
+        collect_embedded_lifecycle_bundle_digest_hexes(&candidate.shards);
+    let mixed_lifecycle_bundle_variants_within_selected_cohort =
+        embedded_lifecycle_bundle_digests_used.len() > 1;
+    if let Some(message) = mixed_lifecycle_bundle_variant_warning(
+        &embedded_lifecycle_bundle_digests_used,
+        &selected_bundle.digest_hex,
+    ) {
+        warnings.push(message);
+    }
+
     Ok(RestoredQvqcont7 {
         qenc_bytes: reconstruction.qenc_bytes,
         priv_key: reconstruction.priv_key,
@@ -183,7 +198,31 @@ pub fn restore_qvqcont7_from_shards(
         lifecycle_bundle_digest_hex: selected_bundle.digest_hex,
         authenticity,
         warnings,
+        embedded_lifecycle_bundle_digests_used,
+        mixed_lifecycle_bundle_variants_within_selected_cohort,
     })
+}
+
+fn collect_embedded_lifecycle_bundle_digest_hexes(shards: &[&Qvqcont7Shard]) -> Vec<String> {
+    let mut set = BTreeSet::new();
+    for shard in shards {
+        set.insert(shard.lifecycle_bundle_digest_hex.clone());
+    }
+    set.into_iter().collect()
+}
+
+fn mixed_lifecycle_bundle_variant_warning(
+    digests: &[String],
+    selected_digest_hex: &str,
+) -> Option<String> {
+    if digests.len() <= 1 {
+        return None;
+    }
+    Some(format!(
+        "Payload reconstruction used shards carrying multiple embedded lifecycle-bundle digests ({}); authenticity and policy were evaluated against selected lifecycle bundle {}.",
+        digests.join(", "),
+        selected_digest_hex
+    ))
 }
 
 /// Verify successor lifecycle authenticity for canonical archive-state bytes and a lifecycle
@@ -527,7 +566,7 @@ fn reconstruct_lifecycle_cohort_material<'a>(
     let total_bad = n.saturating_sub(valid_count);
     if total_bad > allowed_failures {
         return Err(coded(
-            QvCode::IntegrityMismatch,
+            QvCode::NotEnoughShards,
             format!(
                 "Too many missing/corrupted shards for RS reconstruction: allowed {allowed_failures}, got {total_bad}"
             ),
@@ -597,7 +636,7 @@ fn reconstruct_lifecycle_cohort_material<'a>(
     }
     if ciphertext.len() != ciphertext_length {
         return Err(coded(
-            QvCode::IntegrityMismatch,
+            QvCode::RestoredIntegrityFailed,
             "Reconstructed ciphertext length mismatch",
         ));
     }
@@ -618,7 +657,7 @@ fn reconstruct_lifecycle_cohort_material<'a>(
     if !verify_key_commitment(&derived.kenc, &base.key_commitment) {
         priv_key.zeroize();
         return Err(coded(
-            QvCode::IntegrityMismatch,
+            QvCode::RestoredIntegrityFailed,
             "Recovered private key does not satisfy the shard key commitment",
         ));
     }
@@ -644,14 +683,14 @@ fn reconstruct_lifecycle_cohort_material<'a>(
     let expected_qenc_hash = string_field(archive_qenc, "qencHash", "archiveState.qenc.qencHash")?;
     if recovered_qenc_hash != expected_qenc_hash {
         return Err(coded(
-            QvCode::IntegrityMismatch,
+            QvCode::RestoredIntegrityFailed,
             "Reconstructed .qenc hash does not match archive-state descriptor",
         ));
     }
     let container_id = string_field(archive_qenc, "containerId", "archiveState.qenc.containerId")?;
     if sha3_512_hex(&parsed_recovered.header) != container_id {
         return Err(coded(
-            QvCode::IntegrityMismatch,
+            QvCode::RestoredIntegrityFailed,
             "Reconstructed .qenc header hash does not match archive-state containerId",
         ));
     }
@@ -668,7 +707,7 @@ fn reconstruct_lifecycle_cohort_material<'a>(
         .unwrap_or(true);
     if !qkey_ok {
         return Err(coded(
-            QvCode::IntegrityMismatch,
+            QvCode::RestoredIntegrityFailed,
             "Recovered secret key hash does not match shard metadata",
         ));
     }

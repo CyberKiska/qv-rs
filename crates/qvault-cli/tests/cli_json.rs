@@ -45,7 +45,7 @@ fn usage_errors_emit_minimal_qvcode_json_envelope() {
     assert_eq!(value["command"], "restore");
     assert_eq!(value["ok"], false);
     assert_eq!(value["cliSchemaVersion"], 1);
-    assert_eq!(value["qvCode"], "QV_USAGE");
+    assert_eq!(value["qvCode"], "USAGE");
     assert!(value.get("error").and_then(Value::as_str).is_some());
     assert_eq!(value.as_object().expect("object").len(), 5);
 }
