@@ -1,3 +1,6 @@
+use std::fs;
+use std::path::PathBuf;
+
 use anyhow::{Context, Result};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
@@ -8,38 +11,31 @@ use qvault_core::qcont::{
 };
 use serde_json::Value;
 
-const CORPUS: &[(&str, &str)] = &[
-    (
-        "valid-roundtrip-shard.json",
-        include_str!("data/qcont/valid-roundtrip-shard.json"),
-    ),
-    (
-        "invalid-archive-state-digest-mismatch.json",
-        include_str!("data/qcont/invalid-archive-state-digest-mismatch.json"),
-    ),
-    (
-        "invalid-lifecycle-bundle-digest-mismatch.json",
-        include_str!("data/qcont/invalid-lifecycle-bundle-digest-mismatch.json"),
-    ),
-    (
-        "invalid-shardindex-mismatch.json",
-        include_str!("data/qcont/invalid-shardindex-mismatch.json"),
-    ),
-    (
-        "invalid-truncated-archive-state.json",
-        include_str!("data/qcont/invalid-truncated-archive-state.json"),
-    ),
-    (
-        "invalid-wrong-magic.json",
-        include_str!("data/qcont/invalid-wrong-magic.json"),
-    ),
-];
+fn corpus_qcont_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/corpus/qcont")
+}
+
+fn fixture_bytes(fixture: &Value) -> Result<Vec<u8>> {
+    let encoding = fixture["encoding"].as_str().context("encoding")?;
+    if encoding != "base64" {
+        anyhow::bail!("unsupported fixture encoding {encoding}");
+    }
+    let encoded = fixture["bytes"].as_str().context("bytes")?;
+    Ok(BASE64_STANDARD.decode(encoded)?)
+}
 
 #[test]
 fn qcont_v7_schema_corpus_matches_oracle_expectations() -> Result<()> {
-    for (name, raw_json) in CORPUS {
-        let fixture: Value =
-            serde_json::from_str(raw_json).with_context(|| format!("{name}: fixture JSON"))?;
+    let mut entries = fs::read_dir(corpus_qcont_dir())?.collect::<std::io::Result<Vec<_>>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+
+    for entry in entries {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.ends_with(".json") {
+            continue;
+        }
+        let raw = fs::read(entry.path()).with_context(|| format!("read {name}"))?;
+        let fixture: Value = serde_json::from_slice(&raw).with_context(|| format!("{name}: JSON"))?;
         let bytes = fixture_bytes(&fixture).with_context(|| format!("{name}: bytes"))?;
         assert_eq!(
             sha3_512_hex(&bytes),
@@ -85,7 +81,13 @@ fn qcont_v7_schema_corpus_matches_oracle_expectations() -> Result<()> {
             );
         } else {
             let error = parsed.expect_err(&format!("{name}: expected parse failure"));
-            assert_expected_error(name, &error.to_string());
+            let reason = fixture["rejectionReason"].as_str().unwrap_or_else(|| {
+                panic!("{name}: invalid corpus fixture must include rejectionReason")
+            });
+            assert!(
+                error.to_string().contains(reason),
+                "{name}: expected error containing {reason:?}, got {error}"
+            );
         }
     }
     Ok(())
@@ -135,30 +137,4 @@ fn qcont_v7_rejects_unknown_artifact_family() -> Result<()> {
         "unexpected error: {error}"
     );
     Ok(())
-}
-
-fn fixture_bytes(fixture: &Value) -> Result<Vec<u8>> {
-    let encoding = fixture["encoding"].as_str().context("encoding")?;
-    if encoding != "base64" {
-        anyhow::bail!("unsupported fixture encoding {encoding}");
-    }
-    let encoded = fixture["bytes"].as_str().context("bytes")?;
-    Ok(BASE64_STANDARD.decode(encoded)?)
-}
-
-fn assert_expected_error(name: &str, actual: &str) {
-    let expected = match name {
-        "invalid-archive-state-digest-mismatch.json" => "Embedded archive-state digest mismatch",
-        "invalid-lifecycle-bundle-digest-mismatch.json" => {
-            "Embedded lifecycle-bundle digest mismatch"
-        }
-        "invalid-shardindex-mismatch.json" => "Shard metadata shardIndex mismatch",
-        "invalid-truncated-archive-state.json" => "Shard is truncated",
-        "invalid-wrong-magic.json" => "Invalid .qcont magic",
-        other => panic!("missing expected error assertion for {other}"),
-    };
-    assert!(
-        actual.contains(expected),
-        "{name}: expected error containing {expected:?}, got {actual}"
-    );
 }
