@@ -1,0 +1,66 @@
+{
+  "fixtureName": "chunked-large",
+  "timestamp": "2026-03-04T22:31:11.000Z",
+  "payloadLength": 8400953,
+  "input": {
+    "originalFilename": "chunked-large.bin",
+    "payloadHash": "c21ada9e3519c82184babf33b3178ecdeebce39d63a892e4fc276d4bbf1da15e30f1869dc1c4e3f5d829fe7b3d6d48a3e30f3fd69afb55ddd9b52ff6d4ef4fd4",
+    "keygenSeedHex": "22222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222"
+  },
+  "qenc": {
+    "headerLength": 2286,
+    "metadata": {
+      "KEM": "ML-KEM-1024",
+      "KDF": "KMAC256",
+      "AEAD": "AES-256-GCM",
+      "aead_mode": "per-chunk-aead",
+      "iv_strategy": "kmac-prefix64-ctr32-v3",
+      "fmt": "QVv1-5-0",
+      "hasKeyCommitment": true,
+      "payloadFormat": "wrapped-v1",
+      "payloadLength": 8401203,
+      "chunkSize": 8388608,
+      "chunkCount": 2,
+      "cryptoProfileId": "QV-MLKEM1024-KMAC256-AES256GCM-SHA3_512-v2",
+      "kdfTreeId": "QV-KDF-TREE-v2",
+      "noncePolicyId": "QV-GCM-KMACPFX64-CTR32-v3",
+      "nonceMode": "kmac-prefix64-ctr32",
+      "counterBits": 32,
+      "maxChunkCount": 4294967295,
+      "aadPolicyId": "QV-AAD-HEADER-CHUNK-v1",
+      "domainStrings": {
+        "kdf": "quantum-vault:kdf:v2",
+        "iv": "quantum-vault:chunk-iv:v2",
+        "kenc": "quantum-vault:kenc:v2",
+        "kiv": "quantum-vault:kiv:v2"
+      }
+    },
+    "metaUtf8": "{\"KEM\":\"ML-KEM-1024\",\"KDF\":\"KMAC256\",\"AEAD\":\"AES-256-GCM\",\"aead_mode\":\"per-chunk-aead\",\"iv_strategy\":\"kmac-prefix64-ctr32-v3\",\"fmt\":\"QVv1-5-0\",\"hasKeyCommitment\":true,\"payloadFormat\":\"wrapped-v1\",\"payloadLength\":8401203,\"chunkSize\":8388608,\"chunkCount\":2,\"cryptoProfileId\":\"QV-MLKEM1024-KMAC256-AES256GCM-SHA3_512-v2\",\"kdfTreeId\":\"QV-KDF-TREE-v2\",\"noncePolicyId\":\"QV-GCM-KMACPFX64-CTR32-v3\",\"nonceMode\":\"kmac-prefix64-ctr32\",\"counterBits\":32,\"maxChunkCount\":4294967295,\"aadPolicyId\":\"QV-AAD-HEADER-CHUNK-v1\",\"domainStrings\":{\"kdf\":\"quantum-vault:kdf:v2\",\"iv\":\"quantum-vault:chunk-iv:v2\",\"kenc\":\"quantum-vault:kenc:v2\",\"kiv\":\"quantum-vault:kiv:v2\"}}",
+    "encapsulatedKeyLength": 1568,
+    "encapsulatedKeyHex": "85bb1a14f37cd9526a750949b02445c186cd03a9322b432d7b089688f3a6be0f585b9f9fc43831bfd2e1ea357c7f9545456bfab975436f39173fd18a85f4fb4a1b453118ac369a5f543b9810418cde3c87e8d2ea8a9c2b2622799b895705acac1a5031d2ff9a69b1d21e0555e76cd126719f0c27d3be36ea146dc34280b6b93dd8ca6b743fe0913f85e55f7d65d0b236500355d5ab84ce84e917ad743298d340660cde6d1517bfccdcf9cb3c33ea8a40bd3cae1c7b4120a12f0cc55e72af215b6392125368a35876ea66c58acc13f84d8afed9a751e675ee7b2c24a28bab9b09d8c03023c52e2b2159cf2dfc9876a70f63a64010ed1f382dbfced99e34ada00e5f829b88549258b762829a2e87bbc0071b405a35a37558972607f64f8437568e5d55b342122d09c6f841d0d3dc6ad9a363e9c23283b9535469495be6d32328bbb5d6c743219e01b42c49455cd8595a9390dfd5c93c1dda745df09d8333200c85f770f4a3eae857d2ad5bd3d31ea7ba5e909e03a95be1a1a95d2b8ba007e4f1e14dc86292f0489a0f83acafa4de21587e5971d9e2f687edbd93441ade5d201b232cae4be2f583124674d49699f86df978701f5de428a47092cdda2a65a2203f10ade20cf324368caf6f7a3d90c1f8f805ecd851f59ec8f471675d016d15d6c42ad660ac6087d12c26f190798d18677bae32e0b6a5756c6c5716c596e7ce4a2407cea14280de601b2fb93d37eca5d8d173af4217d4843ed4f857110d6c57b5c21ee378138254ed2ae3c3f406c592bac831acd0cbe93975675a9faa60b2475b11e43bc1dc4ca8f9ee952b3888c2ec3fbbecca82b8d212cf33b6e01beab674806fa96a01e8f5eff35fce6dc6a2172bf7b2adaf74a643def67bc727a48cf6dd5be4c0aa6b5d40c1c9cb0f282e76d2c29ae7f646baf51692f2f53ce99d027a6715fd87073b6f89e2e03ad508abd5179abd0709a5c75c1309790110fd83120bc13c26628808e7af85b7cdafb84f24c696450365b4e4de5d6672b016915c6300c6e811839bbb6b1dccf649f3dd00093b203b50f99a0d5182c93031eb21b318efa0c153ac810ff2b1830b8e06e0cadca218c6d3daf3433a340bcbe0e65d469c1faee9db64e211f664c5da0fe7a556a1981ac11d89f97c4a23ce18cacb7edb2cfee333088d23b0010d1b5cb082f742cdb7b46584099d2999928e274468c9d006dd34e064f21eb8839f245fb7903d69b83cebc921d2bf2f081c765f241c112441b20a73620608c0c87ad182b01d3b71f706b8193a03670a50d9140989b921ea10b2c93562fd2ac0db6ff4807241f033815c7b1a2de54483680ad9a3546af9c330e87e550bfb2ae1e6e9b09fbb285af2e6cf7bd619270a49eb1b9de8dafcfc80ead1e84108dbea937d97dcc80715454681d5cb2fad9a7bff0057c7da7ba08ff3b89ea91f767fbe7e2595aab4ee2db69fb54c478ae99070ee16e18c22590b11614a2094a00b6d02a11d4383a9574ecdf6ad1111840a3dfaf956af5ac6072a7c7bb044e3bd16f02050182da1107105d89c728347a122cd8bd8b6374b2b1a1c519987e5c4fa884ecf9d062850867ece83e5f317d80a74ebd48bb059c6b09618308dbe00e493cd6f383967a3bc44133ea3078f27788e708ce8eb6b81af7e84938a736d163611594f258a41c1b6bb27ec2eeed0025f754ee48e45f1760d0b4f5e773a5e559759d861e56575cc8db1ef670941f740ccb1b32eccdee049bee005b597f270f443cebbd24f995fa84fc07c92d1c3d095d70a74a67decb3df932e022fa8b27b6459570e1c07f8b79a11668aa4203988496d243b318f30eda2b69056cb2366259bc22ac17eb7320dc985826efc606d12ae7394b8798bd0736aa0cd92225342b6d81d92e20e18cc93e08d190b8db704c6a92a931e092d6c4f6285504dd269b7bddcb61168ab6d3668d1a68777c7372726f147183e64c90276a1d337f3bee5d26b00fd4fe6258b806d5b70174632968e16dcc2873f57c0e9cc3c9c08cea10323f67c6c2ced54a2140790ddda5742c7b63bf5062df0fe629793548ce3281b32ae20a23816b883421c535920d0990d3bedc062d7968002a3013df1e15e01af01a5227ffe8edd5cbcc31398c6229a311c8e817e1a7709ab1650f97e7ab502ebaf95d2d6a607a291454ab8502ab8f30ae336b084308d584adc5ec8fea5d32b22b068345f5935105e",
+    "containerNonceHex": "ead7dc499e1ecbaa58df7986",
+    "kdfSaltHex": "c9fec5a9ae1e355d42469abbd6c15aeb",
+    "keyCommitmentHex": "549f96534756240650c15759252e1866a6625753b2fc03b059e2843c61b9353f",
+    "sharedSecretHex": "e75e6f24111a814c338ed295d16128b54de25f580abd2f0e61b1a05bcc0fb9a0",
+    "encapsulationSeedHex": "b6bf84b32ba99a3381ca7aee3c280a0c1a2c38fbafc5fc5faa081dad7357cd3b",
+    "krawHex": "0836993a31afb659b7179768bff84dcdc7a308d9694ed60ab6ebeba1eaa96f28",
+    "kencHex": "dacf9d8be9024a19a3e2884d95aae2e494da32d9454ade2b0baa097dbb820fa2",
+    "kivHex": "dd3b7fab66c53da5352547d16126a2a72aa594aa6fbef3127a06905f3017ca64",
+    "qencHash": "53f7ee65e0a71d46007176d763994a5cf0e615a95877af7093fd945aa475d49288a343ac01a3542a1d69b0d3ace2c1834d2b4907f2f74600fb80883910abcf9a",
+    "randomTrace": [
+      {
+        "length": 32,
+        "hex": "b6bf84b32ba99a3381ca7aee3c280a0c1a2c38fbafc5fc5faa081dad7357cd3b"
+      },
+      {
+        "length": 12,
+        "hex": "ead7dc499e1ecbaa58df7986"
+      },
+      {
+        "length": 16,
+        "hex": "c9fec5a9ae1e355d42469abbd6c15aeb"
+      }
+    ],
+    "firstChunkIvHex": "9b4abb9bbac2da9800000000"
+  }
+}

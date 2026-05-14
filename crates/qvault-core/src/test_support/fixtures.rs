@@ -5,15 +5,9 @@ use serde::de::DeserializeOwned;
 
 use crate::error::Result;
 
-pub fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .expect("repo root")
-}
-
+/// Cross-language `.qenc` interop vectors committed under `crates/qvault-core/tests/data/`.
 pub fn fixtures_root() -> PathBuf {
-    repo_root().join("fixtures/legacy-mvp/js-oracle")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/qenc_interop")
 }
 
 pub fn fixture_path(name: &str) -> PathBuf {

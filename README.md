@@ -32,7 +32,7 @@ Verified in default tests:
 
 - `crates/qvault-core`: current container crypto and successor lifecycle / `QVqcont-7` implementation
 - `crates/qvault-cli`: thin CLI over `qvault-core`
-- `fixtures/legacy-mvp/js-oracle`: retired predecessor fixtures
+- `crates/qvault-core/tests/data/qenc_interop`: committed JS-oracle `.qenc` vectors for cross-language tests
 - `fixtures/successor`: successor fixture root for later stages
 - `tools/gen-js-fixtures.mjs`: disabled until rewritten for successor lifecycle modules
 

@@ -4,11 +4,6 @@ edition.workspace = true
 license.workspace = true
 version.workspace = true
 
-# Integration tests still use `#![cfg(feature = "legacy-mvp")]` until Stage L8 removes them.
-# The Cargo feature is not declared; silence check-cfg for those crates.
-[lints.rust]
-unexpected_cfgs = "allow"
-
 [dependencies]
 aes-gcm.workspace = true
 base64.workspace = true
