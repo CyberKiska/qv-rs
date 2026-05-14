@@ -22,8 +22,6 @@ const FP_ALG_ID_SHA3_256: u8 = 0x01;
 const FP_RECORD_LEN: usize = 33;
 const QSIG_FLAG_CTX_PRESENT: u16 = 0x0001;
 const QSIG_KNOWN_FLAGS: u16 = 0x000f;
-#[cfg(feature = "legacy-mvp")]
-const LEGACY_QSIG_FLAG_PROFILE_MVP_V1: u16 = 0x000f;
 const META_TAG_SIGNER_PUBLIC_KEY: u8 = 0x10;
 const META_TAG_SIGNER_FINGERPRINT: u8 = 0x11;
 
@@ -224,34 +222,6 @@ fn build_tbs(
     Ok(out)
 }
 
-#[cfg(feature = "legacy-mvp")]
-fn build_legacy_tbs_v1(
-    version_major: u8,
-    version_minor: u8,
-    suite_id: u8,
-    hash_alg_id: u8,
-    ctx_bytes: &[u8],
-    file_hash: &[u8; 64],
-) -> Result<Vec<u8>> {
-    if ctx_bytes.len() > u8::MAX as usize {
-        return Err(err("Context length exceeds u8 limit"));
-    }
-    let mut out = Vec::with_capacity(4 + 7 + ctx_bytes.len() + file_hash.len());
-    out.extend_from_slice(MAGIC_TBS);
-    out.extend_from_slice(&[
-        0x01,
-        0x00,
-        version_major,
-        version_minor,
-        suite_id,
-        hash_alg_id,
-        ctx_bytes.len() as u8,
-    ]);
-    out.extend_from_slice(ctx_bytes);
-    out.extend_from_slice(file_hash);
-    Ok(out)
-}
-
 pub fn unpack_qsig(sig_bytes: &[u8]) -> Result<ParsedQsig> {
     let mut reader = Reader::new(sig_bytes);
     if reader.take(4, "magic")? != MAGIC_QSIG {
@@ -260,10 +230,6 @@ pub fn unpack_qsig(sig_bytes: &[u8]) -> Result<ParsedQsig> {
 
     let version_major = reader.u8("versionMajor")?;
     let version_minor = reader.u8("versionMinor")?;
-    #[cfg(feature = "legacy-mvp")]
-    if version_major == 0x01 {
-        return unpack_legacy_qsig_v1(reader, version_major, version_minor);
-    }
     if version_major != QSIG_FORMAT_VERSION_MAJOR {
         return Err(err(format!(
             "Unsupported detached PQ signature major version: {version_major}"
@@ -382,71 +348,6 @@ pub fn unpack_qsig(sig_bytes: &[u8]) -> Result<ParsedQsig> {
         flags,
         file_hash,
         ctx_bytes,
-        signature,
-        metadata,
-        signer_fingerprint,
-        tbs,
-    })
-}
-
-#[cfg(feature = "legacy-mvp")]
-fn unpack_legacy_qsig_v1(
-    mut reader: Reader<'_>,
-    version_major: u8,
-    version_minor: u8,
-) -> Result<ParsedQsig> {
-    let suite_id = reader.u8("suiteId")?;
-    qsig_suite_name(suite_id)?;
-
-    let hash_alg_id = reader.u8("hashAlgId")?;
-    if hash_alg_id != SIG_HASH_ALG_ID_SHA3_512 {
-        return Err(err(format!("Unsupported .qsig hashAlgId: {hash_alg_id}")));
-    }
-
-    let flags = reader.u16le("flags")?;
-    if flags != 0 && flags != LEGACY_QSIG_FLAG_PROFILE_MVP_V1 {
-        return Err(err(format!("Unsupported .qsig flags value: {flags}")));
-    }
-
-    let mut file_hash = [0u8; FILE_HASH_LEN];
-    file_hash.copy_from_slice(reader.take(FILE_HASH_LEN, "fileHash")?);
-    let ctx_len = usize::from(reader.u16le("ctxLen")?);
-    let meta_len = usize::from(reader.u16le("metaLen")?);
-    let sig_len = reader.u32le("sigLen")? as usize;
-
-    let expected_remaining = ctx_len + meta_len + sig_len;
-    if reader.remaining() != expected_remaining {
-        return Err(err("Invalid .qsig length framing"));
-    }
-
-    let ctx_bytes = reader.take(ctx_len, "ctxBytes")?.to_vec();
-    let meta_bytes = reader.take(meta_len, "metaBytes")?;
-    let signature = reader.take(sig_len, "signature")?.to_vec();
-
-    let metadata = decode_metadata_tlv(meta_bytes)?;
-    let signer_fingerprint = metadata
-        .signer_fingerprint_record
-        .as_deref()
-        .map(unpack_signer_fingerprint)
-        .transpose()?;
-
-    let tbs = build_legacy_tbs_v1(
-        version_major,
-        version_minor,
-        suite_id,
-        hash_alg_id,
-        &ctx_bytes,
-        &file_hash,
-    )?;
-
-    Ok(ParsedQsig {
-        version_major,
-        version_minor,
-        suite_id,
-        hash_alg_id,
-        flags,
-        file_hash,
-        ctx_bytes: Vec::new(),
         signature,
         metadata,
         signer_fingerprint,

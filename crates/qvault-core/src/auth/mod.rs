@@ -5,8 +5,6 @@ pub mod signature_identity;
 pub mod signature_suites;
 pub(crate) mod successor_policy;
 pub mod stellar_sig;
-#[cfg(feature = "legacy-mvp")]
-pub mod verify;
 
 use serde::{Deserialize, Serialize};
 
@@ -264,8 +262,6 @@ pub struct AuthenticityReport {
     pub timestamp_evidence: Vec<TimestampEvidence>,
 }
 
-#[cfg(feature = "legacy-mvp")]
-pub use opentimestamps::{assert_manifest_bundle_timestamps, inspect_timestamp_evidence};
 pub use detached_archive_approval_format::{
     classify_detached_archive_approval_bytes, is_supported_stellar_signature_document_bytes,
     DetachedArchiveApprovalKind,
@@ -278,5 +274,3 @@ pub use signature_suites::{
     normalize_signature_suite, SignatureSuiteInfo,
 };
 pub use stellar_sig::verify_stellar_sig_against_bytes;
-#[cfg(feature = "legacy-mvp")]
-pub use verify::verify_manifest_signatures;

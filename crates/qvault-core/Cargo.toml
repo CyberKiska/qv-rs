@@ -4,8 +4,8 @@ edition.workspace = true
 license.workspace = true
 version.workspace = true
 
-# Predecessor code still uses `#[cfg(feature = "legacy-mvp")]` until checklist Stages L2–L9.
-# The feature flag is removed from [features]; silence check-cfg until those cfgs are deleted.
+# Integration tests still use `#![cfg(feature = "legacy-mvp")]` until Stage L8 removes them.
+# The Cargo feature is not declared; silence check-cfg for those crates.
 [lints.rust]
 unexpected_cfgs = "allow"
 
