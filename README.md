@@ -2,15 +2,14 @@
 
 `qv-cli` is a compatibility-first local Rust CLI for the current Quantum Vault container standard.
 
-The neighboring Quantum Vault JS project is the behavior and wire-format oracle. Default builds are successor-only; retired manifest-v2 / manifest-bundle-v1 / `QVqcont-6` code is available only with `--features legacy-mvp`.
+The neighboring Quantum Vault JS project is the behavior and wire-format oracle. Default builds are successor-only.
 
 ## Current Status
 
 Default build status:
 
 - current `.qenc` container primitives remain available
-- predecessor split/restore/attach CLI commands are disabled
-- successor lifecycle artifacts and `QVqcont-7` are staged but not implemented yet
+- successor lifecycle artifacts, `QVqcont-7`, and the successor CLI (`split`, `attach`, `reshare`, `restore`, `verify`, …) ship in default builds
 
 Implemented in `qvault-core` default builds:
 
@@ -29,18 +28,11 @@ Verified in default tests:
 - Rust reproduces current JS `.qenc` fixture bytes exactly when RNG inputs and timestamps are fixed
 - malformed and tampered inputs fail closed in the covered negative cases
 
-Legacy MVP checks are still available explicitly:
-
-```bash
-cargo test -p qvault-core --features legacy-mvp
-cargo run -p qvault-cli --features legacy-mvp -- --help
-```
-
 ## Repository Layout
 
-- `crates/qvault-core`: current container crypto plus staged successor migration modules
+- `crates/qvault-core`: current container crypto and successor lifecycle / `QVqcont-7` implementation
 - `crates/qvault-cli`: thin CLI over `qvault-core`
-- `fixtures/legacy-mvp/js-oracle`: retired predecessor fixtures, feature-gated
+- `fixtures/legacy-mvp/js-oracle`: retired predecessor fixtures
 - `fixtures/successor`: successor fixture root for later stages
 - `tools/gen-js-fixtures.mjs`: disabled until rewritten for successor lifecycle modules
 
@@ -73,14 +65,7 @@ node tools/gen-js-fixtures.mjs
 
 The binary built by Cargo is `qvault-cli`.
 
-Default CLI builds intentionally refuse predecessor split/restore/attach commands until
-the successor CLI is implemented.
-
-For migration-only legacy help:
-
-```bash
-cargo run -p qvault-cli --features legacy-mvp -- --help
-```
+Successor commands are the default CLI surface; predecessor-era commands are not available as a Cargo-selected build.
 
 ## Compatibility Notes
 
@@ -99,7 +84,7 @@ Important compatibility rules:
 
 - compatibility comes before abstraction
 - wire-visible JSON uses explicit structs and canonical serialization
-- restore is manifest-and-bundle centric and fail-closed
+- restore is archive-state / lifecycle-bundle centric and fail-closed
 - no silent format fallback is introduced
 - legacy `QVqcont-5` / manifest-v1 inputs are treated as unsupported
 
@@ -112,8 +97,7 @@ Current deliberate restore hardening:
 Current deliberate CLI divergence from JS Pro defaults:
 
 - the library default for new archives matches the JS builder default (`strong-pq-signature`)
-- the Rust CLI `split` command currently defaults to `integrity-only`
-- this is intentional so the local CLI remains usable without forcing signature material at archive creation time
+- the Rust CLI `split` command defaults to `strong-pq-signature` (see `split` help / `--auth-policy-level`)
 
 OpenTimestamps notes:
 
@@ -125,7 +109,7 @@ OpenTimestamps notes:
 - Key commitment is mandatory and is verified before `.qenc` decryption.
 - `decrypt` also verifies the inner wrapped-payload file hash after decryption.
 - `split` verifies that the provided secret key matches the `.qenc` container before producing shards.
-- `restore` validates manifest digest, bundle digest, copied `.qenc` metadata, key commitment, share commitments, and fragment body hashes.
+- `restore` validates embedded archive-state / cohort-binding / lifecycle-bundle digests, `.qenc` metadata, key commitment, share commitments, and fragment body hashes.
 - `restore` blocks when archive policy is not satisfied.
 - for non-`integrity-only` archives, restore only counts signatures toward policy when the signer is trusted via bundle key binding or explicit user pinning.
 - bundle extraction only writes single-component file names and refuses duplicate or unsafe entry names.

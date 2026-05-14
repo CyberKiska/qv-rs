@@ -4,9 +4,10 @@ edition.workspace = true
 license.workspace = true
 version.workspace = true
 
-[features]
-default = []
-legacy-mvp = []
+# Predecessor code still uses `#[cfg(feature = "legacy-mvp")]` until checklist Stages L2–L9.
+# The feature flag is removed from [features]; silence check-cfg until those cfgs are deleted.
+[lints.rust]
+unexpected_cfgs = "allow"
 
 [dependencies]
 aes-gcm.workspace = true
