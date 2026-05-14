@@ -1,12 +1,3 @@
-#[cfg(feature = "legacy-mvp")]
-mod legacy_main;
-
-#[cfg(feature = "legacy-mvp")]
-fn main() -> anyhow::Result<()> {
-    legacy_main::main()
-}
-
-#[cfg(not(feature = "legacy-mvp"))]
 fn main() {
     if let Err(error) = successor_main::main() {
         successor_main::emit_error(&error);
@@ -14,7 +5,6 @@ fn main() {
     }
 }
 
-#[cfg(not(feature = "legacy-mvp"))]
 mod successor_main {
     use std::env;
     use std::fs;
