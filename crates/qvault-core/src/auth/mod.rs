@@ -1,3 +1,4 @@
+pub mod detached_archive_approval_format;
 pub mod opentimestamps;
 pub mod qsig;
 pub mod signature_identity;
@@ -265,6 +266,10 @@ pub struct AuthenticityReport {
 
 #[cfg(feature = "legacy-mvp")]
 pub use opentimestamps::{assert_manifest_bundle_timestamps, inspect_timestamp_evidence};
+pub use detached_archive_approval_format::{
+    classify_detached_archive_approval_bytes, is_supported_stellar_signature_document_bytes,
+    DetachedArchiveApprovalKind,
+};
 pub use opentimestamps::{parse_open_timestamp_proof, resolve_open_timestamp_target};
 pub use qsig::{unpack_pqpk, unpack_qsig, verify_qsig_against_bytes, ParsedPqpk, ParsedQsig};
 pub use signature_identity::compute_detached_signature_identity_digest_hex;

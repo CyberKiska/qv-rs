@@ -5,8 +5,9 @@ use base64::Engine;
 use serde_json::Value;
 
 use crate::auth::{
-    resolve_open_timestamp_target, unpack_pqpk, verify_qsig_against_bytes,
-    verify_stellar_sig_against_bytes, NamedBinaryArtifact, ParsedPqpk, SignatureArtifact,
+    classify_detached_archive_approval_bytes, resolve_open_timestamp_target, unpack_pqpk,
+    verify_qsig_against_bytes, verify_stellar_sig_against_bytes, DetachedArchiveApprovalKind,
+    NamedBinaryArtifact, ParsedPqpk, SignatureArtifact,
 };
 use crate::error::{err, Result};
 use crate::hash::{sha256_hex, sha3_512_hex};
@@ -763,10 +764,17 @@ fn import_external_lifecycle_signature(
     pins: &[PqPin],
     expected_ed25519: Option<&str>,
 ) -> Result<ImportedSignature> {
-    if signature_bytes.starts_with(b"PQSG") {
-        return import_external_qsig(family, target, name, signature_bytes, pins);
+    match classify_detached_archive_approval_bytes(signature_bytes) {
+        Ok(DetachedArchiveApprovalKind::Qsig) => {
+            import_external_qsig(family, target, name, signature_bytes, pins)
+        }
+        Ok(DetachedArchiveApprovalKind::StellarJson) => {
+            import_external_stellar_sig(family, target, name, signature_bytes, expected_ed25519)
+        }
+        Err(error) => Err(err(format!(
+            "{name}: unsupported detached signature format ({error})"
+        ))),
     }
-    import_external_stellar_sig(family, target, name, signature_bytes, expected_ed25519)
 }
 
 fn import_external_qsig(

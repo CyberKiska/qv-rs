@@ -6,8 +6,9 @@ use serde_json::Value;
 use zeroize::Zeroize;
 
 use crate::auth::{
-    resolve_open_timestamp_target, verify_qsig_against_bytes, verify_stellar_sig_against_bytes,
-    ArchivePolicyEvaluation, AuthPolicy, AuthPolicyLevel, AuthenticityReport, AuthenticityStatus,
+    classify_detached_archive_approval_bytes, resolve_open_timestamp_target,
+    verify_qsig_against_bytes, verify_stellar_sig_against_bytes, ArchivePolicyEvaluation, AuthPolicy,
+    AuthPolicyLevel, AuthenticityReport, AuthenticityStatus, DetachedArchiveApprovalKind,
     NamedBinaryArtifact, SignatureArtifact, SignatureCheckResult, SignatureVerificationCounts,
     SignatureVerificationReport, SignatureVerificationStatus, TimestampEvidence,
     VerificationInputs,
@@ -1012,6 +1013,37 @@ fn verify_bundle_archive_approval_signature(
     Ok(result)
 }
 
+fn external_unknown_archive_approval_result(message: impl Into<String>) -> SignatureCheckResult {
+    SignatureCheckResult {
+        ok: false,
+        self_signed: false,
+        bundle_pinned: false,
+        user_pinned: false,
+        signer_pinned: false,
+        name: String::new(),
+        source: "external".to_string(),
+        format: "unknown".to_string(),
+        suite: Some("unknown".to_string()),
+        suite_display: None,
+        strong_pq: false,
+        key_source: None,
+        signer_fingerprint_hex: None,
+        signer_label: None,
+        signer: None,
+        error: Some(message.into()),
+        warnings: Vec::new(),
+        artifact_id: String::new(),
+        signature_content_digest_alg: None,
+        signature_content_digest_hex: None,
+        ots_stamped_digest_alg: None,
+        ots_stamped_digest_hex: None,
+        proof_identity_digest_alg: None,
+        proof_identity_digest_hex: None,
+        counted_for_policy: false,
+        signature_bytes: None,
+    }
+}
+
 fn verify_external_archive_approval_signature(
     artifact: &NamedBinaryArtifact,
     index: usize,
@@ -1023,27 +1055,34 @@ fn verify_external_archive_approval_signature(
     } else {
         artifact.name.clone()
     };
-    let format = if artifact.bytes.starts_with(b"PQSG") {
-        "qsig"
-    } else {
-        "stellar-sig"
-    };
-    let mut result = if format == "qsig" {
-        verify_qsig_against_bytes(
+    let mut result = match classify_detached_archive_approval_bytes(&artifact.bytes) {
+        Err(error) => {
+            let mut unsupported = external_unknown_archive_approval_result(format!(
+                "Unsupported signature format: {error}"
+            ));
+            decorate_signature_result(
+                &mut unsupported,
+                name.clone(),
+                name,
+                "external".to_string(),
+                artifact.bytes.clone(),
+            );
+            return Ok(unsupported);
+        }
+        Ok(DetachedArchiveApprovalKind::Qsig) => verify_qsig_against_bytes(
             archive_state_bytes,
             &artifact.bytes,
             None,
             verification_inputs
                 .pinned_pq_public_key_file_bytes
                 .as_deref(),
-        )?
-    } else {
-        verify_stellar_sig_against_bytes(
+        )?,
+        Ok(DetachedArchiveApprovalKind::StellarJson) => verify_stellar_sig_against_bytes(
             archive_state_bytes,
             &artifact.bytes,
             None,
             verification_inputs.expected_ed25519_signer.as_deref(),
-        )?
+        )?,
     };
     decorate_signature_result(
         &mut result,

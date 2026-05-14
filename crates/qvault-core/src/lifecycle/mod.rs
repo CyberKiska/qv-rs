@@ -11,6 +11,8 @@ pub mod transition;
 
 mod validation;
 
+pub(crate) use validation::{exact_keys, value_object};
+
 pub use archive_state::{
     build_archive_state_descriptor, canonicalize_archive_state_descriptor, derive_state_id,
     parse_archive_state_descriptor_bytes, ArchiveStateDescriptor,
