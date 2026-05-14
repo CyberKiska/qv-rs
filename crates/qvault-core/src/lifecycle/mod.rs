@@ -5,6 +5,7 @@ pub mod bundle;
 pub mod cohort_binding;
 pub mod digests;
 pub mod identity;
+pub mod reshare;
 pub mod source_evidence;
 pub mod transition;
 
@@ -43,6 +44,10 @@ pub use identity::{
     canonicalize_cohort_id_preimage, derive_cohort_id, generate_archive_id,
     CanonicalCohortIdPreimage, CohortIdPreimage,
 };
+pub use reshare::{
+    reshare_same_state, ReshareMaintenanceArtifacts, ReshareSameStateOptions,
+    ReshareSameStateParams, ReshareTransitionOptions, ReshareVerificationReport, ResharedSameState,
+};
 pub use source_evidence::{
     canonicalize_source_evidence, parse_source_evidence_bytes, CanonicalSourceEvidence,
     SourceEvidence, SOURCE_EVIDENCE_CANONICALIZATION, SOURCE_EVIDENCE_SCHEMA,
@@ -51,5 +56,5 @@ pub use source_evidence::{
 pub use transition::{
     canonicalize_transition_record, parse_transition_record_bytes, CanonicalTransitionRecord,
     TransitionRecord, TRANSITION_RECORD_CANONICALIZATION, TRANSITION_RECORD_SCHEMA,
-    TRANSITION_RECORD_VERSION,
+    TRANSITION_RECORD_VERSION, TRANSITION_TYPE_DEFAULT,
 };

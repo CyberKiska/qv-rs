@@ -9,7 +9,8 @@ use crate::kdf::{derive_key_with_kmac, verify_key_commitment};
 use crate::lifecycle::{
     build_archive_state_descriptor, build_cohort_binding, build_lifecycle_bundle,
     canonicalize_archive_state_descriptor, canonicalize_cohort_binding,
-    canonicalize_lifecycle_bundle, derive_cohort_id, generate_archive_id, ArchiveStateDescriptor,
+    canonicalize_lifecycle_bundle, derive_cohort_id, generate_archive_id,
+    parse_archive_state_descriptor_bytes, ArchiveStateDescriptor,
     BuildArchiveStateDescriptorParams, BuildCohortBindingParams, BuildLifecycleBundleParams,
     CohortBinding, LifecycleBundle,
 };
@@ -34,6 +35,7 @@ pub struct Qvqcont7BuildParams {
 pub struct Qvqcont7BuildOptions {
     pub archive_id: Option<String>,
     pub archive_id_random_bytes: Option<[u8; 32]>,
+    pub preserved_archive_state_bytes: Option<Vec<u8>>,
     pub parent_state_id: Option<String>,
     pub state_type: Option<String>,
     pub sss_random_bytes: Option<Vec<u8>>,
@@ -180,10 +182,30 @@ pub fn build_qvqcont7_shards(
         .map(|body| sha3_512_hex(body))
         .collect::<Vec<_>>();
 
-    let archive_id = match (&options.archive_id, options.archive_id_random_bytes) {
-        (Some(archive_id), None) => archive_id.clone(),
-        (None, random_bytes) => generate_archive_id(random_bytes)?,
-        (Some(_), Some(_)) => {
+    let has_forbidden_archive_override = options.archive_id.is_some()
+        || options.archive_id_random_bytes.is_some()
+        || options.parent_state_id.is_some()
+        || options.state_type.is_some();
+    if options.preserved_archive_state_bytes.is_some() && has_forbidden_archive_override {
+        return Err(err(
+            "preserved_archive_state_bytes forbids archive-state override options",
+        ));
+    }
+    let archive_id = match (
+        &options.archive_id,
+        options.archive_id_random_bytes,
+        options.preserved_archive_state_bytes.as_deref(),
+    ) {
+        (_, _, Some(bytes)) => parse_archive_state_descriptor_bytes(bytes)?
+            .archive_state
+            .value
+            .get("archiveId")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| err("Missing preserved archiveState.archiveId"))?,
+        (Some(archive_id), None, None) => archive_id.clone(),
+        (None, random_bytes, None) => generate_archive_id(random_bytes)?,
+        (Some(_), Some(_), None) => {
             return Err(err(
                 "archive_id and archive_id_random_bytes are mutually exclusive",
             ))
@@ -209,26 +231,43 @@ pub fn build_qvqcont7_shards(
         .clone()
         .unwrap_or_else(|| DEFAULT_CRYPTO_PROFILE.aad_policy_id.to_string());
 
-    let archive_state = build_archive_state_descriptor(&BuildArchiveStateDescriptorParams {
-        archive_id: archive_id.clone(),
-        parent_state_id: options.parent_state_id.clone(),
-        state_type: options.state_type.clone(),
-        crypto_profile_id: crypto_profile_id.clone(),
-        kdf_tree_id,
-        nonce_policy_id: parsed.metadata.nonce_policy_id.clone(),
-        nonce_mode: parsed.metadata.nonce_mode.clone(),
-        counter_bits: parsed.metadata.counter_bits,
-        max_chunk_count: parsed.metadata.max_chunk_count,
-        aad_policy_id: aad_policy_id.clone(),
-        chunk_size,
-        chunk_count: total_chunks,
-        payload_length: parsed.metadata.payload_length.unwrap_or(effective_length),
-        qenc_hash: container_hash.clone(),
-        container_id: container_id.clone(),
-        auth_policy_level,
-        min_valid_signatures,
-    })?;
-    let canonical_archive_state = canonicalize_archive_state_descriptor(&archive_state.value)?;
+    let (archive_state, canonical_archive_state) = if let Some(bytes) =
+        options.preserved_archive_state_bytes.as_deref()
+    {
+        let canonical = parse_archive_state_descriptor_bytes(bytes)?;
+        assert_preserved_archive_state_matches_qenc(
+            &canonical.archive_state.value,
+            &parsed.metadata,
+            chunk_size,
+            total_chunks,
+            parsed.metadata.payload_length.unwrap_or(effective_length),
+            &container_hash,
+            &container_id,
+        )?;
+        (canonical.archive_state.clone(), canonical)
+    } else {
+        let archive_state = build_archive_state_descriptor(&BuildArchiveStateDescriptorParams {
+            archive_id: archive_id.clone(),
+            parent_state_id: options.parent_state_id.clone(),
+            state_type: options.state_type.clone(),
+            crypto_profile_id: crypto_profile_id.clone(),
+            kdf_tree_id,
+            nonce_policy_id: parsed.metadata.nonce_policy_id.clone(),
+            nonce_mode: parsed.metadata.nonce_mode.clone(),
+            counter_bits: parsed.metadata.counter_bits,
+            max_chunk_count: parsed.metadata.max_chunk_count,
+            aad_policy_id: aad_policy_id.clone(),
+            chunk_size,
+            chunk_count: total_chunks,
+            payload_length: parsed.metadata.payload_length.unwrap_or(effective_length),
+            qenc_hash: container_hash.clone(),
+            container_id: container_id.clone(),
+            auth_policy_level,
+            min_valid_signatures,
+        })?;
+        let canonical = canonicalize_archive_state_descriptor(&archive_state.value)?;
+        (archive_state, canonical)
+    };
     let archive_state_bytes = canonical_archive_state.bytes.clone();
     let archive_state_digest_hex = canonical_archive_state.digest.value.clone();
     let state_id = canonical_archive_state.state_id.clone();
@@ -411,6 +450,68 @@ fn first_fragment_size(shard_bodies: &[Vec<u8>]) -> Result<u64> {
     }
     let len = u32::from_be_bytes([first[0], first[1], first[2], first[3]]);
     Ok(u64::from(len))
+}
+
+fn assert_preserved_archive_state_matches_qenc(
+    archive_state: &Value,
+    metadata: &crate::qenc::QencMetadata,
+    chunk_size: u64,
+    chunk_count: u64,
+    payload_length: u64,
+    qenc_hash: &str,
+    container_id: &str,
+) -> Result<()> {
+    let qenc = archive_state
+        .get("qenc")
+        .and_then(Value::as_object)
+        .ok_or_else(|| err("Preserved archive-state is missing qenc object"))?;
+    let qenc_u64 = |field: &str| -> Result<u64> {
+        qenc.get(field)
+            .and_then(Value::as_u64)
+            .ok_or_else(|| err(format!("Preserved archive-state qenc.{field} mismatch")))
+    };
+    let qenc_str = |field: &str| -> Result<&str> {
+        qenc.get(field)
+            .and_then(Value::as_str)
+            .ok_or_else(|| err(format!("Preserved archive-state qenc.{field} mismatch")))
+    };
+    if qenc_u64("chunkSize")? != chunk_size
+        || qenc_u64("chunkCount")? != chunk_count
+        || qenc_u64("payloadLength")? != payload_length
+        || qenc_str("qencHash")? != qenc_hash
+        || qenc_str("containerId")? != container_id
+    {
+        return Err(err(
+            "Preserved archive-state descriptor does not match reconstructed .qenc",
+        ));
+    }
+    let state_str = |field: &str| -> Result<&str> {
+        archive_state
+            .get(field)
+            .and_then(Value::as_str)
+            .ok_or_else(|| err(format!("Preserved archive-state {field} mismatch")))
+    };
+    if state_str("cryptoProfileId")? != metadata.crypto_profile_id.as_deref().unwrap_or_default()
+        || state_str("kdfTreeId")? != metadata.kdf_tree_id.as_deref().unwrap_or_default()
+        || state_str("noncePolicyId")? != metadata.nonce_policy_id
+        || state_str("nonceMode")? != metadata.nonce_mode
+        || archive_state
+            .get("counterBits")
+            .and_then(Value::as_u64)
+            .unwrap_or(u64::MAX)
+            != u64::from(metadata.counter_bits)
+        || archive_state
+            .get("maxChunkCount")
+            .and_then(Value::as_u64)
+            .unwrap_or_default()
+            != metadata.max_chunk_count
+        || state_str("aadPolicyId")? != metadata.aad_policy_id.as_deref().unwrap_or_default()
+    {
+        return Err(err(
+            "Preserved archive-state policy metadata does not match reconstructed .qenc",
+        ));
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

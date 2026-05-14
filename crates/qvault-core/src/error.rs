@@ -9,6 +9,7 @@ pub enum QvCode {
     IntegrityMismatch,
     VerificationFailed,
     PolicyNotSatisfied,
+    ReshareContractViolation,
     UnsupportedFormat,
     RestoreFailed,
 }
@@ -23,6 +24,7 @@ impl QvCode {
             Self::IntegrityMismatch => "QV_INTEGRITY_MISMATCH",
             Self::VerificationFailed => "QV_VERIFICATION_FAILED",
             Self::PolicyNotSatisfied => "QV_POLICY_NOT_SATISFIED",
+            Self::ReshareContractViolation => "QV_RESHARE_CONTRACT_VIOLATION",
             Self::UnsupportedFormat => "QV_UNSUPPORTED_FORMAT",
             Self::RestoreFailed => "QV_RESTORE_FAILED",
         }

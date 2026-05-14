@@ -1,6 +1,7 @@
 #[cfg(feature = "legacy-mvp")]
 pub mod attach;
 pub mod attach_v7;
+pub mod reshare_v7;
 #[cfg(feature = "legacy-mvp")]
 pub mod restore;
 pub mod restore_v7;
@@ -19,6 +20,10 @@ pub use attach_v7::{
     attach_lifecycle_bundle_to_shards, AttachLifecycleOptions, AttachedLifecycleBundle,
     AttachedLifecycleShard, LifecycleSignatureFamily, LifecycleSignatureImport,
     LifecycleSourceEvidenceImport,
+};
+pub use reshare_v7::{
+    reshare_same_state, ReshareMaintenanceArtifacts, ReshareSameStateOptions,
+    ReshareSameStateParams, ReshareTransitionOptions, ReshareVerificationReport, ResharedSameState,
 };
 #[cfg(feature = "legacy-mvp")]
 pub use restore::{restore_from_shards, RestoreQcontOptions, RestoredQcont};

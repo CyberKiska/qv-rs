@@ -207,6 +207,7 @@ mod successor_main {
                         QvCode::NotEnoughShards | QvCode::IntegrityMismatch | QvCode::RestoreFailed,
                     ) => 4,
                     Some(QvCode::VerificationFailed | QvCode::PolicyNotSatisfied) => 5,
+                    Some(QvCode::ReshareContractViolation) => 10,
                     None => 1,
                 };
             }
