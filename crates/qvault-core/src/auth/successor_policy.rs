@@ -1,4 +1,4 @@
-//! Successor archive-approval verification counting (oracle: `restore.js` `buildLifecycleVerificationCounts`).
+//! Successor lifecycle signature verification counting (oracle: `restore.js` `buildLifecycleVerificationCounts`).
 
 use std::collections::BTreeMap;
 
@@ -34,7 +34,7 @@ fn attach_proof_identity(result: &mut SignatureCheckResult) {
 
 /// Oracle-aligned successor path: proof identity, self-signed exclusion, deduplicated policy
 /// counting, and aggregate [`SignatureVerificationCounts`].
-pub(crate) fn finalize_successor_archive_approval_verification(
+pub(crate) fn finalize_successor_lifecycle_verification(
     results: &mut [SignatureCheckResult],
     warnings: &mut Vec<String>,
 ) -> SignatureVerificationCounts {
@@ -51,6 +51,7 @@ pub(crate) fn finalize_successor_archive_approval_verification(
 
     #[derive(Clone)]
     struct DedupeEntry {
+        family: String,
         strong_pq: bool,
         signer_pinned: bool,
         bundle_pinned: bool,
@@ -71,7 +72,12 @@ pub(crate) fn finalize_successor_archive_approval_verification(
         let Some(digest) = result.proof_identity_digest_hex.as_deref() else {
             continue;
         };
-        let key = format!("archive-approval:{}:{}", result.format, digest);
+        let family = if result.family.is_empty() {
+            "archive-approval"
+        } else {
+            result.family.as_str()
+        };
+        let key = format!("{family}:{}:{}", result.format, digest);
         let display = if result.name.is_empty() {
             result.artifact_id.clone()
         } else {
@@ -92,22 +98,21 @@ pub(crate) fn finalize_successor_archive_approval_verification(
         by_key.insert(
             key.clone(),
             DedupeEntry {
+                family: family.to_string(),
                 strong_pq: result.strong_pq,
                 signer_pinned: result.signer_pinned,
                 bundle_pinned: result.bundle_pinned,
                 user_pinned: result.user_pinned,
-                names: vec![if display.is_empty() {
-                    key
-                } else {
-                    display
-                }],
+                names: vec![if display.is_empty() { key } else { display }],
                 first_policy_index: index,
             },
         );
     }
 
     for entry in by_key.values() {
-        results[entry.first_policy_index].counted_for_policy = true;
+        if entry.family == "archive-approval" {
+            results[entry.first_policy_index].counted_for_policy = true;
+        }
     }
 
     for entry in by_key.values() {
@@ -115,7 +120,8 @@ pub(crate) fn finalize_successor_archive_approval_verification(
             continue;
         }
         warnings.push(format!(
-            "Duplicate detached archive-approval signature ignored for policy/state counting: {}",
+            "Duplicate detached {} signature ignored for policy/state counting: {}",
+            entry.family,
             entry.names.join(", ")
         ));
     }
@@ -160,18 +166,25 @@ pub(crate) fn finalize_successor_archive_approval_verification(
         if entry.user_pinned {
             counts.user_pinned_valid_total += 1;
         }
-        counts.valid_archive_approval += 1;
-        if entry.strong_pq {
-            counts.valid_archive_approval_strong_pq += 1;
-        }
-        if entry.signer_pinned {
-            counts.archive_approval_pinned_valid_total += 1;
-        }
-        if entry.bundle_pinned {
-            counts.archive_approval_bundle_pinned_valid_total += 1;
-        }
-        if entry.user_pinned {
-            counts.archive_approval_user_pinned_valid_total += 1;
+        match entry.family.as_str() {
+            "archive-approval" => {
+                counts.valid_archive_approval += 1;
+                if entry.strong_pq {
+                    counts.valid_archive_approval_strong_pq += 1;
+                }
+                if entry.signer_pinned {
+                    counts.archive_approval_pinned_valid_total += 1;
+                }
+                if entry.bundle_pinned {
+                    counts.archive_approval_bundle_pinned_valid_total += 1;
+                }
+                if entry.user_pinned {
+                    counts.archive_approval_user_pinned_valid_total += 1;
+                }
+            }
+            "maintenance" => counts.valid_maintenance += 1,
+            "source-evidence" => counts.valid_source_evidence += 1,
+            _ => {}
         }
     }
 
@@ -206,7 +219,7 @@ mod tests {
 
         let mut results = vec![verified];
         let mut warnings = Vec::new();
-        let counts = finalize_successor_archive_approval_verification(&mut results, &mut warnings);
+        let counts = finalize_successor_lifecycle_verification(&mut results, &mut warnings);
         assert_eq!(counts.valid_archive_approval, 0);
         assert!(!results[0].counted_for_policy);
         assert!(
@@ -240,7 +253,7 @@ mod tests {
         verified.name = "ext.qsig".to_string();
         let mut results = vec![verified];
         let mut warnings = Vec::new();
-        let counts = finalize_successor_archive_approval_verification(&mut results, &mut warnings);
+        let counts = finalize_successor_lifecycle_verification(&mut results, &mut warnings);
         assert_eq!(counts.valid_archive_approval, 1);
         assert!(results[0].counted_for_policy);
     }
@@ -269,7 +282,7 @@ mod tests {
         b.artifact_id = "b".to_string();
         let mut results = vec![a, b];
         let mut warnings = Vec::new();
-        let counts = finalize_successor_archive_approval_verification(&mut results, &mut warnings);
+        let counts = finalize_successor_lifecycle_verification(&mut results, &mut warnings);
         assert_eq!(counts.valid_archive_approval, 1);
         assert!(results[0].counted_for_policy);
         assert!(!results[1].counted_for_policy);

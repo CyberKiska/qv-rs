@@ -203,7 +203,10 @@ fn signature_artifact(value: &Value) -> Result<SignatureArtifact> {
             .unwrap_or("signature.qsig")
             .to_string(),
         source: "corpus".to_string(),
+        family: "archive-approval".to_string(),
         format: "qsig".to_string(),
+        target_type: None,
+        target_ref: None,
         signature_content_digest_hex: value["signatureContentDigestHex"]
             .as_str()
             .map(str::to_string),

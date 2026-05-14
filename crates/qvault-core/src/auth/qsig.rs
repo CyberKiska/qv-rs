@@ -429,6 +429,7 @@ fn verify_by_suite(
 fn fail_result(error: impl Into<String>, warnings: Vec<String>) -> SignatureCheckResult {
     SignatureCheckResult {
         ok: false,
+        family: "archive-approval".to_string(),
         self_signed: false,
         bundle_pinned: false,
         user_pinned: false,
@@ -446,6 +447,11 @@ fn fail_result(error: impl Into<String>, warnings: Vec<String>) -> SignatureChec
         error: Some(error.into()),
         warnings,
         artifact_id: String::new(),
+        target_type: None,
+        target_ref: None,
+        target_digest: None,
+        transition_index: None,
+        maintenance_purpose_labels: Vec::new(),
         signature_content_digest_alg: None,
         signature_content_digest_hex: None,
         ots_stamped_digest_alg: None,
@@ -574,6 +580,7 @@ pub fn verify_qsig_against_bytes(
         let computed_fp_hex = hex::encode(computed_fp);
         return Ok(SignatureCheckResult {
             ok: true,
+            family: "archive-approval".to_string(),
             self_signed: false,
             bundle_pinned: true,
             user_pinned,
@@ -591,6 +598,11 @@ pub fn verify_qsig_against_bytes(
             error: None,
             warnings,
             artifact_id: String::new(),
+            target_type: None,
+            target_ref: None,
+            target_digest: None,
+            transition_index: None,
+            maintenance_purpose_labels: Vec::new(),
             signature_content_digest_alg: None,
             signature_content_digest_hex: None,
             ots_stamped_digest_alg: None,
@@ -653,6 +665,7 @@ pub fn verify_qsig_against_bytes(
     let self_signed = key_source == "embedded-signature-key" && !user_pinned;
     Ok(SignatureCheckResult {
         ok: true,
+        family: "archive-approval".to_string(),
         self_signed,
         bundle_pinned: false,
         user_pinned,
@@ -670,6 +683,11 @@ pub fn verify_qsig_against_bytes(
         error: None,
         warnings,
         artifact_id: String::new(),
+        target_type: None,
+        target_ref: None,
+        target_digest: None,
+        transition_index: None,
+        maintenance_purpose_labels: Vec::new(),
         signature_content_digest_alg: None,
         signature_content_digest_hex: None,
         ots_stamped_digest_alg: None,

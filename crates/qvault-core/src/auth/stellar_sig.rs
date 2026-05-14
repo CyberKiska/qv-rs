@@ -51,6 +51,7 @@ struct StellarHashEntry {
 fn fail_result(error: impl Into<String>, warnings: Vec<String>) -> SignatureCheckResult {
     SignatureCheckResult {
         ok: false,
+        family: "archive-approval".to_string(),
         self_signed: false,
         bundle_pinned: false,
         user_pinned: false,
@@ -68,6 +69,11 @@ fn fail_result(error: impl Into<String>, warnings: Vec<String>) -> SignatureChec
         error: Some(error.into()),
         warnings,
         artifact_id: String::new(),
+        target_type: None,
+        target_ref: None,
+        target_digest: None,
+        transition_index: None,
+        maintenance_purpose_labels: Vec::new(),
         signature_content_digest_alg: None,
         signature_content_digest_hex: None,
         ots_stamped_digest_alg: None,
@@ -293,6 +299,7 @@ fn stellar_success(
 ) -> SignatureCheckResult {
     SignatureCheckResult {
         ok: true,
+        family: "archive-approval".to_string(),
         self_signed: false,
         bundle_pinned: !bundle_signer_empty,
         user_pinned,
@@ -310,6 +317,11 @@ fn stellar_success(
         error: None,
         warnings,
         artifact_id: String::new(),
+        target_type: None,
+        target_ref: None,
+        target_digest: None,
+        transition_index: None,
+        maintenance_purpose_labels: Vec::new(),
         signature_content_digest_alg: None,
         signature_content_digest_hex: None,
         ots_stamped_digest_alg: None,
@@ -634,10 +646,11 @@ pub fn verify_stellar_sig_against_bytes(
     }
 
     if try_validate_supported_stellar_signature_document(&value).is_ok() {
-        let proof_kind = match crate::auth::detached_archive_approval_format::stellar_v2_proof_kind(&value) {
-            Ok(k) => k,
-            Err(error) => return Ok(fail_result(error.to_string(), warnings)),
-        };
+        let proof_kind =
+            match crate::auth::detached_archive_approval_format::stellar_v2_proof_kind(&value) {
+                Ok(k) => k,
+                Err(error) => return Ok(fail_result(error.to_string(), warnings)),
+            };
         return match proof_kind {
             StellarV2ProofKind::Sep53Message => verify_stellar_signature_v2_sep53_message(
                 message_bytes,

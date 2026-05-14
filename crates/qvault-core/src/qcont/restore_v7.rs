@@ -5,21 +5,23 @@ use base64::Engine;
 use serde_json::Value;
 use zeroize::Zeroize;
 
+use crate::auth::successor_policy::finalize_successor_lifecycle_verification;
 use crate::auth::{
     classify_detached_archive_approval_bytes, resolve_open_timestamp_target,
-    verify_qsig_against_bytes, verify_stellar_sig_against_bytes, ArchivePolicyEvaluation, AuthPolicy,
-    AuthPolicyLevel, AuthenticityReport, AuthenticityStatus, DetachedArchiveApprovalKind,
-    NamedBinaryArtifact, SignatureArtifact, SignatureCheckResult, SignatureVerificationCounts,
-    SignatureVerificationReport, SignatureVerificationStatus, TimestampEvidence,
-    VerificationInputs,
+    verify_qsig_against_bytes, verify_stellar_sig_against_bytes, ArchivePolicyEvaluation,
+    AuthPolicy, AuthPolicyLevel, AuthenticityReport, AuthenticityStatus,
+    DetachedArchiveApprovalKind, NamedBinaryArtifact, SignatureArtifact, SignatureCheckResult,
+    SignatureTargetDigest, SignatureVerificationCounts, SignatureVerificationReport,
+    SignatureVerificationStatus, SourceEvidenceReport, SourceEvidenceReportRecord,
+    TimestampEvidence, TransitionReport, TransitionReportRecord, VerificationInputs,
 };
-use crate::auth::successor_policy::finalize_successor_archive_approval_verification;
 use crate::erasure;
 use crate::error::{coded, err, QvCode, Result};
 use crate::hash::{sha256_hex, sha3_512_hex};
 use crate::kdf::{derive_key_with_kmac, verify_key_commitment};
 use crate::lifecycle::{
     canonicalize_archive_state_descriptor, canonicalize_cohort_binding,
+    canonicalize_source_evidence, canonicalize_transition_record, derive_cohort_id,
     parse_lifecycle_bundle_bytes, CanonicalLifecycleBundle,
 };
 use crate::mlkem::decapsulate;
@@ -886,39 +888,42 @@ fn evaluate_successor_authenticity(
     verification_inputs: &VerificationInputs,
 ) -> Result<AuthenticityReport> {
     let bundle_value = &lifecycle_bundle.lifecycle_bundle.value;
-    let archive_state_digest_hex = sha3_512_hex(archive_state_bytes);
     let auth_policy = parse_auth_policy(bundle_value)?;
     let attachments = object_field(bundle_value, "attachments", "lifecycleBundle.attachments")?;
     let public_keys = public_key_map(attachments)?;
     let mut results = Vec::<SignatureCheckResult>::new();
     let mut warnings = Vec::<String>::new();
     let mut signature_artifacts = Vec::<SignatureArtifact>::new();
+    let targets = build_lifecycle_signature_targets(bundle_value, archive_state_bytes)?;
 
-    for (index, signature) in array_field(
-        attachments,
-        "archiveApprovalSignatures",
-        "lifecycleBundle.attachments.archiveApprovalSignatures",
-    )?
-    .iter()
-    .enumerate()
-    {
-        match verify_bundle_archive_approval_signature(
-            signature,
-            index,
-            &public_keys,
-            archive_state_bytes,
-            &archive_state_digest_hex,
-            verification_inputs,
-        ) {
-            Ok(result) => {
-                push_signature_artifact(&mut signature_artifacts, &result);
-                warnings.extend(result.warnings.iter().cloned());
-                results.push(result);
-            }
-            Err(error) => {
-                warnings.push(format!(
-                    "Bundled archive-approval signature ignored: {error}"
-                ));
+    for descriptor in LifecycleSignatureFamily::descriptors() {
+        for (index, signature) in array_field(
+            attachments,
+            descriptor.field,
+            &format!("lifecycleBundle.attachments.{}", descriptor.field),
+        )?
+        .iter()
+        .enumerate()
+        {
+            match verify_bundle_lifecycle_signature(
+                signature,
+                index,
+                *descriptor,
+                &public_keys,
+                &targets,
+                verification_inputs,
+            ) {
+                Ok(result) => {
+                    push_signature_artifact(&mut signature_artifacts, &result);
+                    warnings.extend(result.warnings.iter().cloned());
+                    results.push(result);
+                }
+                Err(error) => {
+                    warnings.push(format!(
+                        "Bundled {} signature ignored: {error}",
+                        descriptor.family
+                    ));
+                }
             }
         }
     }
@@ -941,8 +946,17 @@ fn evaluate_successor_authenticity(
         &signature_artifacts,
         &mut warnings,
     )?;
-    let counts = finalize_successor_archive_approval_verification(&mut results, &mut warnings);
-    let status = signature_status(&counts, verification_inputs);
+    let counts = finalize_successor_lifecycle_verification(&mut results, &mut warnings);
+    let transition_report = build_successor_transition_report(bundle_value, &results)?;
+    let source_evidence_report = build_successor_source_evidence_report(bundle_value, &results)?;
+    let ots_evidence_linked = !timestamp_evidence.is_empty();
+    let status = signature_status(
+        &counts,
+        verification_inputs,
+        &transition_report,
+        &source_evidence_report,
+        ots_evidence_linked,
+    );
     let verification = SignatureVerificationReport {
         provided: !results.is_empty(),
         results,
@@ -952,7 +966,8 @@ fn evaluate_successor_authenticity(
         status,
     };
     let policy = evaluate_archive_policy(&auth_policy, &verification);
-    if auth_policy.level == AuthPolicyLevel::IntegrityOnly && verification.counts.valid_archive_approval == 0
+    if auth_policy.level == AuthPolicyLevel::IntegrityOnly
+        && verification.counts.valid_archive_approval == 0
     {
         warnings.push(
             "Archive policy is integrity-only; archive approval is not bound to a verified signer."
@@ -964,6 +979,9 @@ fn evaluate_successor_authenticity(
     }
     let status = AuthenticityStatus {
         integrity_verified: true,
+        archive_approval_signature_verified: verification
+            .status
+            .archive_approval_signature_verified,
         signature_verified: verification.status.signature_verified,
         strong_pq_signature_verified: verification.status.strong_pq_signature_verified,
         signer_pinned: verification.status.signer_pinned,
@@ -971,6 +989,12 @@ fn evaluate_successor_authenticity(
         bundle_pinned: verification.status.bundle_pinned,
         user_pinned: verification.status.user_pinned,
         user_pin_provided: verification.status.user_pin_provided,
+        transition_record_present: verification.status.transition_record_present,
+        transition_chain_valid: verification.status.transition_chain_valid,
+        source_evidence_present: verification.status.source_evidence_present,
+        maintenance_signature_verified: verification.status.maintenance_signature_verified,
+        source_evidence_signature_verified: verification.status.source_evidence_signature_verified,
+        ots_evidence_linked: verification.status.ots_evidence_linked,
         policy_satisfied: policy.satisfied,
         archive_policy_satisfied: policy.satisfied,
     };
@@ -978,32 +1002,86 @@ fn evaluate_successor_authenticity(
     Ok(AuthenticityReport {
         policy,
         verification,
+        transition_report,
+        source_evidence_report,
         warnings,
         status,
         timestamp_evidence,
     })
 }
 
-fn verify_bundle_archive_approval_signature(
+#[derive(Debug, Clone, Copy)]
+struct LifecycleSignatureFamily {
+    family: &'static str,
+    field: &'static str,
+    target_type: &'static str,
+}
+
+impl LifecycleSignatureFamily {
+    const ARCHIVE_APPROVAL: Self = Self {
+        family: "archive-approval",
+        field: "archiveApprovalSignatures",
+        target_type: "archive-state",
+    };
+    const MAINTENANCE: Self = Self {
+        family: "maintenance",
+        field: "maintenanceSignatures",
+        target_type: "transition-record",
+    };
+    const SOURCE_EVIDENCE: Self = Self {
+        family: "source-evidence",
+        field: "sourceEvidenceSignatures",
+        target_type: "source-evidence",
+    };
+
+    fn descriptors() -> &'static [Self] {
+        &[
+            Self::ARCHIVE_APPROVAL,
+            Self::MAINTENANCE,
+            Self::SOURCE_EVIDENCE,
+        ]
+    }
+}
+
+#[derive(Debug, Clone)]
+struct LifecycleSignatureTarget {
+    family: &'static str,
+    target_type: &'static str,
+    target_ref: String,
+    digest: SignatureTargetDigest,
+    bytes: Vec<u8>,
+    transition_index: Option<usize>,
+    maintenance_purpose_labels: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct LifecycleSignatureTargets {
+    archive_approval: LifecycleSignatureTarget,
+    maintenance: HashMap<String, LifecycleSignatureTarget>,
+    source_evidence: HashMap<String, LifecycleSignatureTarget>,
+}
+
+fn verify_bundle_lifecycle_signature(
     signature: &Value,
     index: usize,
+    descriptor: LifecycleSignatureFamily,
     public_keys: &HashMap<String, Value>,
-    archive_state_bytes: &[u8],
-    archive_state_digest_hex: &str,
+    targets: &LifecycleSignatureTargets,
     verification_inputs: &VerificationInputs,
 ) -> Result<SignatureCheckResult> {
-    validate_archive_approval_target(signature, archive_state_digest_hex)?;
-    let id = string_field(signature, "id", "archiveApprovalSignatures.id")?;
-    let format = string_field(signature, "format", "archiveApprovalSignatures.format")?;
+    let target = resolve_lifecycle_signature_target(signature, descriptor, targets)?;
+    let id = string_field(signature, "id", &format!("{}.id", descriptor.field))?;
+    let format = string_field(signature, "format", &format!("{}.format", descriptor.field))?;
     let sig_bytes = BASE64_STANDARD
         .decode(string_field(
             signature,
             "signature",
-            "archiveApprovalSignatures.signature",
+            &format!("{}.signature", descriptor.field),
         )?)
         .map_err(|error| {
             err(format!(
-                "Invalid archive-approval signature payload: {error}"
+                "Invalid {} signature payload: {error}",
+                descriptor.family
             ))
         })?;
     let public_key_ref = signature.get("publicKeyRef").and_then(Value::as_str);
@@ -1011,12 +1089,15 @@ fn verify_bundle_archive_approval_signature(
         let bundled_pqpk = public_key_ref
             .map(|key_ref| {
                 public_key_to_pqpk(public_keys.get(key_ref).ok_or_else(|| {
-                    err(format!("Unknown archive-approval publicKeyRef: {key_ref}"))
+                    err(format!(
+                        "Unknown {} publicKeyRef: {key_ref}",
+                        descriptor.family
+                    ))
                 })?)
             })
             .transpose()?;
         verify_qsig_against_bytes(
-            archive_state_bytes,
+            &target.bytes,
             &sig_bytes,
             bundled_pqpk.as_deref(),
             verification_inputs
@@ -1027,34 +1108,551 @@ fn verify_bundle_archive_approval_signature(
         let bundled_signer = public_key_ref
             .map(|key_ref| {
                 public_key_to_stellar_address(public_keys.get(key_ref).ok_or_else(|| {
-                    err(format!("Unknown archive-approval publicKeyRef: {key_ref}"))
+                    err(format!(
+                        "Unknown {} publicKeyRef: {key_ref}",
+                        descriptor.family
+                    ))
                 })?)
             })
             .transpose()?;
         verify_stellar_sig_against_bytes(
-            archive_state_bytes,
+            &target.bytes,
             &sig_bytes,
             bundled_signer.as_deref(),
             verification_inputs.expected_ed25519_signer.as_deref(),
         )?
     } else {
         return Err(err(format!(
-            "Unsupported archive-approval format: {format}"
+            "Unsupported {} format: {format}",
+            descriptor.family
         )));
     };
     decorate_signature_result(
         &mut result,
         id,
-        format!("archive-approval-{}", index + 1),
-        "lifecycle-bundle".to_string(),
+        format!("{}-{}", descriptor.family, index + 1),
+        "bundle".to_string(),
         sig_bytes,
     );
+    decorate_lifecycle_target_result(&mut result, &target);
     Ok(result)
+}
+
+fn build_lifecycle_signature_targets(
+    bundle_value: &Value,
+    archive_state_bytes: &[u8],
+) -> Result<LifecycleSignatureTargets> {
+    let archive_digest_hex = sha3_512_hex(archive_state_bytes);
+    let archive_approval = LifecycleSignatureTarget {
+        family: "archive-approval",
+        target_type: "archive-state",
+        target_ref: format!("state:{archive_digest_hex}"),
+        digest: SignatureTargetDigest {
+            alg: "SHA3-512".to_string(),
+            value: archive_digest_hex,
+        },
+        bytes: archive_state_bytes.to_vec(),
+        transition_index: None,
+        maintenance_purpose_labels: Vec::new(),
+    };
+
+    let transitions = array_field(bundle_value, "transitions", "lifecycleBundle.transitions")?;
+    let mut maintenance = HashMap::new();
+    for (index, transition) in transitions.iter().enumerate() {
+        let canonical = canonicalize_transition_record(transition)?;
+        let labels = transition_maintenance_purpose_labels(transition, None)?;
+        maintenance.insert(
+            canonical.digest.value.clone(),
+            LifecycleSignatureTarget {
+                family: "maintenance",
+                target_type: "transition-record",
+                target_ref: format!("transition:sha3-512:{}", canonical.digest.value),
+                digest: SignatureTargetDigest {
+                    alg: canonical.digest.alg.clone(),
+                    value: canonical.digest.value.clone(),
+                },
+                bytes: canonical.bytes,
+                transition_index: Some(index),
+                maintenance_purpose_labels: labels,
+            },
+        );
+    }
+
+    let source_evidence_entries = array_field(
+        bundle_value,
+        "sourceEvidence",
+        "lifecycleBundle.sourceEvidence",
+    )?;
+    let mut source_evidence = HashMap::new();
+    for evidence in source_evidence_entries {
+        let canonical = canonicalize_source_evidence(evidence)?;
+        source_evidence.insert(
+            canonical.digest.value.clone(),
+            LifecycleSignatureTarget {
+                family: "source-evidence",
+                target_type: "source-evidence",
+                target_ref: format!("source-evidence:sha3-512:{}", canonical.digest.value),
+                digest: SignatureTargetDigest {
+                    alg: canonical.digest.alg.clone(),
+                    value: canonical.digest.value.clone(),
+                },
+                bytes: canonical.bytes,
+                transition_index: None,
+                maintenance_purpose_labels: Vec::new(),
+            },
+        );
+    }
+
+    Ok(LifecycleSignatureTargets {
+        archive_approval,
+        maintenance,
+        source_evidence,
+    })
+}
+
+fn resolve_lifecycle_signature_target(
+    signature: &Value,
+    descriptor: LifecycleSignatureFamily,
+    targets: &LifecycleSignatureTargets,
+) -> Result<LifecycleSignatureTarget> {
+    if string_field(
+        signature,
+        "signatureFamily",
+        &format!("{}.signatureFamily", descriptor.field),
+    )? != descriptor.family
+        || string_field(
+            signature,
+            "targetType",
+            &format!("{}.targetType", descriptor.field),
+        )? != descriptor.target_type
+    {
+        return Err(err(format!(
+            "Invalid {} signature target",
+            descriptor.family
+        )));
+    }
+    let target_digest = object_field(
+        signature,
+        "targetDigest",
+        &format!("{}.targetDigest", descriptor.field),
+    )?;
+    let digest_alg = string_field(
+        target_digest,
+        "alg",
+        &format!("{}.targetDigest.alg", descriptor.field),
+    )?;
+    if digest_alg != "SHA3-512" {
+        return Err(err(format!(
+            "{} signature targetDigest algorithm mismatch",
+            descriptor.family
+        )));
+    }
+    let digest_hex = string_field(
+        target_digest,
+        "value",
+        &format!("{}.targetDigest.value", descriptor.field),
+    )?;
+    let target = match descriptor.family {
+        "archive-approval" => {
+            if targets.archive_approval.digest.value != digest_hex {
+                return Err(err("archive-approval signature targetDigest mismatch"));
+            }
+            targets.archive_approval.clone()
+        }
+        "maintenance" => targets
+            .maintenance
+            .get(&digest_hex)
+            .cloned()
+            .ok_or_else(|| err("maintenance signature targetDigest mismatch"))?,
+        "source-evidence" => targets
+            .source_evidence
+            .get(&digest_hex)
+            .cloned()
+            .ok_or_else(|| err("source-evidence signature targetDigest mismatch"))?,
+        _ => return Err(err("Unsupported lifecycle signature family")),
+    };
+    if string_field(
+        signature,
+        "targetRef",
+        &format!("{}.targetRef", descriptor.field),
+    )? != target.target_ref
+    {
+        return Err(err(format!(
+            "{} signature targetRef mismatch",
+            descriptor.family
+        )));
+    }
+    let mut target = target;
+    if descriptor.family == "maintenance" {
+        let id = string_field(signature, "id", &format!("{}.id", descriptor.field))?;
+        let transitions = target.transition_index;
+        if transitions.is_some() {
+            target.maintenance_purpose_labels =
+                transition_maintenance_purpose_labels_for_target(signature, &id, &target)?;
+        }
+    }
+    Ok(target)
+}
+
+fn transition_maintenance_purpose_labels_for_target(
+    _signature: &Value,
+    _signature_id: &str,
+    target: &LifecycleSignatureTarget,
+) -> Result<Vec<String>> {
+    Ok(target.maintenance_purpose_labels.clone())
+}
+
+fn decorate_lifecycle_target_result(
+    result: &mut SignatureCheckResult,
+    target: &LifecycleSignatureTarget,
+) {
+    result.family = target.family.to_string();
+    result.target_type = Some(target.target_type.to_string());
+    result.target_ref = Some(target.target_ref.clone());
+    result.target_digest = Some(target.digest.clone());
+    result.transition_index = target.transition_index;
+    result.maintenance_purpose_labels = target.maintenance_purpose_labels.clone();
+}
+
+fn transition_maintenance_purpose_labels(
+    transition: &Value,
+    signature_id: Option<&str>,
+) -> Result<Vec<String>> {
+    let source = object_field(transition, "actorHints", "transitionRecord.actorHints")?;
+    let mut out = BTreeSet::new();
+    if let Some(by_signature) = source.get("maintenanceSignaturePurposes") {
+        if let Some(object) = by_signature.as_object() {
+            if let Some(id) = signature_id {
+                collect_maintenance_purpose_labels(object.get(id), &mut out);
+            } else {
+                for value in object.values() {
+                    collect_maintenance_purpose_labels(Some(value), &mut out);
+                }
+            }
+        }
+    }
+    if out.is_empty() {
+        collect_maintenance_purpose_labels(source.get("maintenanceSignaturePurpose"), &mut out);
+    }
+    Ok(out.into_iter().collect())
+}
+
+fn collect_maintenance_purpose_labels(value: Option<&Value>, out: &mut BTreeSet<String>) {
+    match value {
+        Some(Value::String(text)) => {
+            if is_known_maintenance_purpose_label(text) {
+                out.insert(text.trim().to_string());
+            }
+        }
+        Some(Value::Array(values)) => {
+            for value in values {
+                collect_maintenance_purpose_labels(Some(value), out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_known_maintenance_purpose_label(value: &str) -> bool {
+    matches!(
+        value.trim(),
+        "maintenance-authorization" | "operator-attestation" | "witness"
+    )
+}
+
+fn build_successor_transition_report(
+    bundle_value: &Value,
+    signature_results: &[SignatureCheckResult],
+) -> Result<TransitionReport> {
+    let archive_state = object_field(bundle_value, "archiveState", "lifecycleBundle.archiveState")?;
+    let canonical_archive_state = canonicalize_archive_state_descriptor(archive_state)?;
+    let archive_id = string_field(archive_state, "archiveId", "archiveState.archiveId")?;
+    let current_cohort_binding = object_field(
+        bundle_value,
+        "currentCohortBinding",
+        "lifecycleBundle.currentCohortBinding",
+    )?;
+    let canonical_current_cohort = canonicalize_cohort_binding(current_cohort_binding)?;
+    let current_cohort_id = derive_cohort_id(
+        &archive_id,
+        &canonical_archive_state.state_id,
+        &canonical_current_cohort.digest,
+    )?;
+
+    let mut maintenance_by_digest: HashMap<
+        String,
+        (BTreeSet<String>, BTreeSet<String>, BTreeSet<String>),
+    > = HashMap::new();
+    for result in signature_results {
+        if result.family != "maintenance" {
+            continue;
+        }
+        let Some(digest) = result.target_digest.as_ref() else {
+            continue;
+        };
+        let entry = maintenance_by_digest
+            .entry(digest.value.clone())
+            .or_default();
+        let signature_id = if result.artifact_id.is_empty() {
+            result.name.clone()
+        } else {
+            result.artifact_id.clone()
+        };
+        if !signature_id.is_empty() {
+            entry.0.insert(signature_id.clone());
+            if result.ok {
+                entry.1.insert(signature_id);
+            }
+        }
+        for label in &result.maintenance_purpose_labels {
+            entry.2.insert(label.clone());
+        }
+    }
+
+    let transitions = array_field(bundle_value, "transitions", "lifecycleBundle.transitions")?;
+    let mut records = Vec::with_capacity(transitions.len());
+    for (index, transition) in transitions.iter().enumerate() {
+        let canonical = canonicalize_transition_record(transition)?;
+        let source = transition
+            .as_object()
+            .ok_or_else(|| err("Invalid transitionRecord"))?;
+        let mut purpose_labels: BTreeSet<String> =
+            transition_maintenance_purpose_labels(transition, None)?
+                .into_iter()
+                .collect();
+        let (signature_ids, verified_signature_ids, signature_labels) = maintenance_by_digest
+            .get(&canonical.digest.value)
+            .cloned()
+            .unwrap_or_default();
+        purpose_labels.extend(signature_labels);
+        records.push(TransitionReportRecord {
+            index,
+            digest_hex: canonical.digest.value.clone(),
+            transition_type: string_field(
+                transition,
+                "transitionType",
+                "transitionRecord.transitionType",
+            )?,
+            archive_id: string_field(transition, "archiveId", "transitionRecord.archiveId")?,
+            from_state_id: string_field(transition, "fromStateId", "transitionRecord.fromStateId")?,
+            to_state_id: string_field(transition, "toStateId", "transitionRecord.toStateId")?,
+            from_cohort_id: string_field(
+                transition,
+                "fromCohortId",
+                "transitionRecord.fromCohortId",
+            )?,
+            to_cohort_id: string_field(transition, "toCohortId", "transitionRecord.toCohortId")?,
+            from_cohort_binding_digest: signature_digest_from_value(
+                source
+                    .get("fromCohortBindingDigest")
+                    .ok_or_else(|| err("Missing transitionRecord.fromCohortBindingDigest"))?,
+                "transitionRecord.fromCohortBindingDigest",
+            )?,
+            to_cohort_binding_digest: signature_digest_from_value(
+                source
+                    .get("toCohortBindingDigest")
+                    .ok_or_else(|| err("Missing transitionRecord.toCohortBindingDigest"))?,
+                "transitionRecord.toCohortBindingDigest",
+            )?,
+            maintenance_signature_count: signature_ids.len(),
+            verified_maintenance_signature_count: verified_signature_ids.len(),
+            maintenance_signature_ids: signature_ids.into_iter().collect(),
+            verified_maintenance_signature_ids: verified_signature_ids.into_iter().collect(),
+            maintenance_purpose_labels: purpose_labels.into_iter().collect(),
+        });
+    }
+
+    let mut all_labels = BTreeSet::new();
+    for record in &records {
+        all_labels.extend(record.maintenance_purpose_labels.iter().cloned());
+    }
+    Ok(TransitionReport {
+        present: !records.is_empty(),
+        chain_valid: !records.is_empty(),
+        validation_scope: if records.is_empty() {
+            "unavailable".to_string()
+        } else {
+            "structural-referential".to_string()
+        },
+        count: records.len(),
+        signed: records
+            .iter()
+            .any(|record| record.maintenance_signature_count > 0),
+        maintenance_signature_verified: records
+            .iter()
+            .any(|record| record.verified_maintenance_signature_count > 0),
+        maintenance_purpose_labels: all_labels.into_iter().collect(),
+        current_archive_id: archive_id,
+        current_state_id: canonical_archive_state.state_id,
+        current_cohort_id,
+        current_cohort_binding_digest_hex: canonical_current_cohort.digest.value,
+        records,
+    })
+}
+
+fn build_successor_source_evidence_report(
+    bundle_value: &Value,
+    signature_results: &[SignatureCheckResult],
+) -> Result<SourceEvidenceReport> {
+    let mut signatures_by_digest: HashMap<String, (BTreeSet<String>, BTreeSet<String>)> =
+        HashMap::new();
+    for result in signature_results {
+        if result.family != "source-evidence" {
+            continue;
+        }
+        let Some(digest) = result.target_digest.as_ref() else {
+            continue;
+        };
+        let entry = signatures_by_digest
+            .entry(digest.value.clone())
+            .or_default();
+        let signature_id = if result.artifact_id.is_empty() {
+            result.name.clone()
+        } else {
+            result.artifact_id.clone()
+        };
+        if !signature_id.is_empty() {
+            entry.0.insert(signature_id.clone());
+            if result.ok {
+                entry.1.insert(signature_id);
+            }
+        }
+    }
+
+    let entries = array_field(
+        bundle_value,
+        "sourceEvidence",
+        "lifecycleBundle.sourceEvidence",
+    )?;
+    let mut records = Vec::with_capacity(entries.len());
+    for (index, evidence) in entries.iter().enumerate() {
+        let canonical = canonicalize_source_evidence(evidence)?;
+        let source = evidence
+            .as_object()
+            .ok_or_else(|| err("Invalid sourceEvidence"))?;
+        let (signature_ids, verified_signature_ids) = signatures_by_digest
+            .get(&canonical.digest.value)
+            .cloned()
+            .unwrap_or_default();
+        let external_refs = optional_string_array(source.get("externalSourceSignatureRefs"))?;
+        let descriptive_field_names = if source
+            .get("mediaType")
+            .and_then(Value::as_str)
+            .map(|text| !text.is_empty())
+            .unwrap_or(false)
+        {
+            vec!["mediaType".to_string()]
+        } else {
+            Vec::new()
+        };
+        records.push(SourceEvidenceReportRecord {
+            index,
+            digest_hex: canonical.digest.value.clone(),
+            target_ref: format!("source-evidence:sha3-512:{}", canonical.digest.value),
+            relation_type: string_field(evidence, "relationType", "sourceEvidence.relationType")?,
+            source_object_type: string_field(
+                evidence,
+                "sourceObjectType",
+                "sourceEvidence.sourceObjectType",
+            )?,
+            source_digests: source_digest_list(evidence)?,
+            external_source_signature_ref_count: external_refs.len(),
+            external_source_signature_refs: external_refs,
+            descriptive_field_names,
+            media_type: source
+                .get("mediaType")
+                .and_then(Value::as_str)
+                .map(ToString::to_string),
+            source_evidence_signature_count: signature_ids.len(),
+            verified_source_evidence_signature_count: verified_signature_ids.len(),
+            source_evidence_signature_ids: signature_ids.into_iter().collect(),
+            verified_source_evidence_signature_ids: verified_signature_ids.into_iter().collect(),
+        });
+    }
+    let mut descriptive_names = BTreeSet::new();
+    for record in &records {
+        descriptive_names.extend(record.descriptive_field_names.iter().cloned());
+    }
+    let source_evidence_signature_count = records
+        .iter()
+        .map(|record| record.source_evidence_signature_count)
+        .sum();
+    let verified_source_evidence_signature_count = records
+        .iter()
+        .map(|record| record.verified_source_evidence_signature_count)
+        .sum();
+    let external_source_signature_ref_count = records
+        .iter()
+        .map(|record| record.external_source_signature_ref_count)
+        .sum();
+    Ok(SourceEvidenceReport {
+        present: !records.is_empty(),
+        count: records.len(),
+        signed: records
+            .iter()
+            .any(|record| record.source_evidence_signature_count > 0),
+        signature_verified: records
+            .iter()
+            .any(|record| record.verified_source_evidence_signature_count > 0),
+        source_evidence_signature_count,
+        verified_source_evidence_signature_count,
+        external_source_signature_ref_count,
+        external_source_signature_refs_present: external_source_signature_ref_count > 0,
+        descriptive_field_names: descriptive_names.into_iter().collect(),
+        records,
+    })
+}
+
+fn signature_digest_from_value(value: &Value, field: &str) -> Result<SignatureTargetDigest> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| err(format!("Invalid {field}")))?;
+    Ok(SignatureTargetDigest {
+        alg: object
+            .get("alg")
+            .and_then(Value::as_str)
+            .ok_or_else(|| err(format!("Invalid {field}.alg")))?
+            .to_string(),
+        value: object
+            .get("value")
+            .and_then(Value::as_str)
+            .ok_or_else(|| err(format!("Invalid {field}.value")))?
+            .to_string(),
+    })
+}
+
+fn source_digest_list(evidence: &Value) -> Result<Vec<SignatureTargetDigest>> {
+    array_field(evidence, "sourceDigests", "sourceEvidence.sourceDigests")?
+        .iter()
+        .enumerate()
+        .map(|(index, digest)| {
+            signature_digest_from_value(digest, &format!("sourceEvidence.sourceDigests[{index}]"))
+        })
+        .collect()
+}
+
+fn optional_string_array(value: Option<&Value>) -> Result<Vec<String>> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let values = value
+        .as_array()
+        .ok_or_else(|| err("Invalid string array"))?;
+    values
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(ToString::to_string)
+                .ok_or_else(|| err("Invalid string array value"))
+        })
+        .collect()
 }
 
 fn external_unknown_archive_approval_result(message: impl Into<String>) -> SignatureCheckResult {
     SignatureCheckResult {
         ok: false,
+        family: "archive-approval".to_string(),
         self_signed: false,
         bundle_pinned: false,
         user_pinned: false,
@@ -1072,6 +1670,11 @@ fn external_unknown_archive_approval_result(message: impl Into<String>) -> Signa
         error: Some(message.into()),
         warnings: Vec::new(),
         artifact_id: String::new(),
+        target_type: None,
+        target_ref: None,
+        target_digest: None,
+        transition_index: None,
+        maintenance_purpose_labels: Vec::new(),
         signature_content_digest_alg: None,
         signature_content_digest_hex: None,
         ots_stamped_digest_alg: None,
@@ -1160,7 +1763,10 @@ fn push_signature_artifact(out: &mut Vec<SignatureArtifact>, result: &SignatureC
         id: result.artifact_id.clone(),
         name: result.name.clone(),
         source: result.source.clone(),
+        family: result.family.clone(),
         format: result.format.clone(),
+        target_type: result.target_type.clone(),
+        target_ref: result.target_ref.clone(),
         signature_content_digest_hex: result.signature_content_digest_hex.clone(),
         ots_stamped_digest_hex: result.ots_stamped_digest_hex.clone(),
         bytes,
@@ -1254,48 +1860,6 @@ fn timestamp_evidence_from_resolved(
     }
 }
 
-fn validate_archive_approval_target(
-    signature: &Value,
-    archive_state_digest_hex: &str,
-) -> Result<()> {
-    if string_field(
-        signature,
-        "signatureFamily",
-        "archiveApprovalSignatures.signatureFamily",
-    )? != "archive-approval"
-        || string_field(
-            signature,
-            "targetType",
-            "archiveApprovalSignatures.targetType",
-        )? != "archive-state"
-    {
-        return Err(err("Invalid archive-approval signature target"));
-    }
-    let expected_ref = format!("state:{archive_state_digest_hex}");
-    if string_field(
-        signature,
-        "targetRef",
-        "archiveApprovalSignatures.targetRef",
-    )? != expected_ref
-    {
-        return Err(err("archive-approval signature targetRef mismatch"));
-    }
-    let target_digest = object_field(
-        signature,
-        "targetDigest",
-        "archiveApprovalSignatures.targetDigest",
-    )?;
-    if string_field(
-        target_digest,
-        "value",
-        "archiveApprovalSignatures.targetDigest.value",
-    )? != archive_state_digest_hex
-    {
-        return Err(err("archive-approval signature targetDigest mismatch"));
-    }
-    Ok(())
-}
-
 fn public_key_map(attachments: &Value) -> Result<HashMap<String, Value>> {
     let mut out = HashMap::new();
     for key in array_field(
@@ -1352,8 +1916,12 @@ fn public_key_to_stellar_address(public_key: &Value) -> Result<String> {
 fn signature_status(
     counts: &SignatureVerificationCounts,
     inputs: &VerificationInputs,
+    transition_report: &TransitionReport,
+    source_evidence_report: &SourceEvidenceReport,
+    ots_evidence_linked: bool,
 ) -> SignatureVerificationStatus {
     SignatureVerificationStatus {
+        archive_approval_signature_verified: counts.valid_archive_approval > 0,
         signature_verified: counts.valid_archive_approval > 0,
         strong_pq_signature_verified: counts.valid_archive_approval_strong_pq > 0,
         signer_pinned: counts.archive_approval_pinned_valid_total > 0,
@@ -1362,6 +1930,12 @@ fn signature_status(
         user_pinned: counts.archive_approval_user_pinned_valid_total > 0,
         user_pin_provided: inputs.pinned_pq_public_key_file_bytes.is_some()
             || inputs.expected_ed25519_signer.is_some(),
+        transition_record_present: transition_report.present,
+        transition_chain_valid: transition_report.chain_valid,
+        source_evidence_present: source_evidence_report.present,
+        maintenance_signature_verified: counts.valid_maintenance > 0,
+        source_evidence_signature_verified: counts.valid_source_evidence > 0,
+        ots_evidence_linked,
     }
 }
 

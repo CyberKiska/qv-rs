@@ -3,8 +3,8 @@ pub mod opentimestamps;
 pub mod qsig;
 pub mod signature_identity;
 pub mod signature_suites;
-pub(crate) mod successor_policy;
 pub mod stellar_sig;
+pub(crate) mod successor_policy;
 
 use serde::{Deserialize, Serialize};
 
@@ -85,7 +85,13 @@ pub struct SignatureArtifact {
     pub id: String,
     pub name: String,
     pub source: String,
+    #[serde(default = "default_archive_approval_family")]
+    pub family: String,
     pub format: String,
+    #[serde(rename = "targetType", skip_serializing_if = "Option::is_none")]
+    pub target_type: Option<String>,
+    #[serde(rename = "targetRef", skip_serializing_if = "Option::is_none")]
+    pub target_ref: Option<String>,
     #[serde(
         rename = "signatureContentDigestHex",
         skip_serializing_if = "Option::is_none"
@@ -103,6 +109,8 @@ pub struct SignatureArtifact {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignatureVerificationStatus {
+    #[serde(rename = "archiveApprovalSignatureVerified")]
+    pub archive_approval_signature_verified: bool,
     #[serde(rename = "signatureVerified")]
     pub signature_verified: bool,
     #[serde(rename = "strongPqSignatureVerified")]
@@ -117,11 +125,25 @@ pub struct SignatureVerificationStatus {
     pub user_pinned: bool,
     #[serde(rename = "userPinProvided")]
     pub user_pin_provided: bool,
+    #[serde(rename = "transitionRecordPresent")]
+    pub transition_record_present: bool,
+    #[serde(rename = "transitionChainValid")]
+    pub transition_chain_valid: bool,
+    #[serde(rename = "sourceEvidencePresent")]
+    pub source_evidence_present: bool,
+    #[serde(rename = "maintenanceSignatureVerified")]
+    pub maintenance_signature_verified: bool,
+    #[serde(rename = "sourceEvidenceSignatureVerified")]
+    pub source_evidence_signature_verified: bool,
+    #[serde(rename = "otsEvidenceLinked")]
+    pub ots_evidence_linked: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignatureCheckResult {
     pub ok: bool,
+    #[serde(default = "default_archive_approval_family")]
+    pub family: String,
     #[serde(default, rename = "selfSigned")]
     pub self_signed: bool,
     #[serde(rename = "bundlePinned")]
@@ -155,6 +177,16 @@ pub struct SignatureCheckResult {
     pub warnings: Vec<String>,
     #[serde(rename = "artifactId")]
     pub artifact_id: String,
+    #[serde(rename = "targetType", skip_serializing_if = "Option::is_none")]
+    pub target_type: Option<String>,
+    #[serde(rename = "targetRef", skip_serializing_if = "Option::is_none")]
+    pub target_ref: Option<String>,
+    #[serde(rename = "targetDigest", skip_serializing_if = "Option::is_none")]
+    pub target_digest: Option<SignatureTargetDigest>,
+    #[serde(rename = "transitionIndex", skip_serializing_if = "Option::is_none")]
+    pub transition_index: Option<usize>,
+    #[serde(rename = "maintenancePurposeLabels", default)]
+    pub maintenance_purpose_labels: Vec<String>,
     #[serde(
         rename = "signatureContentDigestAlg",
         skip_serializing_if = "Option::is_none"
@@ -184,6 +216,16 @@ pub struct SignatureCheckResult {
     pub counted_for_policy: bool,
     #[serde(skip)]
     pub signature_bytes: Option<Vec<u8>>,
+}
+
+fn default_archive_approval_family() -> String {
+    "archive-approval".to_string()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignatureTargetDigest {
+    pub alg: String,
+    pub value: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -229,9 +271,119 @@ pub struct TimestampEvidence {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransitionReportRecord {
+    pub index: usize,
+    #[serde(rename = "digestHex")]
+    pub digest_hex: String,
+    #[serde(rename = "transitionType")]
+    pub transition_type: String,
+    #[serde(rename = "archiveId")]
+    pub archive_id: String,
+    #[serde(rename = "fromStateId")]
+    pub from_state_id: String,
+    #[serde(rename = "toStateId")]
+    pub to_state_id: String,
+    #[serde(rename = "fromCohortId")]
+    pub from_cohort_id: String,
+    #[serde(rename = "toCohortId")]
+    pub to_cohort_id: String,
+    #[serde(rename = "fromCohortBindingDigest")]
+    pub from_cohort_binding_digest: SignatureTargetDigest,
+    #[serde(rename = "toCohortBindingDigest")]
+    pub to_cohort_binding_digest: SignatureTargetDigest,
+    #[serde(rename = "maintenanceSignatureIds")]
+    pub maintenance_signature_ids: Vec<String>,
+    #[serde(rename = "verifiedMaintenanceSignatureIds")]
+    pub verified_maintenance_signature_ids: Vec<String>,
+    #[serde(rename = "maintenanceSignatureCount")]
+    pub maintenance_signature_count: usize,
+    #[serde(rename = "verifiedMaintenanceSignatureCount")]
+    pub verified_maintenance_signature_count: usize,
+    #[serde(rename = "maintenancePurposeLabels")]
+    pub maintenance_purpose_labels: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransitionReport {
+    pub present: bool,
+    #[serde(rename = "chainValid")]
+    pub chain_valid: bool,
+    #[serde(rename = "validationScope")]
+    pub validation_scope: String,
+    pub count: usize,
+    pub signed: bool,
+    #[serde(rename = "maintenanceSignatureVerified")]
+    pub maintenance_signature_verified: bool,
+    #[serde(rename = "maintenancePurposeLabels")]
+    pub maintenance_purpose_labels: Vec<String>,
+    #[serde(rename = "currentArchiveId")]
+    pub current_archive_id: String,
+    #[serde(rename = "currentStateId")]
+    pub current_state_id: String,
+    #[serde(rename = "currentCohortId")]
+    pub current_cohort_id: String,
+    #[serde(rename = "currentCohortBindingDigestHex")]
+    pub current_cohort_binding_digest_hex: String,
+    pub records: Vec<TransitionReportRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceEvidenceReportRecord {
+    pub index: usize,
+    #[serde(rename = "digestHex")]
+    pub digest_hex: String,
+    #[serde(rename = "targetRef")]
+    pub target_ref: String,
+    #[serde(rename = "relationType")]
+    pub relation_type: String,
+    #[serde(rename = "sourceObjectType")]
+    pub source_object_type: String,
+    #[serde(rename = "sourceDigests")]
+    pub source_digests: Vec<SignatureTargetDigest>,
+    #[serde(rename = "externalSourceSignatureRefs")]
+    pub external_source_signature_refs: Vec<String>,
+    #[serde(rename = "externalSourceSignatureRefCount")]
+    pub external_source_signature_ref_count: usize,
+    #[serde(rename = "descriptiveFieldNames")]
+    pub descriptive_field_names: Vec<String>,
+    #[serde(rename = "mediaType")]
+    pub media_type: Option<String>,
+    #[serde(rename = "sourceEvidenceSignatureIds")]
+    pub source_evidence_signature_ids: Vec<String>,
+    #[serde(rename = "verifiedSourceEvidenceSignatureIds")]
+    pub verified_source_evidence_signature_ids: Vec<String>,
+    #[serde(rename = "sourceEvidenceSignatureCount")]
+    pub source_evidence_signature_count: usize,
+    #[serde(rename = "verifiedSourceEvidenceSignatureCount")]
+    pub verified_source_evidence_signature_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceEvidenceReport {
+    pub present: bool,
+    pub count: usize,
+    pub signed: bool,
+    #[serde(rename = "signatureVerified")]
+    pub signature_verified: bool,
+    #[serde(rename = "sourceEvidenceSignatureCount")]
+    pub source_evidence_signature_count: usize,
+    #[serde(rename = "verifiedSourceEvidenceSignatureCount")]
+    pub verified_source_evidence_signature_count: usize,
+    #[serde(rename = "externalSourceSignatureRefCount")]
+    pub external_source_signature_ref_count: usize,
+    #[serde(rename = "externalSourceSignatureRefsPresent")]
+    pub external_source_signature_refs_present: bool,
+    #[serde(rename = "descriptiveFieldNames")]
+    pub descriptive_field_names: Vec<String>,
+    pub records: Vec<SourceEvidenceReportRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthenticityStatus {
     #[serde(rename = "integrityVerified")]
     pub integrity_verified: bool,
+    #[serde(rename = "archiveApprovalSignatureVerified")]
+    pub archive_approval_signature_verified: bool,
     #[serde(rename = "signatureVerified")]
     pub signature_verified: bool,
     #[serde(rename = "strongPqSignatureVerified")]
@@ -246,6 +398,18 @@ pub struct AuthenticityStatus {
     pub user_pinned: bool,
     #[serde(rename = "userPinProvided")]
     pub user_pin_provided: bool,
+    #[serde(rename = "transitionRecordPresent")]
+    pub transition_record_present: bool,
+    #[serde(rename = "transitionChainValid")]
+    pub transition_chain_valid: bool,
+    #[serde(rename = "sourceEvidencePresent")]
+    pub source_evidence_present: bool,
+    #[serde(rename = "maintenanceSignatureVerified")]
+    pub maintenance_signature_verified: bool,
+    #[serde(rename = "sourceEvidenceSignatureVerified")]
+    pub source_evidence_signature_verified: bool,
+    #[serde(rename = "otsEvidenceLinked")]
+    pub ots_evidence_linked: bool,
     #[serde(rename = "policySatisfied")]
     pub policy_satisfied: bool,
     #[serde(rename = "archivePolicySatisfied")]
@@ -256,6 +420,10 @@ pub struct AuthenticityStatus {
 pub struct AuthenticityReport {
     pub policy: ArchivePolicyEvaluation,
     pub verification: SignatureVerificationReport,
+    #[serde(rename = "transitionReport")]
+    pub transition_report: TransitionReport,
+    #[serde(rename = "sourceEvidenceReport")]
+    pub source_evidence_report: SourceEvidenceReport,
     pub warnings: Vec<String>,
     pub status: AuthenticityStatus,
     #[serde(rename = "timestampEvidence")]

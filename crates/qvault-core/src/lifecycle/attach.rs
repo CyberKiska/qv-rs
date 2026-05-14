@@ -960,14 +960,17 @@ fn signature_entry(
 fn build_signature_artifacts(bundle: &Value) -> Result<Vec<SignatureArtifact>> {
     let attachments = object_field(bundle, "attachments", "lifecycleBundle.attachments")?;
     let mut out = Vec::new();
-    for field in [
-        "archiveApprovalSignatures",
-        "maintenanceSignatures",
-        "sourceEvidenceSignatures",
+    for (field, family) in [
+        ("archiveApprovalSignatures", "archive-approval"),
+        ("maintenanceSignatures", "maintenance"),
+        ("sourceEvidenceSignatures", "source-evidence"),
     ] {
         for signature in array_field(attachments, field, field)? {
             let id = string_field(signature, "id", "detachedSignature.id")?;
             let format = string_field(signature, "format", "detachedSignature.format")?;
+            let target_type =
+                string_field(signature, "targetType", "detachedSignature.targetType")?;
+            let target_ref = string_field(signature, "targetRef", "detachedSignature.targetRef")?;
             let bytes = BASE64_STANDARD
                 .decode(string_field(
                     signature,
@@ -979,7 +982,10 @@ fn build_signature_artifacts(bundle: &Value) -> Result<Vec<SignatureArtifact>> {
                 id: id.clone(),
                 name: id,
                 source: "lifecycle-bundle".to_string(),
+                family: family.to_string(),
                 format,
+                target_type: Some(target_type),
+                target_ref: Some(target_ref),
                 signature_content_digest_hex: Some(sha3_512_hex(&bytes)),
                 ots_stamped_digest_hex: Some(sha256_hex(&bytes)),
                 bytes,
@@ -1016,7 +1022,14 @@ fn maintenance_signature_artifacts(entries: &[Value]) -> Result<Vec<SignatureArt
             id: id.clone(),
             name: id,
             source: "reshare-maintenance".to_string(),
+            family: "maintenance".to_string(),
             format,
+            target_type: Some("transition-record".to_string()),
+            target_ref: Some(string_field(
+                signature,
+                "targetRef",
+                "maintenanceSignature.targetRef",
+            )?),
             signature_content_digest_hex: Some(sha3_512_hex(&bytes)),
             ots_stamped_digest_hex: Some(sha256_hex(&bytes)),
             bytes,
