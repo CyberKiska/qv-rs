@@ -3,14 +3,9 @@
 /**
  * Successor fixture generation placeholder.
  *
- * The pre-successor generator used removed oracle modules:
- *   - src/core/crypto/qcont/build.js
- *   - src/core/crypto/qcont/attach.js
- *   - src/core/crypto/manifest/archive-manifest.js
- *   - src/core/crypto/manifest/manifest-bundle.js
- *
- * Those paths produced manifest-v2 / QVqcont-6 fixtures and must not be used
- * during the successor migration. The replacement generator should write only
+ * The pre-successor generator used removed predecessor JS modules (old shard
+ * build/attach paths and predecessor manifest stack). Those entrypoints must
+ * not be used during the successor migration. The replacement generator should write only
  * under fixtures/successor/ and should use the current JS oracle modules:
  *   - src/core/crypto/qcont/lifecycle-shard.js
  *       buildLifecycleQcontShards, reshareSameState
@@ -27,7 +22,7 @@
 console.error(
   [
     'tools/gen-js-fixtures.mjs is disabled for the successor migration.',
-    'The old predecessor fixture generator targeted removed JS modules and QVqcont-6.',
+    'The old predecessor fixture generator targeted removed JS modules and predecessor shard formats.',
     'Implement the successor generator against lifecycle-shard.js, lifecycle-attach.js, and lifecycle/artifacts.js before writing fixtures/successor/.',
   ].join('\n')
 );
