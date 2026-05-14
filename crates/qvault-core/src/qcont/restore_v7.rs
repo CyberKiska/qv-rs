@@ -185,6 +185,22 @@ pub fn restore_qvqcont7_from_shards(
     })
 }
 
+/// Verify successor lifecycle authenticity for canonical archive-state bytes and a lifecycle
+/// bundle (oracle `verify` / dry-run style path without shards).
+pub fn verify_successor_lifecycle_authenticity(
+    archive_state_bytes: &[u8],
+    lifecycle_bundle_bytes: &[u8],
+    verification_inputs: &VerificationInputs,
+) -> Result<AuthenticityReport> {
+    let bundle = parse_lifecycle_bundle_bytes(lifecycle_bundle_bytes)?;
+    evaluate_successor_authenticity(
+        &bundle,
+        lifecycle_bundle_bytes,
+        archive_state_bytes,
+        verification_inputs,
+    )
+}
+
 fn collect_candidate_cohorts<'a>(shards: &'a [Qvqcont7Shard]) -> Result<Vec<CandidateCohort<'a>>> {
     let mut by_key = BTreeMap::<String, CandidateCohort<'a>>::new();
     for shard in shards {

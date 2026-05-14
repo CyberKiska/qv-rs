@@ -28,8 +28,8 @@ pub use reshare_v7::{
 #[cfg(feature = "legacy-mvp")]
 pub use restore::{restore_from_shards, RestoreQcontOptions, RestoredQcont};
 pub use restore_v7::{
-    restore_qvqcont7_from_shards, RestoreQvqcont7Options, RestoreQvqcont7Selection,
-    RestoredQvqcont7,
+    restore_qvqcont7_from_shards, verify_successor_lifecycle_authenticity, RestoreQvqcont7Options,
+    RestoreQvqcont7Selection, RestoredQvqcont7,
 };
 #[cfg(feature = "legacy-mvp")]
 pub use shard::{

@@ -176,17 +176,10 @@ pub struct SignatureCheckResult {
         skip_serializing_if = "Option::is_none"
     )]
     pub ots_stamped_digest_hex: Option<String>,
-    #[serde(
-        rename = "proofIdentityDigestAlg",
-        skip_serializing_if = "Option::is_none",
-        default
-    )]
+    /// `null` in JSON when absent (oracle verify / restore JSON surfaces).
+    #[serde(rename = "proofIdentityDigestAlg", default)]
     pub proof_identity_digest_alg: Option<String>,
-    #[serde(
-        rename = "proofIdentityDigestHex",
-        skip_serializing_if = "Option::is_none",
-        default
-    )]
+    #[serde(rename = "proofIdentityDigestHex", default)]
     pub proof_identity_digest_hex: Option<String>,
     #[serde(rename = "countedForPolicy", default)]
     pub counted_for_policy: bool,

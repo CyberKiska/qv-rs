@@ -30,3 +30,4 @@ pub use qenc::{
     build_qenc_header, current_iso8601_utc_millis, decrypt_qenc, encrypt_qenc, parse_qenc_header,
     DecryptedQenc, EncryptQencOptions, QencHeader, QencMetadata,
 };
+pub use qcont::verify_successor_lifecycle_authenticity;

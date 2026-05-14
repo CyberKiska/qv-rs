@@ -28,7 +28,7 @@ mod successor_main {
     use qvault_core::auth::AuthPolicyLevel;
     use qvault_core::auth::{NamedBinaryArtifact, VerificationInputs};
     use qvault_core::bytes::from_hex;
-    use qvault_core::error::{QvCode, QvError};
+    use qvault_core::error::{coded, QvCode, QvError};
     use qvault_core::hash::sha3_512_hex;
     use qvault_core::lifecycle::{
         parse_archive_state_descriptor_bytes, parse_cohort_binding_bytes,
@@ -40,10 +40,11 @@ mod successor_main {
     };
     use qvault_core::qcont::{
         attach_lifecycle_bundle_to_shards, build_qvqcont7_shards, parse_qvqcont7_shard,
-        reshare_same_state, restore_qvqcont7_from_shards, AttachLifecycleOptions,
-        LifecycleSignatureFamily, LifecycleSignatureImport, LifecycleSourceEvidenceImport,
-        Qvqcont7BuildOptions, Qvqcont7BuildParams, ReshareSameStateOptions, ReshareSameStateParams,
-        ReshareTransitionOptions, RestoreQvqcont7Options, RestoreQvqcont7Selection,
+        reshare_same_state, restore_qvqcont7_from_shards, verify_successor_lifecycle_authenticity,
+        AttachLifecycleOptions, LifecycleSignatureFamily, LifecycleSignatureImport,
+        LifecycleSourceEvidenceImport, Qvqcont7BuildOptions, Qvqcont7BuildParams,
+        ReshareSameStateOptions, ReshareSameStateParams, ReshareTransitionOptions,
+        RestoreQvqcont7Options, RestoreQvqcont7Selection,
     };
     use qvault_core::{
         current_iso8601_utc_millis, decrypt_qenc, encrypt_qenc, generate_key_pair,
@@ -1233,23 +1234,23 @@ mod successor_main {
     fn run_verify(args: VerifyArgs, ctx: CliContext) -> Result<()> {
         let archive_state_bytes = read_file_checked(&args.archive_state, ctx)?;
         let archive_state = parse_archive_state_descriptor_bytes(&archive_state_bytes)?;
-        let lifecycle_bundle_bytes = args
-            .bundle
-            .as_ref()
-            .map(|path| read_file_checked(path, ctx))
-            .transpose()?;
+        let lifecycle_bundle_bytes = match &args.bundle {
+            Some(path) => read_file_checked(path, ctx)?,
+            None => bail!("verify requires --bundle with canonical lifecycle bundle bytes"),
+        };
         let signatures = load_named_artifacts(&args.signatures, ctx)?;
         let pq_public_keys = load_named_artifacts(&args.pq_public_keys, ctx)?;
         let timestamps = load_named_artifacts(&args.timestamps, ctx)?;
+        let pinned_pq_public_key_file_bytes = select_single_pinned_pqpk(&pq_public_keys)?;
         let pq_public_key_file_bytes_list = pq_public_keys
-            .into_iter()
-            .map(|artifact| artifact.bytes)
+            .iter()
+            .map(|artifact| artifact.bytes.clone())
             .collect::<Vec<_>>();
         let attached = attach_lifecycle_bundle_to_shards(
             &[],
             &AttachLifecycleOptions {
                 archive_state_bytes: Some(archive_state.bytes.clone()),
-                lifecycle_bundle_bytes,
+                lifecycle_bundle_bytes: Some(lifecycle_bundle_bytes.clone()),
                 signature_imports: signatures
                     .into_iter()
                     .map(|artifact| {
@@ -1287,54 +1288,73 @@ mod successor_main {
                 bail!("Archive policy level {declared} is weaker than required policy");
             }
         }
+
+        let authenticity = verify_successor_lifecycle_authenticity(
+            &archive_state.bytes,
+            &attached.lifecycle_bundle_bytes,
+            &VerificationInputs {
+                signatures: vec![],
+                pinned_pq_public_key_file_bytes,
+                timestamps: vec![],
+                expected_ed25519_signer: normalize_optional_string(
+                    args.expected_ed25519_signer.as_deref(),
+                ),
+            },
+        )?;
+
+        let detached_summary = if args.include_detached_summary {
+            let rows: Vec<Value> = authenticity
+                .verification
+                .results
+                .iter()
+                .map(|row| {
+                    serde_json::json!({
+                        "artifactId": row.artifact_id,
+                        "name": row.name,
+                        "source": row.source,
+                        "format": row.format,
+                        "ok": row.ok,
+                        "proofIdentityDigestAlg": row.proof_identity_digest_alg,
+                        "proofIdentityDigestHex": row.proof_identity_digest_hex,
+                    })
+                })
+                .collect();
+            Value::Array(rows)
+        } else {
+            Value::Null
+        };
+
         if ctx.json {
             let report = serde_json::json!({
                 "command": "verify",
-                "ok": true,
+                "ok": authenticity.policy.satisfied,
                 "cliSchemaVersion": 1,
-                "verification": {
-                    "provided": true,
-                    "results": [],
-                    "warnings": [],
-                    "counts": {},
-                    "signatureArtifacts": [],
-                    "status": {}
-                },
-                "policy": {
-                    "level": auth_policy.get("level").cloned().unwrap_or(Value::String("unresolved".to_string())),
-                    "minValidSignatures": auth_policy.get("minValidSignatures").cloned().unwrap_or(Value::Null),
-                    "satisfied": true,
-                    "reason": "Lifecycle artifacts parsed and imported signatures were accepted by core attach verification."
-                },
-                "timestampEvidence": [],
+                "verification": serde_json::to_value(&authenticity.verification)?,
+                "policy": serde_json::to_value(&authenticity.policy)?,
+                "timestampEvidence": serde_json::to_value(&authenticity.timestamp_evidence)?,
                 "transitionReport": {},
                 "sourceEvidenceReport": {},
-                "warnings": [],
-                "status": {
-                    "integrityVerified": true,
-                    "archiveApprovalSignatureVerified": false,
-                    "strongPqSignatureVerified": false,
-                    "signerPinned": false,
-                    "bundlePinned": args.bundle.is_some(),
-                    "userPinned": !args.pq_public_keys.is_empty(),
-                    "userPinProvided": !args.pq_public_keys.is_empty(),
-                    "transitionRecordPresent": false,
-                    "transitionChainValid": false,
-                    "sourceEvidencePresent": false,
-                    "cohortForkDetected": false,
-                    "bundleCohortMixed": false,
-                    "mixedLifecycleBundleVariantsWithinCohort": false,
-                    "maintenanceSignatureVerified": false,
-                    "sourceEvidenceSignatureVerified": false,
-                    "otsEvidenceLinked": !args.timestamps.is_empty(),
-                    "policySatisfied": true,
-                    "archivePolicySatisfied": true
-                },
-                "detachedSummary": if args.include_detached_summary { Value::Array(Vec::new()) } else { Value::Null }
+                "warnings": authenticity.warnings,
+                "status": serde_json::to_value(&authenticity.status)?,
+                "detachedSummary": detached_summary,
             });
             println!("{}", serde_json::to_string_pretty(&report)?);
-        } else if !ctx.quiet {
-            println!("Lifecycle verification inputs accepted.");
+            if !authenticity.policy.satisfied {
+                std::process::exit(5);
+            }
+            return Ok(());
+        }
+
+        if !authenticity.policy.satisfied {
+            return Err(coded(
+                QvCode::PolicyNotSatisfied,
+                authenticity.policy.reason.clone(),
+            )
+            .into());
+        }
+
+        if !ctx.quiet {
+            println!("Lifecycle verification succeeded.");
             println!("State ID: {}", archive_state.state_id);
         }
         Ok(())
