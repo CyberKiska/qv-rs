@@ -9,7 +9,7 @@ use crate::auth::{
     verify_qsig_against_bytes, verify_stellar_sig_against_bytes, DetachedArchiveApprovalKind,
     NamedBinaryArtifact, ParsedPqpk, SignatureArtifact,
 };
-use crate::error::{err, Result};
+use crate::error::{coded, err, QvCode, Result};
 use crate::hash::{sha256_hex, sha3_512_hex};
 use crate::lifecycle::{
     canonicalize_archive_state_descriptor, canonicalize_cohort_binding,
@@ -124,6 +124,10 @@ pub struct AttachedLifecycleBundle {
     pub mixed_embedded_lifecycle_bundle_digests: bool,
 }
 
+fn signature_import_failed(message: impl Into<String>) -> crate::error::QvError {
+    coded(QvCode::SignatureImportFailed, message)
+}
+
 struct AttachContext<'a> {
     shards: Vec<&'a Qvqcont7Shard>,
     archive_state_bytes: Vec<u8>,
@@ -205,15 +209,17 @@ pub fn attach_lifecycle_bundle(
 
     for import in &imports {
         if import.bytes.is_empty() {
-            return Err(err(format!(
+            return Err(signature_import_failed(format!(
                 "Invalid signature file: {}",
                 import_label(&import.name, "signature import")
             )));
         }
         let label = import_label(&import.name, "signature import");
-        let target = resolve_import_target(&context, import, &imported_source_evidence, &label)?;
+        let target = resolve_import_target(&context, import, &imported_source_evidence, &label)
+            .map_err(|error| signature_import_failed(error.to_string()))?;
         if import.signature_family == LifecycleSignatureFamily::SourceEvidence {
-            let source = resolve_source_evidence(import, &label)?;
+            let source = resolve_source_evidence(import, &label)
+                .map_err(|error| signature_import_failed(error.to_string()))?;
             imported_source_evidence =
                 merge_source_evidence_entries(&imported_source_evidence, &[source.value])?;
         }
@@ -224,7 +230,8 @@ pub fn attach_lifecycle_bundle(
             &import.bytes,
             &pins,
             expected_ed25519,
-        )?;
+        )
+        .map_err(|error| signature_import_failed(error.to_string()))?;
         imported_public_keys.extend(imported.public_keys);
         imported_signatures
             .get_mut(import.signature_family.attachment_field())

@@ -1,6 +1,6 @@
 use std::sync::OnceLock;
 
-use crate::error::{err, Result};
+use crate::error::{coded, err, QvCode, Result};
 
 const GENERATOR: u8 = 0xe5;
 const REDUCTION_POLY: u8 = 0x1b;
@@ -30,8 +30,12 @@ impl<'a> RandomSource<'a> {
             return Ok(());
         }
 
-        getrandom::getrandom(out)
-            .map_err(|error| err(format!("OS randomness is unavailable: {error}")))
+        getrandom::getrandom(out).map_err(|error| {
+            coded(
+                QvCode::EntropyFailed,
+                format!("OS randomness is unavailable: {error}"),
+            )
+        })
     }
 }
 

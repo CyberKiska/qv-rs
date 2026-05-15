@@ -446,8 +446,12 @@ mod successor_main {
     fn map_qv_code_to_exit(code: QvCode) -> i32 {
         match code {
             QvCode::PolicyNotSatisfied | QvCode::VerificationFailed | QvCode::RestoreFailed => 1,
+            QvCode::EntropyFailed => 3,
             QvCode::InvalidFormat | QvCode::UnsupportedFormat => 4,
+            QvCode::KeyRejected => 5,
+            QvCode::AeadFailed => 6,
             QvCode::NotEnoughShards | QvCode::IntegrityMismatch => 7,
+            QvCode::SignatureImportFailed => 8,
             QvCode::InvalidSelection | QvCode::AmbiguousInputs => 9,
             QvCode::ReshareContractViolation => 10,
             QvCode::RestoredIntegrityFailed => 11,
@@ -1505,7 +1509,9 @@ mod successor_main {
         ctx: CliContext,
     ) -> Result<Vec<LifecycleSignatureImport>> {
         let mut imports = Vec::new();
-        for artifact in load_named_artifacts(&args.archive_approval_signatures, ctx)? {
+        for artifact in load_named_artifacts(&args.archive_approval_signatures, ctx)
+            .map_err(|error| signature_import_error(error.to_string()))?
+        {
             imports.push(signature_import(
                 artifact,
                 LifecycleSignatureFamily::ArchiveApproval,
@@ -1513,7 +1519,9 @@ mod successor_main {
                 None,
             ));
         }
-        for artifact in load_named_artifacts(&args.maintenance_signatures, ctx)? {
+        for artifact in load_named_artifacts(&args.maintenance_signatures, ctx)
+            .map_err(|error| signature_import_error(error.to_string()))?
+        {
             imports.push(signature_import(
                 artifact,
                 LifecycleSignatureFamily::Maintenance,
@@ -1524,12 +1532,14 @@ mod successor_main {
         let source_evidence_bytes = match args.source_evidence.as_slice() {
             [single] => Some(read_file_checked(single, ctx).with_context(|| {
                 format!("failed to read source-evidence {}", single.display())
-            })?),
+            }).map_err(|error| signature_import_error(error.to_string()))?),
             [] => None,
             _ if args.source_evidence_signatures.is_empty() => None,
-            _ => bail!("--source-evidence-sig requires exactly one --source-evidence when no explicit per-signature target is available"),
+            _ => return Err(signature_import_error("--source-evidence-sig requires exactly one --source-evidence when no explicit per-signature target is available")),
         };
-        for artifact in load_named_artifacts(&args.source_evidence_signatures, ctx)? {
+        for artifact in load_named_artifacts(&args.source_evidence_signatures, ctx)
+            .map_err(|error| signature_import_error(error.to_string()))?
+        {
             let import = signature_import(
                 artifact,
                 LifecycleSignatureFamily::SourceEvidence,
@@ -1537,7 +1547,7 @@ mod successor_main {
                 source_evidence_bytes.clone(),
             );
             if import.source_evidence_bytes.is_none() && import.target_ref.is_none() {
-                bail!("--source-evidence-sig requires --source-evidence or --source-evidence-target-ref");
+                return Err(signature_import_error("--source-evidence-sig requires --source-evidence or --source-evidence-target-ref"));
             }
             imports.push(import);
         }
@@ -1565,41 +1575,56 @@ mod successor_main {
         }
     }
 
+    fn signature_import_error(message: impl Into<String>) -> anyhow::Error {
+        coded(QvCode::SignatureImportFailed, message).into()
+    }
+
     fn parse_sig_import_spec(spec: &str, ctx: CliContext) -> Result<LifecycleSignatureImport> {
-        let value: Value =
-            serde_json::from_str(spec).context("--sig-import must be a JSON object")?;
+        let value: Value = serde_json::from_str(spec).map_err(|error| {
+            signature_import_error(format!("--sig-import must be a JSON object: {error}"))
+        })?;
         let object = value
             .as_object()
-            .context("--sig-import must be a JSON object")?;
+            .ok_or_else(|| signature_import_error("--sig-import must be a JSON object"))?;
         let file = object
             .get("file")
             .and_then(Value::as_str)
-            .context("--sig-import.file is required")?;
+            .ok_or_else(|| signature_import_error("--sig-import.file is required"))?;
         let family = match object
             .get("signatureFamily")
             .and_then(Value::as_str)
-            .context("--sig-import.signatureFamily is required")?
+            .ok_or_else(|| signature_import_error("--sig-import.signatureFamily is required"))?
         {
             "archive-approval" => LifecycleSignatureFamily::ArchiveApproval,
             "maintenance" => LifecycleSignatureFamily::Maintenance,
             "source-evidence" => LifecycleSignatureFamily::SourceEvidence,
-            other => bail!("unsupported --sig-import.signatureFamily: {other}"),
+            other => {
+                return Err(signature_import_error(format!(
+                    "unsupported --sig-import.signatureFamily: {other}"
+                )))
+            }
         };
         let path = PathBuf::from(file);
         let bytes = read_file_checked(&path, ctx)
-            .with_context(|| format!("failed to read --sig-import file {}", path.display()))?;
+            .with_context(|| format!("failed to read --sig-import file {}", path.display()))
+            .map_err(|error| signature_import_error(error.to_string()))?;
         let source_evidence_bytes = object
             .get("sourceEvidence")
             .and_then(Value::as_str)
             .map(PathBuf::from)
             .map(|path| read_file_checked(&path, ctx))
-            .transpose()?;
+            .transpose()
+            .map_err(|error| signature_import_error(error.to_string()))?;
         let target_digest_hex = match object.get("targetDigest") {
             Some(Value::String(value)) => Some(value.clone()),
             Some(Value::Object(map)) => {
                 map.get("value").and_then(Value::as_str).map(str::to_string)
             }
-            Some(_) => bail!("--sig-import.targetDigest must be a hex string or digest object"),
+            Some(_) => {
+                return Err(signature_import_error(
+                    "--sig-import.targetDigest must be a hex string or digest object",
+                ))
+            }
             None => None,
         };
         Ok(LifecycleSignatureImport {
@@ -1922,6 +1947,42 @@ mod successor_main {
             "USAGE".to_string()
         } else {
             "UNEXPECTED".to_string()
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn qv_code_exit_golden_bytes_match_exit_js() {
+            let mut entries = vec![serde_json::json!({"qvCode":"USAGE","exitCode":2})];
+            for code in [
+                QvCode::VerificationFailed,
+                QvCode::EntropyFailed,
+                QvCode::InvalidFormat,
+                QvCode::KeyRejected,
+                QvCode::AeadFailed,
+                QvCode::NotEnoughShards,
+                QvCode::SignatureImportFailed,
+                QvCode::AmbiguousInputs,
+                QvCode::ReshareContractViolation,
+                QvCode::RestoredIntegrityFailed,
+                QvCode::PolicyNotSatisfied,
+                QvCode::RestoreLifecycleVariantAckRequired,
+            ] {
+                let error: anyhow::Error = coded(code, "fixture").into();
+                entries.push(serde_json::json!({
+                    "qvCode": qv_code_string(&error),
+                    "exitCode": exit_code(&error)
+                }));
+            }
+
+            let bytes = serde_json::to_string(&entries).expect("golden JSON");
+            assert_eq!(
+                bytes,
+                r#"[{"exitCode":2,"qvCode":"USAGE"},{"exitCode":1,"qvCode":"UNEXPECTED"},{"exitCode":3,"qvCode":"ENTROPY_FAILED"},{"exitCode":4,"qvCode":"FORMAT_POLICY_REJECT"},{"exitCode":5,"qvCode":"KEY_REJECTED"},{"exitCode":6,"qvCode":"AEAD_FAILED"},{"exitCode":7,"qvCode":"QUORUM_UNREACHABLE"},{"exitCode":8,"qvCode":"SIGNATURE_IMPORT_FAILED"},{"exitCode":9,"qvCode":"AMBIGUOUS_INPUTS"},{"exitCode":10,"qvCode":"RESHARE_CONTRACT_VIOLATION"},{"exitCode":11,"qvCode":"RESTORED_INTEGRITY_FAILED"},{"exitCode":1,"qvCode":"POLICY_NOT_SATISFIED"},{"exitCode":12,"qvCode":"RESTORE_LIFECYCLE_VARIANT_ACK_REQUIRED"}]"#
+            );
         }
     }
 

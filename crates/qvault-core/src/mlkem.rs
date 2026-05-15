@@ -1,7 +1,7 @@
 use fips203::ml_kem_1024;
 use fips203::traits::{Decaps, Encaps, KeyGen, SerDes};
 
-use crate::error::{err, Result};
+use crate::error::{coded, err, QvCode, Result};
 
 pub const ML_KEM_1024_PUBLIC_KEY_SIZE: usize = 1568;
 pub const ML_KEM_1024_SECRET_KEY_SIZE: usize = 3168;
@@ -14,8 +14,12 @@ pub fn generate_key_pair(custom_seed: Option<[u8; 64]>) -> Result<(Vec<u8>, Vec<
             seed[..32].try_into().expect("32-byte seed slice"),
             seed[32..].try_into().expect("32-byte seed slice"),
         ),
-        None => ml_kem_1024::KG::try_keygen()
-            .map_err(|error| err(format!("ML-KEM-1024 key generation failed: {error}")))?,
+        None => ml_kem_1024::KG::try_keygen().map_err(|error| {
+            coded(
+                QvCode::EntropyFailed,
+                format!("ML-KEM-1024 key generation failed: {error}"),
+            )
+        })?,
     };
 
     let public_key = encaps_key.into_bytes().to_vec();
@@ -30,15 +34,23 @@ pub fn encapsulate(public_key: &[u8], seed: Option<[u8; 32]>) -> Result<(Vec<u8>
     let encaps_key = ml_kem_1024::EncapsKey::try_from_bytes(
         public_key
             .try_into()
-            .map_err(|_| err("Public key must be 1568 bytes"))?,
+            .map_err(|_| coded(QvCode::KeyRejected, "Public key must be 1568 bytes"))?,
     )
-    .map_err(|error| err(format!("Invalid ML-KEM-1024 public key bytes: {error}")))?;
+    .map_err(|error| {
+        coded(
+            QvCode::KeyRejected,
+            format!("Invalid ML-KEM-1024 public key bytes: {error}"),
+        )
+    })?;
 
     let (shared_secret, ciphertext) = match seed {
         Some(seed) => encaps_key.encaps_from_seed(&seed),
-        None => encaps_key
-            .try_encaps()
-            .map_err(|error| err(format!("ML-KEM-1024 encapsulation failed: {error}")))?,
+        None => encaps_key.try_encaps().map_err(|error| {
+            coded(
+                QvCode::EntropyFailed,
+                format!("ML-KEM-1024 encapsulation failed: {error}"),
+            )
+        })?,
     };
 
     Ok((ciphertext.into_bytes().to_vec(), shared_secret.into_bytes()))
@@ -51,9 +63,14 @@ pub fn decapsulate(ciphertext: &[u8], secret_key: &[u8]) -> Result<[u8; 32]> {
     let decaps_key = ml_kem_1024::DecapsKey::try_from_bytes(
         secret_key
             .try_into()
-            .map_err(|_| err("Secret key must be 3168 bytes"))?,
+            .map_err(|_| coded(QvCode::KeyRejected, "Secret key must be 3168 bytes"))?,
     )
-    .map_err(|error| err(format!("Invalid ML-KEM-1024 secret key bytes: {error}")))?;
+    .map_err(|error| {
+        coded(
+            QvCode::KeyRejected,
+            format!("Invalid ML-KEM-1024 secret key bytes: {error}"),
+        )
+    })?;
     let ciphertext = ml_kem_1024::CipherText::try_from_bytes(
         ciphertext
             .try_into()
@@ -73,20 +90,26 @@ pub fn decapsulate(ciphertext: &[u8], secret_key: &[u8]) -> Result<[u8; 32]> {
 
 pub fn validate_public_key(public_key: &[u8]) -> Result<()> {
     if public_key.len() != ML_KEM_1024_PUBLIC_KEY_SIZE {
-        return Err(err(format!(
-            "Invalid ML-KEM-1024 public key length: expected {ML_KEM_1024_PUBLIC_KEY_SIZE} bytes, got {}",
-            public_key.len()
-        )));
+        return Err(coded(
+            QvCode::KeyRejected,
+            format!(
+                "Invalid ML-KEM-1024 public key length: expected {ML_KEM_1024_PUBLIC_KEY_SIZE} bytes, got {}",
+                public_key.len()
+            ),
+        ));
     }
     Ok(())
 }
 
 pub fn validate_secret_key(secret_key: &[u8]) -> Result<()> {
     if secret_key.len() != ML_KEM_1024_SECRET_KEY_SIZE {
-        return Err(err(format!(
-            "Invalid ML-KEM-1024 secret key length: expected {ML_KEM_1024_SECRET_KEY_SIZE} bytes, got {}",
-            secret_key.len()
-        )));
+        return Err(coded(
+            QvCode::KeyRejected,
+            format!(
+                "Invalid ML-KEM-1024 secret key length: expected {ML_KEM_1024_SECRET_KEY_SIZE} bytes, got {}",
+                secret_key.len()
+            ),
+        ));
     }
     Ok(())
 }

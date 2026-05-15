@@ -2,7 +2,7 @@ use crate::aead::{
     assert_per_chunk_nonce_contract, build_chunk_aad, decrypt_chunk, derive_chunk_iv_from_k,
     encrypt_chunk,
 };
-use crate::error::{err, Result};
+use crate::error::{coded, err, QvCode, Result};
 use crate::hash::sha3_512_hex;
 use crate::kdf::{compute_key_commitment, derive_key_with_kmac, verify_key_commitment};
 use crate::mlkem::{decapsulate, encapsulate};
@@ -159,7 +159,8 @@ pub fn decrypt_qenc(container_bytes: &[u8], secret_key: &[u8]) -> Result<Decrypt
 
     let result = (|| {
         if !verify_key_commitment(&derived.kenc, &parsed.stored_key_commitment) {
-            return Err(err(
+            return Err(coded(
+                QvCode::AeadFailed,
                 "Key commitment verification failed. Container may be corrupted or tampered with.",
             ));
         }
@@ -349,7 +350,11 @@ fn encrypt_per_chunk(
 
 fn random_array<const N: usize>() -> Result<[u8; N]> {
     let mut bytes = [0u8; N];
-    getrandom::getrandom(&mut bytes)
-        .map_err(|error| err(format!("OS randomness is unavailable: {error}")))?;
+    getrandom::getrandom(&mut bytes).map_err(|error| {
+        coded(
+            QvCode::EntropyFailed,
+            format!("OS randomness is unavailable: {error}"),
+        )
+    })?;
     Ok(bytes)
 }

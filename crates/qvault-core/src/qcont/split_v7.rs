@@ -3,7 +3,7 @@ use zeroize::Zeroize;
 
 use crate::auth::AuthPolicyLevel;
 use crate::erasure;
-use crate::error::{err, Result};
+use crate::error::{coded, err, QvCode, Result};
 use crate::hash::{sha3_512, sha3_512_hex};
 use crate::kdf::{derive_key_with_kmac, verify_key_commitment};
 use crate::lifecycle::{
@@ -125,7 +125,12 @@ pub fn build_qvqcont7_shards(
 
     {
         let mut trial_shared_secret = decapsulate(&parsed.encapsulated_key, priv_key_bytes)
-            .map_err(|error| err(format!("Key verification failed: {error}")))?;
+            .map_err(|error| {
+                coded(
+                    QvCode::KeyRejected,
+                    format!("Key verification failed: {error}"),
+                )
+            })?;
         let derived = derive_key_with_kmac(
             &trial_shared_secret,
             &parsed.kdf_salt,
@@ -136,7 +141,8 @@ pub fn build_qvqcont7_shards(
         let key_match = verify_key_commitment(&derived.kenc, &key_commitment);
         trial_shared_secret.zeroize();
         if !key_match {
-            return Err(err(
+            return Err(coded(
+                QvCode::KeyRejected,
                 "Private key does not match this .qenc container (key commitment mismatch). Ensure you are using the correct privateKey.qkey for this container.",
             ));
         }

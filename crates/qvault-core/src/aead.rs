@@ -1,7 +1,7 @@
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
 
-use crate::error::{err, Result};
+use crate::error::{coded, err, QvCode, Result};
 use crate::kdf::kmac256;
 
 pub const AES_IV_SIZE: usize = 12;
@@ -103,7 +103,7 @@ pub fn decrypt_chunk(
                 aad,
             },
         )
-        .map_err(|_| err("AES-GCM decryption failed"))
+        .map_err(|_| coded(QvCode::AeadFailed, "AES-GCM decryption failed"))
 }
 
 pub fn encrypt_chunk(

@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use crate::error::{err, Result};
+use crate::error::{coded, QvCode, Result};
 use crate::hash::sha3_256;
 use crate::manifest::jcs::{canonicalize_json, canonicalize_json_to_bytes};
 
@@ -76,8 +76,12 @@ pub fn generate_archive_id(random_bytes: Option<[u8; 32]>) -> Result<String> {
         bytes
     } else {
         let mut bytes = [0u8; 32];
-        getrandom::getrandom(&mut bytes)
-            .map_err(|error| err(format!("archiveId RNG failed: {error}")))?;
+        getrandom::getrandom(&mut bytes).map_err(|error| {
+            coded(
+                QvCode::EntropyFailed,
+                format!("archiveId RNG failed: {error}"),
+            )
+        })?;
         bytes
     };
     Ok(hex::encode(bytes))

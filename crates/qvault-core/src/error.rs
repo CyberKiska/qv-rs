@@ -2,6 +2,10 @@ use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QvCode {
+    EntropyFailed,
+    KeyRejected,
+    AeadFailed,
+    SignatureImportFailed,
     InvalidFormat,
     InvalidSelection,
     AmbiguousInputs,
@@ -22,6 +26,10 @@ impl QvCode {
     /// Stable `qvCode` strings aligned with `quantum-vault` `src/core/cli/lib/exit.js` (`QV_CODE`).
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::EntropyFailed => "ENTROPY_FAILED",
+            Self::KeyRejected => "KEY_REJECTED",
+            Self::AeadFailed => "AEAD_FAILED",
+            Self::SignatureImportFailed => "SIGNATURE_IMPORT_FAILED",
             Self::InvalidFormat | Self::UnsupportedFormat => "FORMAT_POLICY_REJECT",
             Self::InvalidSelection | Self::AmbiguousInputs => "AMBIGUOUS_INPUTS",
             Self::NotEnoughShards => "QUORUM_UNREACHABLE",
