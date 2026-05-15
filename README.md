@@ -57,6 +57,19 @@ Build:
 cargo build
 ```
 
+### Prebuilt binaries (CI)
+
+After a successful run of the **CI** workflow on GitHub, download archives from the run’s **Artifacts** section: open the repository **Actions** tab, select the workflow run, then scroll to **Artifacts** at the bottom of the summary page.
+
+Typical artifact names (one archive per row):
+
+- `qvault-cli-linux-x86_64-gnu` — Linux `x86_64-unknown-linux-gnu` (`.tar.gz`)
+- `qvault-cli-windows-x86_64-gnu` — Windows `x86_64-pc-windows-gnu` (`.zip`, includes `qvault-cli.exe`)
+- `qvault-cli-macos-aarch64` — macOS Apple Silicon (`aarch64-apple-darwin`, `.tar.gz`)
+- `qvault-cli-macos-x86_64` — macOS Intel (`x86_64-apple-darwin`, `.tar.gz`)
+
+Each archive contains the `qvault-cli` binary (or `qvault-cli.exe` on Windows), plus `README.md`, `USAGE.md`, and `LICENSE`.
+
 Run tests:
 
 ```bash
