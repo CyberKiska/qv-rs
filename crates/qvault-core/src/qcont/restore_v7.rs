@@ -1853,10 +1853,40 @@ fn timestamp_evidence_from_resolved(
         complete_proof: resolved.complete_proof,
         link_label: "OTS evidence linked to detached signature bytes".to_string(),
         completion_label: if resolved.apparently_complete {
-            "OTS proof appears complete".to_string()
+            "OTS proof appears complete (heuristic)".to_string()
         } else {
             "OTS proof appears incomplete".to_string()
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ots_completion_label_marks_complete_proofs_as_heuristic() {
+        let evidence = timestamp_evidence_from_resolved(
+            "complete.ots".to_string(),
+            crate::auth::opentimestamps::ResolvedOpenTimestampTarget {
+                target_ref: "sig-1".to_string(),
+                target_name: "sig-1.qsig".to_string(),
+                target_source: "bundle".to_string(),
+                target_verified: true,
+                linked: true,
+                apparently_complete: true,
+                complete_proof: true,
+                stamped_digest_hex: "00".repeat(32),
+            },
+        );
+        assert_eq!(
+            evidence.completion_label,
+            "OTS proof appears complete (heuristic)"
+        );
+        assert_eq!(
+            evidence.link_label,
+            "OTS evidence linked to detached signature bytes"
+        );
     }
 }
 

@@ -1,47 +1,55 @@
 # qv-cli
 
-`qv-cli` is a compatibility-first local Rust CLI for the current Quantum Vault container standard.
+`qv-cli` is the Rust implementation for Quantum Vault artifacts. It is a local CLI and library workspace for creating, inspecting, attaching evidence to, verifying, resharing, and restoring current Quantum Vault archives.
 
-The neighboring Quantum Vault JS project is the behavior and wire-format oracle. Default builds are successor-only.
+Quantum Vault is an archival container format that separates confidentiality, recoverability, and authenticity:
+
+- `.qenc` holds the encrypted payload using ML-KEM-1024, KMAC256, and AES-256-GCM.
+- `QVqcont-7` shards split the encrypted payload and the ML-KEM secret key across a recoverable cohort.
+- Archive-state descriptors, cohort bindings, and `QV-Lifecycle-Bundle` v1 carry canonical identity, sharding commitments, policy, signatures, timestamp evidence, transition records, and source evidence.
+- Archive approval signatures cover canonical archive-state bytes, not mutable lifecycle-bundle bytes.
+- Restore is fail-closed: ambiguity, malformed bytes, digest mismatch, failed key binding, or unsatisfied archive policy blocks output.
+
+The [sibling JavaScript project](https://github.com/CyberKiska/quantum-vault) remains the source-of-truth implementation and normative documentation set. This Rust repository keeps its docs self-contained, but protocol behavior should be checked against the JS source and its `docs/format-spec.md`, `docs/security-model.md`, `docs/trust-and-policy.md`, and schema fixtures when compatibility questions arise.
 
 ## Current Status
 
-Default build status:
 
-- current `.qenc` container primitives remain available
-- successor lifecycle artifacts, `QVqcont-7`, and the successor CLI (`split`, `attach`, `reshare`, `restore`, `verify`, …) ship in default builds
+Implemented:
 
-Implemented in `qvault-core` default builds:
+- `.qenc` `QVv1-5-0` parse/build/decrypt/encrypt
+- `wrapped-v1` payload metadata and `QVB1` multi-file payloads
+- archive-state descriptor v1
+- cohort binding v1 with strict canonical `bodyDefinition.excludes`
+- transition-record and source-evidence v1 parsing
+- `QV-Lifecycle-Bundle` v1 parsing/canonicalization
+- `QVqcont-7` split, restore, attach, and same-state reshare
+- archive policy evaluation with fail-closed restore gating
+- `.qsig`, `.pqpk`, Stellar `.sig`, and OpenTimestamps linkage handling
+- stable CLI JSON envelopes and JS-aligned `qvCode` exit taxonomy
 
-- ML-KEM-1024 key generation via `fips203`
-- current KMAC256 derivation tree with customization strings
-- AES-256-GCM single-container and per-chunk modes
-- current `wrapped-v1` payload wrapping and unwrapping
-- current `QVB1` multi-file bundle payload (`.qvpack`) parsing and building
-- current `.qenc` header parse/build with mandatory key commitment
-- detached signature verification for `.qsig` / `.pqpk` and Stellar `.sig`
-- direct Rust mirrors of the pinned JS Shamir and Reed-Solomon behavior used by Quantum Vault
+Not implemented:
 
-Verified in default tests:
-
-- Rust decrypts current JS-produced `.qenc` fixtures
-- Rust reproduces current JS `.qenc` fixture bytes exactly when RNG inputs and timestamps are fixed
-- malformed and tampered inputs fail closed in the covered negative cases
+- detached signature creation
+- automatic signing during `split`
+- full OpenTimestamps calendar attestation validation
+- network services, daemon mode, or RPC mode
 
 ## Repository Layout
 
-- `crates/qvault-core`: current container crypto and successor lifecycle / `QVqcont-7` implementation
-- `crates/qvault-cli`: thin CLI over `qvault-core`
-- `crates/qvault-core/tests/data/qenc_interop`: committed JS-oracle `.qenc` vectors for cross-language tests
-- `fixtures/successor`: successor fixture root for later stages
-- `tools/gen-js-fixtures.mjs`: disabled until rewritten for successor lifecycle modules
+- `crates/qvault-core`: cryptography, canonical JSON, lifecycle artifacts, shard parsing/building, restore/authenticity policy
+- `crates/qvault-cli`: CLI argument parsing, file I/O policy, JSON/text reporting
+- `crates/qvault-core/tests/data`: self-contained JS oracle fixtures, schema fixtures, corpus cases, and compact examples
+- `docs/successor-conformance.md`: conformance boundaries and intentional Rust deviations
+- `ARCHITECTURE.md`: current Rust architecture
+- `IMPLEMENTATION_NOTES.md`: contributor rules and oracle references
 
 ## Build And Test
 
 Requirements:
 
 - Rust toolchain compatible with the workspace `Cargo.toml`
-- Node.js for fixture regeneration and JS-oracle smoke work
+- Node.js only when manually comparing or regenerating JS-oracle fixtures
 
 Build:
 
@@ -49,97 +57,83 @@ Build:
 cargo build
 ```
 
-Run the Rust test suite:
+Run tests:
 
 ```bash
 cargo test
 ```
 
-The old fixture generator is disabled because it targeted removed predecessor JS modules:
+Run focused successor fixtures:
 
 ```bash
-node tools/gen-js-fixtures.mjs
+cargo test -p qvault-core --test lifecycle_schema
+cargo test -p qvault-core --test qcont_v7
+cargo test -p qvault-cli --test cli_json
 ```
 
-## CLI Usage
+The old fixture generator in `tools/gen-js-fixtures.mjs` is intentionally disabled until it is rewritten against the successor JS modules.
 
-The binary built by Cargo is `qvault-cli`.
+## CLI Surface
 
-Successor commands are the default CLI surface; predecessor-era commands are not available as a Cargo-selected build.
+The Cargo binary is `qvault-cli`.
 
-## Compatibility Notes
+Primary commands:
 
-Current successor target:
+- `keygen`
+- `encrypt`
+- `decrypt`
+- `split`
+- `attach`
+- `reshare`
+- `verify`
+- `restore`
+- `inspect`
+- `canonicalize`
+- `selftest`
+- `version`
+
+Global reporting flags include `--json`, `--quiet`, `--allow-symlink`, `--color`, and `--no-color`.
+
+## Compatibility Targets
 
 - `.qenc`: `QVv1-5-0`
-- archive-state descriptor: `quantum-vault-archive-state-descriptor/v1`
-- cohort binding: `quantum-vault-cohort-binding/v1`
-- lifecycle bundle: `QV-Lifecycle-Bundle` v1
 - `.qcont`: `QVqcont-7`
+- shard artifact family: `successor-lifecycle-v1`
+- archive-state schema: `quantum-vault-archive-state-descriptor/v1`
+- cohort-binding schema: `quantum-vault-cohort-binding/v1`
+- lifecycle bundle: `QV-Lifecycle-Bundle` v1
 - crypto profile: `QV-MLKEM1024-KMAC256-AES256GCM-SHA3_512-v2`
 - KDF tree: `QV-KDF-TREE-v2`
 - canonical JSON labels: `QV-JSON-RFC8785-v1`, `QV-BUNDLE-JSON-v1`
 
-Important compatibility rules:
+## Restore And Authenticity
 
-- compatibility comes before abstraction
-- wire-visible JSON uses explicit structs and canonical serialization
-- restore is archive-state / lifecycle-bundle centric and fail-closed
-- no silent format fallback is introduced
-- legacy `QVqcont-5` / manifest-v1 inputs are treated as unsupported
+Restore groups candidates by archive identity and exact canonical bytes:
 
-Current deliberate restore hardening:
+- `archiveId`
+- `stateId`
+- `cohortId`
+- exact archive-state bytes
+- exact cohort-binding bytes
 
-- for `any-signature` and `strong-pq-signature`, Rust only counts signatures whose signer is actually bound through bundle `publicKeyRef` material or an explicit user pin (`--pqpk` / `--expected-ed25519-signer`)
-- unpinned signatures may still verify structurally, but they do not satisfy archive policy
-- this is a security hardening relative to the current JS restore behavior, not a wire-format change
+Lifecycle-bundle bytes are mutable evidence and are selected explicitly when multiple bundle digests are present. Archive approval signatures are verified over canonical archive-state bytes. Maintenance signatures target transition-record bytes. Source-evidence signatures target source-evidence bytes.
 
-Current deliberate CLI divergence from JS Pro defaults:
+For `any-signature` and `strong-pq-signature` policies, Rust counts signatures only when the signer is bound through bundle public-key material or explicit user pins (`--pqpk` or `--expected-ed25519-signer`). Self-verifying signature material can be reported, but it does not satisfy archive policy by itself.
 
-- the library default for new archives matches the JS builder default (`strong-pq-signature`)
-- the Rust CLI `split` command defaults to `strong-pq-signature` (see `split` help / `--auth-policy-level`)
-
-OpenTimestamps notes:
-
-- OTS evidence is parsed, linked, and reported
-- OTS does not satisfy archive signature policy by itself
+OpenTimestamps evidence is linked to `SHA-256(detached signature bytes)`. OTS evidence does not satisfy archive policy. Completion fields and labels are heuristic reporting only; complete-looking proofs are reported as `OTS proof appears complete (heuristic)`.
 
 ## Security Notes
 
-- Key commitment is mandatory and is verified before `.qenc` decryption.
-- `decrypt` also verifies the inner wrapped-payload file hash after decryption.
-- `split` verifies that the provided secret key matches the `.qenc` container before producing shards.
-- `restore` validates embedded archive-state / cohort-binding / lifecycle-bundle digests, `.qenc` metadata, key commitment, share commitments, and fragment body hashes.
-- `restore` blocks when archive policy is not satisfied.
-- for non-`integrity-only` archives, restore only counts signatures toward policy when the signer is trusted via bundle key binding or explicit user pinning.
-- bundle extraction only writes single-component file names and refuses duplicate or unsafe entry names.
-- secret key files written by `keygen` and `restore` are set to owner-only permissions on Unix (`0600`) as a best-effort local safeguard.
-- secret zeroization is best-effort. Temporary shared secrets, derived keys, and intermediate buffers are cleared where feasible, but returned plaintext and returned secret-key bytes remain in caller-controlled memory by design.
+- Key commitment is mandatory and checked before `.qenc` decryption.
+- Decrypt verifies the inner wrapped-payload file hash.
+- Split verifies that the provided ML-KEM secret key matches the `.qenc` before producing shards.
+- Restore validates embedded archive-state, cohort-binding, lifecycle-bundle, `.qenc` metadata, key commitment, share commitments, fragment body hashes, and policy.
+- Secret-key files written by `keygen` and `restore` use owner-only permissions on Unix where available.
+- Secret zeroization is best-effort. Temporary shared secrets, derived keys, and intermediate buffers are cleared where feasible; returned plaintext and returned secret-key bytes remain caller-controlled memory.
 
-## Current Limitations / Non-Goals
+## Remaining Gaps
 
-Not implemented:
-
-- detached signature creation
-- `.qcont` signing as part of `split`
-- trusted timestamp validation beyond OpenTimestamps structure/link checks
-- daemon mode, RPC mode, or network services
-- legacy-format fallback
-
-Current practical limits:
-
-- JS-side cross-language verification is smoke-tested locally, but not yet fully automated inside the Rust test harness
-- `restore` reconstructs `.qenc` and `.qkey`; it does not automatically decrypt the restored container
-- bundle extraction is filesystem-safe rather than browser-like, so unsafe or colliding entry names are rejected instead of auto-renamed
-
-## Relationship To `quantum-vault`
-
-This project follows the current `../qv-work/quantum-vault` implementation, not older drafts or README prose. When the docs here and the JS oracle differ, the JS source is the source of truth for protocol behavior, and this repo should either be updated to match it or document the remaining gap explicitly.
-
-## Near-Term Roadmap
-
-- automate more JS-side interop checks as repeatable repo scripts
-- add more malformed/tamper cases from the JS self-test matrix
-- expand CLI-level smokes around restore and attach
-- continue hardening secret handling and CLI ergonomics without changing the wire format
-- keep docs aligned with the current oracle as Quantum Vault evolves
+- No automated end-to-end JS/Rust fixture regeneration harness is checked in yet.
+- Detached signature creation is still external to this CLI.
+- OTS validation is structural/linkage reporting, not full calendar verification.
+- Full workspace CI should continue expanding malformed and cross-implementation cases before production release.

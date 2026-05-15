@@ -29,6 +29,5 @@ examples/
 *.bak
 *.backup
 
-# Notes
-*.md
-!README.md
+# Internal notes
+docs/internal/
