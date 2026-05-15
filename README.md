@@ -77,6 +77,8 @@ The old fixture generator in `tools/gen-js-fixtures.mjs` is intentionally disabl
 
 The Cargo binary is `qvault-cli`.
 
+See `USAGE.md` for end-to-end command examples, restore workflows, attach/reshare examples, test commands, and development guidance.
+
 Primary commands:
 
 - `keygen`

@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install Rust stable
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Select Rust stable
+        run: rustup default stable
+
+      - name: Check workspace
+        run: cargo check --workspace --locked
+
+      - name: Test workspace
+        run: cargo test --workspace --locked
+
+  package:
+    name: Package qvault-cli (${{ matrix.target.name }})
+    runs-on: ${{ matrix.target.os }}
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            binary: qvault-cli
+            archive: qvault-cli-linux-x86_64.tar.gz
+          - name: macos
+            os: macos-latest
+            binary: qvault-cli
+            archive: qvault-cli-macos.tar.gz
+          - name: windows-x86_64
+            os: windows-latest
+            binary: qvault-cli.exe
+            archive: qvault-cli-windows-x86_64.zip
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install Rust stable
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Select Rust stable
+        run: rustup default stable
+
+      - name: Build release binary
+        run: cargo build --release -p qvault-cli --locked
+
+      - name: Stage package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/qvault-cli
+          cp "target/release/${{ matrix.target.binary }}" dist/qvault-cli/
+          cp README.md USAGE.md LICENSE dist/qvault-cli/
+
+      - name: Create tar package
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -czf "${{ matrix.target.archive }}" -C dist qvault-cli
+
+      - name: Create zip package
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path dist/qvault-cli -DestinationPath "${{ matrix.target.archive }}"
+
+      - name: Upload package
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ matrix.target.name }}
+          path: ${{ matrix.target.archive }}
+          if-no-files-found: error
+          retention-days: 30
