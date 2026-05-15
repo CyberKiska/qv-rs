@@ -30,6 +30,8 @@ pub const BODY_DEFINITION_EXCLUDES: &[&str] = &[
     "embedded-lifecycle-bundle-digest",
     "external-signatures",
 ];
+const BODY_DEFINITION_EXCLUDES_ERROR: &str =
+    "cohortBinding.bodyDefinition.excludes MUST equal canonical QV-QCONT-SHARDBODY-v1 excludes";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildCohortBindingParams {
@@ -264,6 +266,7 @@ pub fn validate_cohort_binding_value(value: &Value) -> Result<CohortBinding> {
         &[],
         "cohortBinding.bodyDefinition",
     )?;
+    let body_definition_excludes = canonical_body_definition_excludes(body_definition)?;
     let share_commitment = value_object(
         source
             .get("shareCommitment")
@@ -385,11 +388,7 @@ pub fn validate_cohort_binding_value(value: &Value) -> Result<CohortBinding> {
                     ),
                     (
                         "excludes",
-                        exact_string_array(
-                            body_definition.get("excludes"),
-                            BODY_DEFINITION_EXCLUDES,
-                            "cohortBinding.bodyDefinition.excludes",
-                        )?,
+                        body_definition_excludes,
                     ),
                 ]),
             ),
@@ -426,6 +425,17 @@ pub fn validate_cohort_binding_value(value: &Value) -> Result<CohortBinding> {
             ("shareCommitments", Value::Array(share_commitments)),
         ]),
     })
+}
+
+fn canonical_body_definition_excludes(
+    body_definition: &serde_json::Map<String, Value>,
+) -> Result<Value> {
+    exact_string_array(
+        body_definition.get("excludes"),
+        BODY_DEFINITION_EXCLUDES,
+        "cohortBinding.bodyDefinition.excludes",
+    )
+    .map_err(|_| err(BODY_DEFINITION_EXCLUDES_ERROR))
 }
 
 pub fn canonicalize_cohort_binding(value: &Value) -> Result<CanonicalCohortBinding> {

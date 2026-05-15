@@ -117,6 +117,63 @@ fn lifecycle_transition_contextual_state_change_rejects_inside_bundle() -> Resul
 }
 
 #[test]
+fn cohort_binding_rejects_noncanonical_body_definition_excludes() -> Result<()> {
+    let valid = read_fixture_json("fixtures/qv-cohort-binding-v1.valid.json")?;
+    let mut cases = Vec::new();
+
+    let mut missing = valid.clone();
+    missing["bodyDefinition"]["excludes"] = serde_json::json!([
+        "embedded-archive-state",
+        "embedded-archive-state-digest",
+        "embedded-cohort-binding",
+        "embedded-cohort-binding-digest",
+        "embedded-lifecycle-bundle",
+        "embedded-lifecycle-bundle-digest",
+        "external-signatures"
+    ]);
+    cases.push(("missing canonical item", missing));
+
+    let mut reordered = valid.clone();
+    reordered["bodyDefinition"]["excludes"] = serde_json::json!([
+        "embedded-archive-state",
+        "qcont-header",
+        "embedded-archive-state-digest",
+        "embedded-cohort-binding",
+        "embedded-cohort-binding-digest",
+        "embedded-lifecycle-bundle",
+        "embedded-lifecycle-bundle-digest",
+        "external-signatures"
+    ]);
+    cases.push(("reordered canonical items", reordered));
+
+    let mut extra = valid;
+    extra["bodyDefinition"]["excludes"] = serde_json::json!([
+        "qcont-header",
+        "embedded-archive-state",
+        "embedded-archive-state-digest",
+        "embedded-cohort-binding",
+        "embedded-cohort-binding-digest",
+        "embedded-lifecycle-bundle",
+        "embedded-lifecycle-bundle-digest",
+        "external-signatures",
+        "future-field"
+    ]);
+    cases.push(("extra noncanonical item", extra));
+
+    for (name, fixture) in cases {
+        let bytes = canonicalize_json_to_bytes(&fixture)?;
+        let error = parse_cohort_binding_bytes(&bytes).expect_err(name);
+        assert!(
+            error
+                .to_string()
+                .contains("cohortBinding.bodyDefinition.excludes MUST equal canonical"),
+            "{name}: unexpected error: {error}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn lifecycle_identity_derivation_matches_transition_fixture() -> Result<()> {
     let bundle = read_fixture_json("fixtures/qv-lifecycle-bundle-v1.valid.json")?;
     let canonical = canonicalize_lifecycle_bundle(&bundle)?;
