@@ -7,6 +7,13 @@ updates:
       day: "monday"
       time: "09:00"
     open-pull-requests-limit: 5
+    ignore:
+      - dependency-name: "getrandom"
+        versions:
+          - "0.4.x"
+      - dependency-name: "sha2"
+        versions:
+          - "0.11.x"
 
   - package-ecosystem: "github-actions"
     directory: "/"
