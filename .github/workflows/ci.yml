@@ -1,3 +1,5 @@
+# CI: tests on Linux; release binaries — Linux + Windows (cross from Ubuntu), macOS ARM + x86_64 (native).
+
 name: CI
 
 on:
@@ -15,25 +17,48 @@ env:
 
 jobs:
   test:
-    name: Test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - ubuntu-latest
-          - macos-latest
-          - windows-latest
-
+    name: Test (ubuntu-latest)
+    runs-on: ubuntu-latest
+    outputs:
+      rust_version: ${{ steps.rust-toolchain.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - name: Install Rust stable
-        run: rustup toolchain install stable --profile minimal
+      - name: Parse Rust channel from rust-toolchain.toml
+        id: rust-toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          v=$(grep -E '^[[:space:]]*channel[[:space:]]*=' rust-toolchain.toml | head -1 | sed 's/.*"\([^"]*\)".*/\1/')
+          if [[ -z "${v}" ]]; then
+            echo "Could not parse channel from rust-toolchain.toml"
+            exit 1
+          fi
+          echo "version=${v}" >> "${GITHUB_OUTPUT}"
 
-      - name: Select Rust stable
-        run: rustup default stable
+      - name: Cache Cargo registry and git sources
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-rust-${{ steps.rust-toolchain.outputs.version }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-rust-${{ steps.rust-toolchain.outputs.version }}-cargo-
+
+      - name: Install Rust (${{ steps.rust-toolchain.outputs.version }})
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.3 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+          rustup toolchain install "${{ steps.rust-toolchain.outputs.version }}" --profile minimal --no-self-update
+          rustup default "${{ steps.rust-toolchain.outputs.version }}"
+          rustc -vV
+          cargo -vV
 
       - name: Check workspace
         run: cargo check --workspace --locked
@@ -41,64 +66,145 @@ jobs:
       - name: Test workspace
         run: cargo test --workspace --locked
 
-  package:
-    name: Package qvault-cli (${{ matrix.target.name }})
-    runs-on: ${{ matrix.target.os }}
+  build-release-linux-windows:
+    name: Release binaries (Linux + Windows, ubuntu-latest)
+    runs-on: ubuntu-latest
     needs: test
-    strategy:
-      fail-fast: false
-      matrix:
-        target:
-          - name: linux-x86_64
-            os: ubuntu-latest
-            binary: qvault-cli
-            archive: qvault-cli-linux-x86_64.tar.gz
-          - name: macos
-            os: macos-latest
-            binary: qvault-cli
-            archive: qvault-cli-macos.tar.gz
-          - name: windows-x86_64
-            os: windows-latest
-            binary: qvault-cli.exe
-            archive: qvault-cli-windows-x86_64.zip
-
+    env:
+      RUST_VERSION: ${{ needs.test.outputs.rust_version }}
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - name: Install Rust stable
-        run: rustup toolchain install stable --profile minimal
+      - name: Cache Cargo registry and git sources
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-rust-${{ env.RUST_VERSION }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-rust-${{ env.RUST_VERSION }}-cargo-
 
-      - name: Select Rust stable
-        run: rustup default stable
-
-      - name: Build release binary
-        run: cargo build --release -p qvault-cli --locked
-
-      - name: Stage package
+      - name: Install Rust (${{ env.RUST_VERSION }})
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p dist/qvault-cli
-          cp "target/release/${{ matrix.target.binary }}" dist/qvault-cli/
-          cp README.md USAGE.md LICENSE dist/qvault-cli/
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.3 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+          rustup toolchain install "${RUST_VERSION}" --profile minimal --no-self-update
+          rustup default "${RUST_VERSION}"
+          rustup target add x86_64-unknown-linux-gnu
+          rustup target add x86_64-pc-windows-gnu
+          rustc -vV
 
-      - name: Create tar package
-        if: runner.os != 'Windows'
+      - name: Install Windows cross-linker (MinGW-w64)
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y mingw-w64 zip
+
+      - name: Build release (Linux GNU + Windows GNU)
+        env:
+          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
+        run: |
+          set -euo pipefail
+          cargo build --release -p qvault-cli --locked --target x86_64-unknown-linux-gnu
+          cargo build --release -p qvault-cli --locked --target x86_64-pc-windows-gnu
+
+      - name: Stage archives
         shell: bash
         run: |
           set -euo pipefail
-          tar -czf "${{ matrix.target.archive }}" -C dist qvault-cli
+          V="${RUST_VERSION}"
+          mkdir -p "stage-linux/qvault-cli" "stage-win/qvault-cli"
+          cp "target/x86_64-unknown-linux-gnu/release/qvault-cli" README.md USAGE.md LICENSE "stage-linux/qvault-cli/"
+          cp "target/x86_64-pc-windows-gnu/release/qvault-cli.exe" README.md USAGE.md LICENSE "stage-win/qvault-cli/"
+          tar -czf "qvault-cli-${V}-x86_64-unknown-linux-gnu.tar.gz" -C stage-linux qvault-cli
+          ( cd stage-win && zip -qr "../qvault-cli-${V}-x86_64-pc-windows-gnu.zip" qvault-cli )
 
-      - name: Create zip package
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: Compress-Archive -Path dist/qvault-cli -DestinationPath "${{ matrix.target.archive }}"
-
-      - name: Upload package
+      - name: Upload Linux archive
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: ${{ matrix.target.name }}
-          path: ${{ matrix.target.archive }}
+          name: qvault-cli-linux-x86_64-gnu
+          path: qvault-cli-${{ env.RUST_VERSION }}-x86_64-unknown-linux-gnu.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload Windows archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: qvault-cli-windows-x86_64-gnu
+          path: qvault-cli-${{ env.RUST_VERSION }}-x86_64-pc-windows-gnu.zip
+          if-no-files-found: error
+          retention-days: 30
+
+  build-release-macos:
+    name: Release binaries (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    needs: test
+    env:
+      RUST_VERSION: ${{ needs.test.outputs.rust_version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Apple Silicon (aarch64); primary macOS artifact.
+          - os: macos-latest
+            name: macos-aarch64
+            target: aarch64-apple-darwin
+            binary: qvault-cli
+          # Intel macOS runner (x86_64-apple-darwin).
+          - os: macos-13
+            name: macos-x86_64
+            target: x86_64-apple-darwin
+            binary: qvault-cli
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Cache Cargo registry and git sources
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-rust-${{ env.RUST_VERSION }}-cargo-${{ hashFiles('**/Cargo.lock') }}-${{ matrix.target }}
+          restore-keys: |
+            ${{ runner.os }}-rust-${{ env.RUST_VERSION }}-cargo-
+
+      - name: Install Rust (${{ env.RUST_VERSION }})
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.3 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+          rustup toolchain install "${RUST_VERSION}" --profile minimal --no-self-update
+          rustup default "${RUST_VERSION}"
+          rustup target add "${{ matrix.target }}"
+          rustc -vV
+
+      - name: Build release (native ${{ matrix.target }})
+        run: cargo build --release -p qvault-cli --locked --target "${{ matrix.target }}"
+
+      - name: Stage archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          V="${RUST_VERSION}"
+          T="${{ matrix.target }}"
+          mkdir -p "stage/qvault-cli"
+          cp "target/${T}/release/${{ matrix.binary }}" README.md USAGE.md LICENSE "stage/qvault-cli/"
+          tar -czf "qvault-cli-${V}-${T}.tar.gz" -C stage qvault-cli
+
+      - name: Upload macOS archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: qvault-cli-${{ matrix.name }}
+          path: qvault-cli-${{ env.RUST_VERSION }}-${{ matrix.target }}.tar.gz
           if-no-files-found: error
           retention-days: 30
