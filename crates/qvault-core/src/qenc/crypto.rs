@@ -4,7 +4,9 @@ use crate::aead::{
 };
 use crate::error::{coded, err, QvCode, Result};
 use crate::hash::sha3_512_hex;
-use crate::kdf::{compute_key_commitment, derive_key_with_kmac, verify_key_commitment};
+use crate::kdf::{
+    compute_key_commitment, derive_key_with_kmac, verify_key_commitment, KDF_SALT_SIZE,
+};
 use crate::mlkem::{decapsulate, encapsulate};
 use crate::policy::validate_container_policy_metadata;
 use crate::qenc::header::{build_qenc_header, parse_qenc_header};
@@ -44,7 +46,7 @@ pub struct EncryptQencOptions {
     pub timestamp: Option<String>,
     pub encapsulation_seed: Option<[u8; 32]>,
     pub container_nonce: Option<[u8; 12]>,
-    pub kdf_salt: Option<[u8; 16]>,
+    pub kdf_salt: Option<[u8; KDF_SALT_SIZE]>,
 }
 
 pub fn encrypt_qenc(

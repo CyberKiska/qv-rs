@@ -1,5 +1,6 @@
 use crate::bytes::bytes_equal;
 use crate::error::{err, Result};
+use crate::kdf::KDF_SALT_SIZE;
 use crate::qenc::metadata::{parse_qenc_metadata_bytes, QencMetadata};
 
 pub const MAGIC: &[u8; 4] = b"QVv1";
@@ -12,7 +13,7 @@ pub struct QencHeader {
     pub offset: usize,
     pub encapsulated_key: Vec<u8>,
     pub container_nonce: [u8; 12],
-    pub kdf_salt: [u8; 16],
+    pub kdf_salt: [u8; KDF_SALT_SIZE],
     pub meta_bytes: Vec<u8>,
     pub metadata: QencMetadata,
     pub stored_key_commitment: [u8; 32],
@@ -21,7 +22,7 @@ pub struct QencHeader {
 pub fn build_qenc_header(
     encapsulated_key: &[u8],
     container_nonce: &[u8; 12],
-    kdf_salt: &[u8; 16],
+    kdf_salt: &[u8; KDF_SALT_SIZE],
     meta_bytes: &[u8],
     key_commitment: &[u8; 32],
 ) -> Result<Vec<u8>> {
@@ -33,7 +34,7 @@ pub fn build_qenc_header(
     }
 
     let mut header = Vec::with_capacity(
-        MAGIC.len() + 4 + encapsulated_key.len() + 12 + 16 + 2 + meta_bytes.len() + 32,
+        MAGIC.len() + 4 + encapsulated_key.len() + 12 + KDF_SALT_SIZE + 2 + meta_bytes.len() + 32,
     );
     header.extend_from_slice(MAGIC);
     header.extend_from_slice(&(encapsulated_key.len() as u32).to_be_bytes());
@@ -78,7 +79,7 @@ pub fn parse_qenc_header(container_bytes: &[u8]) -> Result<QencHeader> {
     let encapsulated_key = container_bytes[offset..offset + key_len].to_vec();
     offset += key_len;
 
-    if offset + 12 + 16 + 2 > container_bytes.len() {
+    if offset + 12 + KDF_SALT_SIZE + 2 > container_bytes.len() {
         return Err(err("Incomplete container: header is truncated."));
     }
 
@@ -86,9 +87,9 @@ pub fn parse_qenc_header(container_bytes: &[u8]) -> Result<QencHeader> {
     container_nonce.copy_from_slice(&container_bytes[offset..offset + 12]);
     offset += 12;
 
-    let mut kdf_salt = [0u8; 16];
-    kdf_salt.copy_from_slice(&container_bytes[offset..offset + 16]);
-    offset += 16;
+    let mut kdf_salt = [0u8; KDF_SALT_SIZE];
+    kdf_salt.copy_from_slice(&container_bytes[offset..offset + KDF_SALT_SIZE]);
+    offset += KDF_SALT_SIZE;
 
     let meta_len = read_u16(container_bytes, &mut offset, "metadata length")? as usize;
     if meta_len == 0 || meta_len > 4096 {

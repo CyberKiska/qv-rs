@@ -8,8 +8,12 @@ use crate::error::{err, Result};
 use crate::policy::build_policy_metadata_fields;
 
 pub const FORMAT_VERSION: &str = "QVv1-5-0";
+pub const KEM_ALG_ID_ML_KEM_1024: &str = "ML-KEM-1024";
+pub const KDF_ALG_ID_KMAC256: &str = "KMAC256";
+pub const AEAD_ALG_ID_AES_256_GCM: &str = "AES-256-GCM";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DomainStrings {
     pub kdf: String,
     pub iv: String,
@@ -18,6 +22,7 @@ pub struct DomainStrings {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct QencMetadata {
     #[serde(rename = "KEM", skip_serializing_if = "Option::is_none")]
     pub kem: Option<String>,
@@ -59,7 +64,8 @@ pub struct QencMetadata {
 }
 
 pub fn parse_qenc_metadata_bytes(bytes: &[u8]) -> Result<QencMetadata> {
-    let metadata: QencMetadata = serde_json::from_slice(bytes)
+    let value = crate::manifest::strict_json::parse_json_bytes_strict(bytes)?;
+    let metadata: QencMetadata = serde_json::from_value(value)
         .map_err(|error| err(format!("Invalid metadata JSON: {error}")))?;
     validate_qenc_metadata(&metadata)?;
     Ok(metadata)
@@ -89,9 +95,9 @@ pub fn build_qenc_metadata(
     };
 
     let metadata = QencMetadata {
-        kem: Some("ML-KEM-1024".to_string()),
-        kdf: Some("KMAC256".to_string()),
-        aead: Some("AES-256-GCM".to_string()),
+        kem: Some(KEM_ALG_ID_ML_KEM_1024.to_string()),
+        kdf: Some(KDF_ALG_ID_KMAC256.to_string()),
+        aead: Some(AEAD_ALG_ID_AES_256_GCM.to_string()),
         aead_mode: aead_mode.to_string(),
         iv_strategy: iv_strategy.to_string(),
         fmt: FORMAT_VERSION.to_string(),
@@ -125,6 +131,9 @@ pub fn validate_qenc_metadata(metadata: &QencMetadata) -> Result<()> {
             metadata.fmt
         )));
     }
+    reject_unsupported_optional_alg("KEM", metadata.kem.as_deref(), KEM_ALG_ID_ML_KEM_1024)?;
+    reject_unsupported_optional_alg("KDF", metadata.kdf.as_deref(), KDF_ALG_ID_KMAC256)?;
+    reject_unsupported_optional_alg("AEAD", metadata.aead.as_deref(), AEAD_ALG_ID_AES_256_GCM)?;
     if metadata.aead_mode.is_empty() {
         return Err(err("Invalid metadata: missing aead_mode"));
     }
@@ -217,6 +226,17 @@ pub fn validate_qenc_metadata(metadata: &QencMetadata) -> Result<()> {
     }
     if metadata.has_key_commitment != true {
         return Err(err("Invalid metadata: hasKeyCommitment must be true"));
+    }
+    Ok(())
+}
+
+fn reject_unsupported_optional_alg(field: &str, value: Option<&str>, expected: &str) -> Result<()> {
+    if let Some(value) = value {
+        if value != expected {
+            return Err(err(format!(
+                "Unsupported {field}: expected {expected}, got {value}"
+            )));
+        }
     }
     Ok(())
 }

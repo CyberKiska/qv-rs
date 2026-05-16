@@ -7,6 +7,7 @@ use crate::hash::sha3_256;
 use crate::qenc::metadata::DomainStrings;
 
 pub const AES_KEY_SIZE: usize = 32;
+pub const KDF_SALT_SIZE: usize = 16;
 pub const KMAC256_DEFAULT_DKLEN: usize = 32;
 
 #[derive(Zeroize, ZeroizeOnDrop)]
@@ -39,6 +40,9 @@ pub fn derive_key_with_kmac(
     meta_bytes: &[u8],
     domain_strings: &DomainStrings,
 ) -> Result<DerivedKeys> {
+    if salt.len() != KDF_SALT_SIZE {
+        return Err(err(format!("KMAC KDF salt must be {KDF_SALT_SIZE} bytes")));
+    }
     if domain_strings.kdf.is_empty() {
         return Err(err("KMAC KDF customization domain is required"));
     }
@@ -47,6 +51,15 @@ pub fn derive_key_with_kmac(
     }
     if domain_strings.kiv.is_empty() {
         return Err(err("KMAC Kiv customization domain is required"));
+    }
+    if domain_strings.kdf == domain_strings.kenc
+        || domain_strings.kdf == domain_strings.kiv
+        || domain_strings.kdf == domain_strings.iv
+        || domain_strings.kenc == domain_strings.kiv
+        || domain_strings.kenc == domain_strings.iv
+        || domain_strings.kiv == domain_strings.iv
+    {
+        return Err(err("KMAC customization domains must be distinct"));
     }
 
     let mut message = Vec::with_capacity(salt.len() + meta_bytes.len());
