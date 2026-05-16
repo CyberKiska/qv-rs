@@ -1,4 +1,4 @@
-# CI: tests on Linux; release binaries — Linux + Windows (cross from Ubuntu), macOS ARM + x86_64 (native).
+# CI: fast tests on every PR; cached supply-chain checks after tests; release binaries only on non-PR pushes.
 
 name: CI
 
@@ -14,7 +14,9 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  CARGO_DENY_VERSION: 0.19.5
+  CARGO_DENY_VERSION: 0.19.6
+  # SHA-256 of EmbarkStudios/cargo-deny asset `cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl.tar.gz` (update when bumping CARGO_DENY_VERSION).
+  CARGO_DENY_LINUX_MUSL_SHA256: 0021d321c781f0159a150ca308859ad93ccce64a887b22ad2e129f096a8a2c07
 
 jobs:
   test:
@@ -64,10 +66,70 @@ jobs:
       - name: Test workspace
         run: cargo test --workspace --locked
 
-      - name: Install cargo-deny
+  dependency-integrity:
+    name: Supply chain (ubuntu-latest)
+    runs-on: ubuntu-latest
+    needs: test
+    env:
+      RUST_VERSION: ${{ needs.test.outputs.rust_version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      # Same key as `test` so this job reuses downloaded crate sources (no second cold download).
+      - name: Cache Cargo registry and git sources
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-rust-${{ env.RUST_VERSION }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-rust-${{ env.RUST_VERSION }}-cargo-
+
+      - name: Cache cargo-deny binary
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ~/.cargo/bin/cargo-deny
+          key: cargo-deny-${{ runner.os }}-${{ env.CARGO_DENY_VERSION }}-${{ env.CARGO_DENY_LINUX_MUSL_SHA256 }}
+
+      - name: Install Rust (${{ env.RUST_VERSION }})
+        shell: bash
         run: |
           set -euo pipefail
-          cargo install cargo-deny --version "${CARGO_DENY_VERSION}" --locked
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.3 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+          rustup toolchain install "${RUST_VERSION}" --profile minimal --no-self-update
+          rustup default "${RUST_VERSION}"
+          rustc -vV
+          cargo -vV
+
+      - name: Install cargo-deny (pinned musl binary, no cargo install)
+        shell: bash
+        env:
+          V: ${{ env.CARGO_DENY_VERSION }}
+          EXPECT_SHA: ${{ env.CARGO_DENY_LINUX_MUSL_SHA256 }}
+        run: |
+          set -euo pipefail
+          cargo_deny="${HOME}/.cargo/bin/cargo-deny"
+          if [[ -x "${cargo_deny}" ]]; then
+            "${cargo_deny}" --version
+            exit 0
+          fi
+          base="https://github.com/EmbarkStudios/cargo-deny/releases/download/${V}"
+          name="cargo-deny-${V}-x86_64-unknown-linux-musl"
+          tgz="${name}.tar.gz"
+          mkdir -p "${HOME}/.cargo/bin"
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "${tmp}"' EXIT
+          cd "${tmp}"
+          curl -fsSL --proto '=https' --tlsv1.2 "${base}/${tgz}" -o "${tgz}"
+          echo "${EXPECT_SHA}  ${tgz}" | sha256sum -c -
+          tar -xzf "${tgz}"
+          install -m 0755 "${name}/cargo-deny" "${cargo_deny}"
+          "${cargo_deny}" --version
 
       - name: Deny duplicate normal dependencies
         run: cargo tree --workspace --locked --edges normal --duplicates
@@ -78,7 +140,7 @@ jobs:
   build-release-linux-windows:
     name: Release binaries (Linux + Windows, ubuntu-latest)
     runs-on: ubuntu-latest
-    needs: test
+    needs: [test, dependency-integrity]
     if: github.event_name != 'pull_request'
     env:
       RUST_VERSION: ${{ needs.test.outputs.rust_version }}
@@ -154,7 +216,7 @@ jobs:
   build-release-macos:
     name: Release binaries (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
-    needs: test
+    needs: [test, dependency-integrity]
     if: github.event_name != 'pull_request'
     env:
       RUST_VERSION: ${{ needs.test.outputs.rust_version }}
