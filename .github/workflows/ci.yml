@@ -14,6 +14,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_DENY_VERSION: 0.19.5
 
 jobs:
   test:
@@ -60,11 +61,19 @@ jobs:
           rustc -vV
           cargo -vV
 
-      - name: Check workspace
-        run: cargo check --workspace --locked
-
       - name: Test workspace
         run: cargo test --workspace --locked
+
+      - name: Install cargo-deny
+        run: |
+          set -euo pipefail
+          cargo install cargo-deny --version "${CARGO_DENY_VERSION}" --locked
+
+      - name: Deny duplicate normal dependencies
+        run: cargo tree --workspace --locked --edges normal --duplicates
+
+      - name: Deny advisories (RustSec) and disallowed sources
+        run: cargo deny check advisories sources
 
   build-release-linux-windows:
     name: Release binaries (Linux + Windows, ubuntu-latest)

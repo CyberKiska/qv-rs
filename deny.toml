@@ -1,0 +1,11 @@
+[advisories]
+# RustSec advisory DB (explicit URL; same corpus as the RustSec ecosystem tools).
+db-urls = ["https://github.com/RustSec/advisory-db"]
+yanked = "deny"
+ignore = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

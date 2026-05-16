@@ -1,4 +1,3 @@
-use time::macros::format_description;
 use time::OffsetDateTime;
 
 use crate::error::{err, Result};
@@ -180,12 +179,15 @@ pub fn current_bundle_filename() -> String {
 }
 
 pub fn bundle_filename_for_time(time: OffsetDateTime) -> String {
-    let timestamp = time
-        .format(&format_description!(
-            "[year]-[month]-[day]T[hour]-[minute]-[second]"
-        ))
-        .expect("valid bundle timestamp format");
-    format!("bundle-{timestamp}.qvpack")
+    format!(
+        "bundle-{:04}-{:02}-{:02}T{:02}-{:02}-{:02}.qvpack",
+        time.year(),
+        u8::from(time.month()),
+        time.day(),
+        time.hour(),
+        time.minute(),
+        time.second()
+    )
 }
 
 #[cfg(test)]
@@ -194,7 +196,7 @@ mod tests {
         build_bundle_payload, bundle_filename_for_time, is_bundle_payload, parse_bundle_payload,
         BundleEntryRef,
     };
-    use time::macros::datetime;
+    use time::{Date, Month, Time};
 
     #[test]
     fn build_and_parse_bundle_round_trip() {
@@ -234,7 +236,9 @@ mod tests {
 
     #[test]
     fn bundle_filename_matches_js_shape() {
-        let name = bundle_filename_for_time(datetime!(2026-03-07 09:08:07 UTC));
+        let date = Date::from_calendar_date(2026, Month::March, 7).expect("valid test date");
+        let time = Time::from_hms(9, 8, 7).expect("valid test time");
+        let name = bundle_filename_for_time(date.with_time(time).assume_utc());
         assert_eq!(name, "bundle-2026-03-07T09-08-07.qvpack");
     }
 }

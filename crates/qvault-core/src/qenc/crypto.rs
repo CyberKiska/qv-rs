@@ -16,7 +16,6 @@ use crate::qenc::payload::{
 };
 use crate::qenc::QencHeader;
 use crate::rng::fill_random;
-use time::macros::format_description;
 use time::OffsetDateTime;
 use zeroize::Zeroize;
 
@@ -227,11 +226,17 @@ pub fn decrypt_qenc(container_bytes: &[u8], secret_key: &[u8]) -> Result<Decrypt
 }
 
 pub fn current_iso8601_utc_millis() -> String {
-    OffsetDateTime::now_utc()
-        .format(&format_description!(
-            "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
-        ))
-        .expect("valid JS-compatible timestamp format")
+    let time = OffsetDateTime::now_utc();
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+        time.year(),
+        u8::from(time.month()),
+        time.day(),
+        time.hour(),
+        time.minute(),
+        time.second(),
+        time.millisecond()
+    )
 }
 
 fn decrypt_per_chunk(
