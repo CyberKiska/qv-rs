@@ -12,6 +12,7 @@ pub mod mlkem;
 pub mod policy;
 pub mod qcont;
 pub mod qenc;
+mod rng;
 pub mod sss;
 pub mod test_support;
 

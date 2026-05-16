@@ -13,6 +13,7 @@ use crate::qenc::payload::{
     unwrap_wrapped_payload, wrap_wrapped_payload, WrappedPayloadPrivateMetadata,
 };
 use crate::qenc::QencHeader;
+use crate::rng::fill_random;
 use time::macros::format_description;
 use time::OffsetDateTime;
 use zeroize::Zeroize;
@@ -350,11 +351,6 @@ fn encrypt_per_chunk(
 
 fn random_array<const N: usize>() -> Result<[u8; N]> {
     let mut bytes = [0u8; N];
-    getrandom::getrandom(&mut bytes).map_err(|error| {
-        coded(
-            QvCode::EntropyFailed,
-            format!("OS randomness is unavailable: {error}"),
-        )
-    })?;
+    fill_random(&mut bytes)?;
     Ok(bytes)
 }

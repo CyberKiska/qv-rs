@@ -284,8 +284,7 @@ struct QsigFixture {
 }
 
 fn build_qsig_fixture(message: &[u8]) -> Result<QsigFixture> {
-    let (public_key, private_key) =
-        fips204::ml_dsa_87::KG::try_keygen().map_err(|error| anyhow!(error))?;
+    let (public_key, private_key) = fips204::ml_dsa_87::KG::keygen_from_seed(&[0x87; 32]);
     let public_key = public_key.into_bytes().to_vec();
     let file_hash = sha3_512(message);
     let fingerprint = sha3_256(&public_key);

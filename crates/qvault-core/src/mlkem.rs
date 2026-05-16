@@ -2,6 +2,7 @@ use fips203::ml_kem_1024;
 use fips203::traits::{Decaps, Encaps, KeyGen, SerDes};
 
 use crate::error::{coded, err, QvCode, Result};
+use crate::rng::SystemRng;
 
 pub const ML_KEM_1024_PUBLIC_KEY_SIZE: usize = 1568;
 pub const ML_KEM_1024_SECRET_KEY_SIZE: usize = 3168;
@@ -14,7 +15,7 @@ pub fn generate_key_pair(custom_seed: Option<[u8; 64]>) -> Result<(Vec<u8>, Vec<
             seed[..32].try_into().expect("32-byte seed slice"),
             seed[32..].try_into().expect("32-byte seed slice"),
         ),
-        None => ml_kem_1024::KG::try_keygen().map_err(|error| {
+        None => ml_kem_1024::KG::try_keygen_with_rng(&mut SystemRng).map_err(|error| {
             coded(
                 QvCode::EntropyFailed,
                 format!("ML-KEM-1024 key generation failed: {error}"),
@@ -45,7 +46,7 @@ pub fn encapsulate(public_key: &[u8], seed: Option<[u8; 32]>) -> Result<(Vec<u8>
 
     let (shared_secret, ciphertext) = match seed {
         Some(seed) => encaps_key.encaps_from_seed(&seed),
-        None => encaps_key.try_encaps().map_err(|error| {
+        None => encaps_key.try_encaps_with_rng(&mut SystemRng).map_err(|error| {
             coded(
                 QvCode::EntropyFailed,
                 format!("ML-KEM-1024 encapsulation failed: {error}"),
