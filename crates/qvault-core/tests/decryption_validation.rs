@@ -1,11 +1,13 @@
 use anyhow::Result;
 use serde_json::Value;
 
+mod common;
+
+use common::fixtures::{fixture_path, read_fixture_bytes};
 use qvault_core::aead::encrypt_chunk;
 use qvault_core::kdf::{compute_key_commitment, derive_key_with_kmac};
 use qvault_core::qenc::payload::{wrap_wrapped_payload, WrappedPayloadPrivateMetadata};
 use qvault_core::qenc::{build_qenc_metadata, serialize_qenc_metadata, CHUNK_SIZE};
-use qvault_core::test_support::fixtures::{fixture_path, read_fixture_bytes};
 use qvault_core::{
     build_qenc_header, decrypt_qenc, encapsulate, generate_key_pair, parse_qenc_header,
 };

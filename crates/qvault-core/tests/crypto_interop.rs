@@ -1,6 +1,9 @@
 use anyhow::Result;
 use serde_json::Value;
 
+mod common;
+
+use common::fixtures::{fixture_path, read_fixture_bytes};
 use qvault_core::aead::{derive_chunk_iv_from_k, PerChunkIvParams};
 use qvault_core::bytes::from_hex;
 use qvault_core::generate_key_pair;
@@ -8,8 +11,12 @@ use qvault_core::hash::sha3_512_hex;
 use qvault_core::kdf::derive_key_with_kmac;
 use qvault_core::qenc::metadata::parse_qenc_metadata_bytes;
 use qvault_core::qenc::CHUNK_SIZE;
-use qvault_core::test_support::fixtures::{fixture_path, read_fixture_bytes, read_fixture_json};
 use qvault_core::{decapsulate, decrypt_qenc, encrypt_qenc, parse_qenc_header, EncryptQencOptions};
+
+fn read_fixture_json(path: impl AsRef<std::path::Path>) -> Result<Value> {
+    let bytes = read_fixture_bytes(path)?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
 
 #[test]
 fn seeded_fips203_keygen_matches_single_small_fixture() -> Result<()> {

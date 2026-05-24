@@ -1,9 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde::de::DeserializeOwned;
-
-use crate::error::Result;
+use qvault_core::Result;
 
 /// Cross-language `.qenc` interop vectors committed under `crates/qvault-core/tests/data/`.
 pub fn fixtures_root() -> PathBuf {
@@ -16,9 +14,4 @@ pub fn fixture_path(name: &str) -> PathBuf {
 
 pub fn read_fixture_bytes(path: impl AsRef<Path>) -> Result<Vec<u8>> {
     Ok(fs::read(path)?)
-}
-
-pub fn read_fixture_json<T: DeserializeOwned>(path: impl AsRef<Path>) -> Result<T> {
-    let bytes = fs::read(path)?;
-    Ok(serde_json::from_slice(&bytes)?)
 }
