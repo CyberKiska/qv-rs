@@ -42,6 +42,7 @@ mod successor_main {
         parse_qenc_header, EncryptQencOptions,
     };
     use serde_json::Value;
+    use zeroize::Zeroizing;
 
     #[derive(Parser)]
     #[command(name = "qvault-cli")]
@@ -485,7 +486,8 @@ mod successor_main {
             ctx,
         )?;
 
-        let (public_key, mut private_key) = generate_key_pair(None)?;
+        let (public_key, private_key) = generate_key_pair(None)?;
+        let private_key = Zeroizing::new(private_key);
         write_file_checked(&public_key_path, &public_key, ctx)?;
         write_secret_file_checked(&private_key_path, &private_key, args.force, ctx)?;
 
@@ -515,14 +517,15 @@ mod successor_main {
                 println!("{}", BASE64_STANDARD.encode(&public_key));
             }
         }
-        private_key.fill(0);
         Ok(())
     }
 
     fn run_encrypt(args: EncryptArgs, ctx: CliContext) -> Result<()> {
         validate_optional_filename(args.filename.as_deref())?;
-        let mut plaintext = read_file_checked(&args.input_file, ctx)
-            .with_context(|| format!("failed to read {}", args.input_file.display()))?;
+        let plaintext = Zeroizing::new(
+            read_file_checked(&args.input_file, ctx)
+                .with_context(|| format!("failed to read {}", args.input_file.display()))?,
+        );
         let public_key = read_file_checked(&args.public_key, ctx)
             .with_context(|| format!("failed to read {}", args.public_key.display()))?;
         validate_public_key(&public_key)?;
@@ -576,7 +579,6 @@ mod successor_main {
         } else if !ctx.quiet {
             println!("Encrypted file: {}", args.out.display());
         }
-        plaintext.fill(0);
         Ok(())
     }
 
@@ -586,15 +588,18 @@ mod successor_main {
         }
         let qenc_bytes = read_file_checked(&args.input_qenc, ctx)
             .with_context(|| format!("failed to read {}", args.input_qenc.display()))?;
-        let mut private_key = read_file_checked(&args.private_key, ctx)
-            .with_context(|| format!("failed to read {}", args.private_key.display()))?;
+        let private_key = Zeroizing::new(
+            read_file_checked(&args.private_key, ctx)
+                .with_context(|| format!("failed to read {}", args.private_key.display()))?,
+        );
         validate_secret_key(&private_key)?;
         let header = parse_qenc_header(&qenc_bytes)?;
         let mut decrypted = decrypt_qenc(&qenc_bytes, &private_key)?;
+        let file_bytes = Zeroizing::new(std::mem::take(&mut decrypted.file_bytes));
         let output_path =
             decrypt_output_path(&args, &decrypted.private_metadata.original_filename)?;
         preflight_outputs(std::slice::from_ref(&output_path), args.force, ctx)?;
-        write_file_checked(&output_path, &decrypted.file_bytes, ctx)?;
+        write_file_checked(&output_path, &file_bytes, ctx)?;
 
         if ctx.json {
             let report = serde_json::json!({
@@ -610,13 +615,13 @@ mod successor_main {
                 "chunkSize": header.metadata.chunk_size,
                 "chunkCount": header.metadata.chunk_count,
                 "payloadLength": header.metadata.payload_length,
-                "plaintextLength": decrypted.file_bytes.len(),
+                "plaintextLength": file_bytes.len(),
                 "originalFilename": decrypted.private_metadata.original_filename,
                 "fileHashHex": decrypted.private_metadata.file_hash,
                 "containerHashAlg": "SHA3-512",
                 "containerHashHex": sha3_512_hex(&qenc_bytes),
                 "containerId": Value::Null,
-                "payloadKind": if decrypted.file_bytes.starts_with(b"QVB1") { "qvpack" } else { "file" },
+                "payloadKind": if file_bytes.starts_with(b"QVB1") { "qvpack" } else { "file" },
                 "fileCount": 1,
                 "qvpackExtracted": false,
                 "qvpackEntries": []
@@ -625,8 +630,6 @@ mod successor_main {
         } else if !ctx.quiet {
             println!("Decrypted file: {}", output_path.display());
         }
-        private_key.fill(0);
-        decrypted.file_bytes.fill(0);
         Ok(())
     }
 
@@ -636,10 +639,12 @@ mod successor_main {
             bail!("split accepts --archive-id or --archive-id-random, not both");
         }
 
-        let mut qenc_bytes = read_file_checked(&args.input_qenc, ctx)
+        let qenc_bytes = read_file_checked(&args.input_qenc, ctx)
             .with_context(|| format!("failed to read {}", args.input_qenc.display()))?;
-        let mut private_key = read_file_checked(&args.private_key, ctx)
-            .with_context(|| format!("failed to read {}", args.private_key.display()))?;
+        let private_key = Zeroizing::new(
+            read_file_checked(&args.private_key, ctx)
+                .with_context(|| format!("failed to read {}", args.private_key.display()))?,
+        );
         validate_secret_key(&private_key)?;
 
         let archive_id_random_bytes = match args.archive_id_random.as_deref() {
@@ -749,8 +754,6 @@ mod successor_main {
             println!("Output directory: {}", out_dir.display());
         }
 
-        qenc_bytes.fill(0);
-        private_key.fill(0);
         Ok(())
     }
 
@@ -920,7 +923,7 @@ mod successor_main {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let restored = restore_qvqcont7_from_shards(
+        let mut restored = restore_qvqcont7_from_shards(
             &shards,
             &RestoreQvqcont7Options {
                 selection: RestoreQvqcont7Selection {
@@ -942,6 +945,7 @@ mod successor_main {
                 enforce_policy: true,
             },
         )?;
+        let restored_priv_key = Zeroizing::new(std::mem::take(&mut restored.priv_key));
 
         let variant_ack_required = restored.mixed_lifecycle_bundle_variants_within_selected_cohort;
         let policy_ok = restored.authenticity.policy.satisfied;
@@ -1022,7 +1026,7 @@ mod successor_main {
         )?;
         write_file_checked(&output_qenc, &restored.qenc_bytes, ctx)
             .with_context(|| format!("failed to write {}", output_qenc.display()))?;
-        write_secret_file_checked(&output_secret_key, &restored.priv_key, args.force, ctx)
+        write_secret_file_checked(&output_secret_key, &restored_priv_key, args.force, ctx)
             .with_context(|| format!("failed to write {}", output_secret_key.display()))?;
 
         if ctx.json {
@@ -1406,6 +1410,7 @@ mod successor_main {
         let mut checks = Vec::new();
         if include_crypto {
             let (public_key, private_key) = generate_key_pair(None)?;
+            let private_key = Zeroizing::new(private_key);
             validate_public_key(&public_key)?;
             validate_secret_key(&private_key)?;
             checks.push(serde_json::json!({ "name": "ml-kem-keygen", "ok": true }));
