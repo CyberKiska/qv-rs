@@ -1,0 +1,58 @@
+[package]
+name = "qvault-fuzz"
+version = "0.0.1"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[dependencies]
+base64 = "0.22.1"
+libfuzzer-sys = "0.4"
+qvault-core = { path = "../crates/qvault-core" }
+serde_json = "1.0.149"
+
+[[bin]]
+name = "fuzz_qsig"
+path = "fuzz_targets/fuzz_qsig.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_pqpk"
+path = "fuzz_targets/fuzz_pqpk.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_qenc_header"
+path = "fuzz_targets/fuzz_qenc_header.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_qvqcont7_shard"
+path = "fuzz_targets/fuzz_qvqcont7_shard.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_lifecycle_bundle"
+path = "fuzz_targets/fuzz_lifecycle_bundle.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_restore_selection"
+path = "fuzz_targets/fuzz_restore_selection.rs"
+test = false
+doc = false
+bench = false
