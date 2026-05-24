@@ -9,12 +9,12 @@ fn tables() -> &'static ([u8; 512], [u8; 256]) {
         let mut log = [0u8; 256];
         exp[0] = 1;
         let mut x = 1u16;
-        for i in 1..255 {
+        for (i, slot) in exp.iter_mut().enumerate().take(255).skip(1) {
             x <<= 1;
             if (x & 256) != 0 {
                 x ^= 256 | 0x1d;
             }
-            exp[i] = x as u8;
+            *slot = x as u8;
             log[x as usize] = i as u8;
         }
         for i in 255..512 {
@@ -111,8 +111,8 @@ impl Polynomial {
 fn generator(n_ec_symbols: usize) -> Result<Polynomial> {
     let mut g = Polynomial::new(vec![1])?;
     let (exp, _) = tables();
-    for i in 0..n_ec_symbols {
-        g = g.mul(&Polynomial::new(vec![1, exp[i]])?)?;
+    for item in exp.iter().take(n_ec_symbols) {
+        g = g.mul(&Polynomial::new(vec![1, *item])?)?;
     }
     Ok(g)
 }
@@ -258,10 +258,10 @@ pub fn split(
     while offset < ints.len() {
         let end = (offset + input_size).min(ints.len());
         let encoded = encode(&ints[offset..end], n_ec)?;
-        for j in 0..n {
+        for (j, output) in outputs.iter_mut().enumerate().take(n) {
             let start = j * symbol_size;
             let frag_end = start + symbol_size;
-            outputs[j].extend_from_slice(&encoded[start..frag_end]);
+            output.extend_from_slice(&encoded[start..frag_end]);
         }
         offset += input_size;
     }

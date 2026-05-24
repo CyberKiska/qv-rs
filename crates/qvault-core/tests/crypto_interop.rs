@@ -1,13 +1,13 @@
 use anyhow::Result;
 use serde_json::Value;
 
-use qvault_core::aead::derive_chunk_iv_from_k;
+use qvault_core::aead::{derive_chunk_iv_from_k, PerChunkIvParams};
 use qvault_core::bytes::from_hex;
 use qvault_core::generate_key_pair;
 use qvault_core::hash::sha3_512_hex;
 use qvault_core::kdf::derive_key_with_kmac;
-use qvault_core::qenc::CHUNK_SIZE;
 use qvault_core::qenc::metadata::parse_qenc_metadata_bytes;
+use qvault_core::qenc::CHUNK_SIZE;
 use qvault_core::test_support::fixtures::{fixture_path, read_fixture_bytes, read_fixture_json};
 use qvault_core::{decapsulate, decrypt_qenc, encrypt_qenc, parse_qenc_header, EncryptQencOptions};
 
@@ -81,10 +81,12 @@ fn rust_chunk_iv_matches_oracle_expectations_vector() -> Result<()> {
         &container_nonce,
         0,
         &metadata.domain_strings.iv,
-        metadata.chunk_count,
-        metadata.max_chunk_count,
-        metadata.counter_bits,
-        &metadata.iv_strategy,
+        PerChunkIvParams {
+            chunk_count: metadata.chunk_count,
+            max_chunk_count: metadata.max_chunk_count,
+            counter_bits: metadata.counter_bits,
+            iv_strategy: &metadata.iv_strategy,
+        },
     )?;
 
     assert_eq!(
@@ -105,7 +107,9 @@ fn per_chunk_encrypt_decrypt_roundtrip_with_oracle_seeds() -> Result<()> {
     let seed: [u8; 64] = from_hex(seed_hex)?.try_into().unwrap();
     let (public_key, secret_key) = generate_key_pair(Some(seed))?;
 
-    let payload_len = expectations["payloadLength"].as_u64().expect("payloadLength") as usize;
+    let payload_len = expectations["payloadLength"]
+        .as_u64()
+        .expect("payloadLength") as usize;
     assert!(
         payload_len > CHUNK_SIZE,
         "fixture must exercise per-chunk AEAD (payload > CHUNK_SIZE)"

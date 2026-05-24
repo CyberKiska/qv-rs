@@ -1,6 +1,6 @@
 use crate::aead::{
     assert_per_chunk_nonce_contract, build_chunk_aad, decrypt_chunk, derive_chunk_iv_from_k,
-    encrypt_chunk,
+    encrypt_chunk, PerChunkIvParams,
 };
 use crate::error::{coded, err, QvCode, Result};
 use crate::hash::sha3_512_hex;
@@ -284,10 +284,12 @@ fn decrypt_per_chunk(
             &parsed.container_nonce,
             index as u32,
             &parsed.metadata.domain_strings.iv,
-            Some(chunk_count),
-            parsed.metadata.max_chunk_count,
-            parsed.metadata.counter_bits,
-            &parsed.metadata.iv_strategy,
+            PerChunkIvParams {
+                chunk_count: Some(chunk_count),
+                max_chunk_count: parsed.metadata.max_chunk_count,
+                counter_bits: parsed.metadata.counter_bits,
+                iv_strategy: &parsed.metadata.iv_strategy,
+            },
         )?;
         let aad = build_chunk_aad(&parsed.header, index as u32, plain_len as u32);
         let mut chunk_plaintext = match decrypt_chunk(kenc, chunk_ciphertext, &iv, &aad) {
@@ -344,10 +346,12 @@ fn encrypt_per_chunk(
             container_nonce,
             index as u32,
             &metadata.domain_strings.iv,
-            Some(chunk_count),
-            metadata.max_chunk_count,
-            metadata.counter_bits,
-            &metadata.iv_strategy,
+            PerChunkIvParams {
+                chunk_count: Some(chunk_count),
+                max_chunk_count: metadata.max_chunk_count,
+                counter_bits: metadata.counter_bits,
+                iv_strategy: &metadata.iv_strategy,
+            },
         )?;
         let aad = build_chunk_aad(header, index as u32, plain_len as u32);
         let cipher_chunk = encrypt_chunk(kenc, plain_chunk, &iv, &aad)?;

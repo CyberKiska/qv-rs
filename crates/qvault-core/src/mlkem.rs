@@ -11,10 +11,13 @@ pub const ML_KEM_1024_SHARED_SECRET_SIZE: usize = 32;
 
 pub fn generate_key_pair(custom_seed: Option<[u8; 64]>) -> Result<(Vec<u8>, Vec<u8>)> {
     let (encaps_key, decaps_key) = match custom_seed {
-        Some(seed) => ml_kem_1024::KG::keygen_from_seed(
-            seed[..32].try_into().expect("32-byte seed slice"),
-            seed[32..].try_into().expect("32-byte seed slice"),
-        ),
+        Some(seed) => {
+            let mut d = [0u8; 32];
+            let mut z = [0u8; 32];
+            d.copy_from_slice(&seed[..32]);
+            z.copy_from_slice(&seed[32..]);
+            ml_kem_1024::KG::keygen_from_seed(d, z)
+        }
         None => ml_kem_1024::KG::try_keygen_with_rng(&mut SystemRng).map_err(|error| {
             coded(
                 QvCode::EntropyFailed,
@@ -46,12 +49,14 @@ pub fn encapsulate(public_key: &[u8], seed: Option<[u8; 32]>) -> Result<(Vec<u8>
 
     let (shared_secret, ciphertext) = match seed {
         Some(seed) => encaps_key.encaps_from_seed(&seed),
-        None => encaps_key.try_encaps_with_rng(&mut SystemRng).map_err(|error| {
-            coded(
-                QvCode::EntropyFailed,
-                format!("ML-KEM-1024 encapsulation failed: {error}"),
-            )
-        })?,
+        None => encaps_key
+            .try_encaps_with_rng(&mut SystemRng)
+            .map_err(|error| {
+                coded(
+                    QvCode::EntropyFailed,
+                    format!("ML-KEM-1024 encapsulation failed: {error}"),
+                )
+            })?,
     };
 
     Ok((ciphertext.into_bytes().to_vec(), shared_secret.into_bytes()))

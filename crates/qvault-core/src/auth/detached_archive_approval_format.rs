@@ -48,7 +48,9 @@ pub fn is_supported_stellar_signature_document_bytes(bytes: &[u8]) -> bool {
 }
 
 /// Classify detached archive-approval bytes for external `--sig` style inputs.
-pub fn classify_detached_archive_approval_bytes(bytes: &[u8]) -> Result<DetachedArchiveApprovalKind> {
+pub fn classify_detached_archive_approval_bytes(
+    bytes: &[u8],
+) -> Result<DetachedArchiveApprovalKind> {
     if bytes.is_empty() {
         return Err(err("Detached signature bytes are empty"));
     }
@@ -81,8 +83,10 @@ pub fn try_validate_supported_stellar_signature_document(doc: &Value) -> Result<
     let proof_type = trim_nonempty_string(obj.get("proofType"), "stellarSignature.proofType")?;
     let payload_type =
         trim_nonempty_string(obj.get("payloadType"), "stellarSignature.payloadType")?;
-    let signature_scheme =
-        trim_nonempty_string(obj.get("signatureScheme"), "stellarSignature.signatureScheme")?;
+    let signature_scheme = trim_nonempty_string(
+        obj.get("signatureScheme"),
+        "stellarSignature.signatureScheme",
+    )?;
 
     let (required, optional): (&[&str], &[&str]) = match (
         proof_type.as_str(),
@@ -190,10 +194,10 @@ pub fn is_stellar_file_signature_v1_document(value: &Value) -> bool {
         Ok(schema) if schema == "stellar-file-signature/v1" => {}
         _ => return false,
     }
-    match trim_nonempty_string(obj.get("mode"), "mode") {
-        Ok(mode) if mode == "sep53" => true,
-        _ => false,
-    }
+    matches!(
+        trim_nonempty_string(obj.get("mode"), "mode"),
+        Ok(mode) if mode == "sep53"
+    )
 }
 
 /// Proof kind after oracle-style v2 structural validation.

@@ -53,8 +53,8 @@ fn matches_bounded_lower_token(lower: &str, token: &str) -> bool {
             continue;
         }
         let left_ok = start == 0 || !hay[start - 1].is_ascii_lowercase();
-        let right_ok = start + needle.len() == hay.len()
-            || !hay[start + needle.len()].is_ascii_lowercase();
+        let right_ok =
+            start + needle.len() == hay.len() || !hay[start + needle.len()].is_ascii_lowercase();
         if left_ok && right_ok {
             return true;
         }
@@ -189,13 +189,23 @@ mod tests {
     fn infer_complete_matches_js_word_boundaries() {
         let short = minimal_proof_bytes(64);
         let p = parse_open_timestamp_proof(&short, Some("myinitial.ots")).expect("parse");
-        assert!(!p.appears_complete, "substring 'initial' must not imply incomplete");
+        assert!(
+            !p.appears_complete,
+            "substring 'initial' must not imply incomplete"
+        );
 
-        let p = parse_open_timestamp_proof(&short, Some("proof_pending_review.ots")).expect("parse");
-        assert!(!p.appears_complete, "bounded 'pending' implies incomplete-looking proof");
+        let p =
+            parse_open_timestamp_proof(&short, Some("proof_pending_review.ots")).expect("parse");
+        assert!(
+            !p.appears_complete,
+            "bounded 'pending' implies incomplete-looking proof"
+        );
 
         let p = parse_open_timestamp_proof(&short, Some("sig_complete.ots")).expect("parse");
-        assert!(p.appears_complete, "bounded 'complete' implies complete-looking proof");
+        assert!(
+            p.appears_complete,
+            "bounded 'complete' implies complete-looking proof"
+        );
 
         let long = minimal_proof_bytes(1100);
         let p = parse_open_timestamp_proof(&long, Some("neutral-name.ots")).expect("parse");

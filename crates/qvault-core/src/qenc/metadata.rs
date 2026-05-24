@@ -224,7 +224,7 @@ pub fn validate_qenc_metadata(metadata: &QencMetadata) -> Result<()> {
         }
         other => return Err(err(format!("Unsupported AEAD mode: {other}"))),
     }
-    if metadata.has_key_commitment != true {
+    if !metadata.has_key_commitment {
         return Err(err("Invalid metadata: hasKeyCommitment must be true"));
     }
     Ok(())

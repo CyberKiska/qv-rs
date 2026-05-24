@@ -41,8 +41,8 @@ fn tables() -> &'static ([u8; 255], [u8; 256]) {
         let mut exp = [0u8; 255];
         let mut log = [0u8; 256];
         let mut value = 1u8;
-        for i in 0..255 {
-            exp[i] = value;
+        for (i, slot) in exp.iter_mut().enumerate() {
+            *slot = value;
             log[value as usize] = i as u8;
             value = mult_no_lut(value, GENERATOR);
         }
@@ -140,8 +140,8 @@ fn new_coordinates(random: &mut RandomSource<'_>) -> Result<[u8; 255]> {
     let mut coordinates = std::array::from_fn(|i| (i + 1) as u8);
     let mut random_indices = [0u8; 255];
     random.fill(&mut random_indices)?;
-    for i in 0..255 {
-        let j = usize::from(random_indices[i] % 255);
+    for (i, random_index) in random_indices.iter().copied().enumerate() {
+        let j = usize::from(random_index % 255);
         coordinates.swap(i, j);
     }
     Ok(coordinates)
@@ -169,17 +169,16 @@ pub fn split_secret(
     let mut random = RandomSource::new(deterministic_random);
     let x_coordinates = new_coordinates(&mut random)?;
     let mut result = Vec::with_capacity(shares);
-    for i in 0..shares {
+    for x in x_coordinates.iter().copied().take(shares) {
         let mut share = vec![0u8; secret.len() + 1];
-        share[secret.len()] = x_coordinates[i];
+        share[secret.len()] = x;
         result.push(share);
     }
 
     let degree = threshold - 1;
     for (i, byte) in secret.iter().copied().enumerate() {
         let coefficients = new_coefficients(byte, degree, &mut random)?;
-        for j in 0..shares {
-            let x = x_coordinates[j];
+        for (j, x) in x_coordinates.iter().copied().take(shares).enumerate() {
             let y = evaluate(&coefficients, x, degree)?;
             result[j][i] = y;
         }
@@ -227,11 +226,11 @@ pub fn combine_shares<S: AsRef<[u8]>>(shares: &[S]) -> Result<Vec<u8>> {
         x_samples[i] = sample;
     }
 
-    for i in 0..secret_length {
+    for (i, out_byte) in secret.iter_mut().enumerate().take(secret_length) {
         for (j, share) in shares.iter().enumerate() {
             y_samples[j] = share.as_ref()[i];
         }
-        secret[i] = interpolate_polynomial(&x_samples, &y_samples, 0)?;
+        *out_byte = interpolate_polynomial(&x_samples, &y_samples, 0)?;
     }
 
     Ok(secret)
@@ -241,7 +240,7 @@ pub fn calculate_threshold_from_rs(n: usize, k: usize) -> Result<usize> {
     if k < 2 || n <= k {
         return Err(err("Invalid Reed-Solomon parameters"));
     }
-    if (n - k) % 2 != 0 {
+    if !(n - k).is_multiple_of(2) {
         return Err(err("Invalid Reed-Solomon parameters"));
     }
     if n < 5 {

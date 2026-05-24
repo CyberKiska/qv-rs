@@ -20,13 +20,15 @@ fn js_successor_single_example_smoke_parses_and_verifies() -> Result<()> {
     let root = examples_dir().join("single");
     verify_example(
         &root,
-        "file_500kb.archive-state.json",
-        None,
-        "file_500kb.lifecycle-bundle.json",
-        "file_500kb.part1-of-5.qcont",
-        "MLfile_500kb.archive-state.json.qsig",
-        "ML-DSA-65-bdfe1322f762688a.pqpk",
-        "MLfile_500kb.archive-state.json.qsig.ots",
+        ExampleFiles {
+            archive_state: "file_500kb.archive-state.json",
+            cohort_binding: None,
+            lifecycle_bundle: "file_500kb.lifecycle-bundle.json",
+            shard: "file_500kb.part1-of-5.qcont",
+            qsig: "MLfile_500kb.archive-state.json.qsig",
+            pqpk: "ML-DSA-65-bdfe1322f762688a.pqpk",
+            ots: "MLfile_500kb.archive-state.json.qsig.ots",
+        },
     )
 }
 
@@ -35,34 +37,39 @@ fn js_successor_bundle_example_smoke_parses_and_verifies() -> Result<()> {
     let root = examples_dir().join("bundle");
     verify_example(
         &root,
-        "bundle-2026-04-25T20-47-18.qvpack.archive-state.json",
-        Some("bundle-2026-04-25T20-47-18.qvpack.cohort-binding.json"),
-        "bundle-2026-04-25T20-47-18.qvpack.lifecycle-bundle.json",
-        "bundle-2026-04-25T20-47-18.qvpack.part1-of-6.qcont",
-        "MLbundle-2026-04-25T20-47-18.qvpack.archive-state.json.qsig",
-        "ML-DSA-87-fbbb144c1d4072d0.pqpk",
-        "MLbundle-2026-04-25T20-47-18.qvpack.archive-state.json.qsig.ots",
+        ExampleFiles {
+            archive_state: "bundle-2026-04-25T20-47-18.qvpack.archive-state.json",
+            cohort_binding: Some("bundle-2026-04-25T20-47-18.qvpack.cohort-binding.json"),
+            lifecycle_bundle: "bundle-2026-04-25T20-47-18.qvpack.lifecycle-bundle.json",
+            shard: "bundle-2026-04-25T20-47-18.qvpack.part1-of-6.qcont",
+            qsig: "MLbundle-2026-04-25T20-47-18.qvpack.archive-state.json.qsig",
+            pqpk: "ML-DSA-87-fbbb144c1d4072d0.pqpk",
+            ots: "MLbundle-2026-04-25T20-47-18.qvpack.archive-state.json.qsig.ots",
+        },
     )
 }
 
-fn verify_example(
-    root: &Path,
-    archive_state_file: &str,
-    cohort_binding_file: Option<&str>,
-    lifecycle_bundle_file: &str,
-    shard_file: &str,
-    qsig_file: &str,
-    pqpk_file: &str,
-    ots_file: &str,
-) -> Result<()> {
+struct ExampleFiles<'a> {
+    archive_state: &'a str,
+    cohort_binding: Option<&'a str>,
+    lifecycle_bundle: &'a str,
+    shard: &'a str,
+    qsig: &'a str,
+    pqpk: &'a str,
+    ots: &'a str,
+}
+
+fn verify_example(root: &Path, files: ExampleFiles<'_>) -> Result<()> {
+    let archive_state_file = files.archive_state;
     let archive_state_bytes = fs::read(root.join(archive_state_file))?;
     let archive_state = parse_archive_state_descriptor_bytes(&archive_state_bytes)
         .with_context(|| format!("{archive_state_file}: archive-state"))?;
+    let lifecycle_bundle_file = files.lifecycle_bundle;
     let lifecycle_bundle_bytes = fs::read(root.join(lifecycle_bundle_file))?;
     let lifecycle_bundle = parse_lifecycle_bundle_bytes(&lifecycle_bundle_bytes)
         .with_context(|| format!("{lifecycle_bundle_file}: lifecycle-bundle"))?;
 
-    if let Some(cohort_binding_file) = cohort_binding_file {
+    if let Some(cohort_binding_file) = files.cohort_binding {
         let cohort_binding_bytes = fs::read(root.join(cohort_binding_file))?;
         let cohort_binding = parse_cohort_binding_bytes(&cohort_binding_bytes)
             .with_context(|| format!("{cohort_binding_file}: cohort-binding"))?;
@@ -78,6 +85,7 @@ fn verify_example(
         );
     }
 
+    let shard_file = files.shard;
     let shard_bytes = fs::read(root.join(shard_file))?;
     let shard =
         parse_qvqcont7_shard(&shard_bytes).with_context(|| format!("{shard_file}: qcont"))?;
@@ -90,6 +98,8 @@ fn verify_example(
         "{shard_file}: lifecycle-bundle digest"
     );
 
+    let qsig_file = files.qsig;
+    let pqpk_file = files.pqpk;
     let qsig_bytes = fs::read(root.join(qsig_file))?;
     let pqpk_bytes = fs::read(root.join(pqpk_file))?;
     let signature =
@@ -101,6 +111,7 @@ fn verify_example(
         "{qsig_file}: signature is user-pinned"
     );
 
+    let ots_file = files.ots;
     let ots_bytes = fs::read(root.join(ots_file))?;
     let linked = resolve_open_timestamp_target(
         &ots_bytes,

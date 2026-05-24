@@ -35,7 +35,8 @@ fn qcont_v7_schema_corpus_matches_oracle_expectations() -> Result<()> {
             continue;
         }
         let raw = fs::read(entry.path()).with_context(|| format!("read {name}"))?;
-        let fixture: Value = serde_json::from_slice(&raw).with_context(|| format!("{name}: JSON"))?;
+        let fixture: Value =
+            serde_json::from_slice(&raw).with_context(|| format!("{name}: JSON"))?;
         let bytes = fixture_bytes(&fixture).with_context(|| format!("{name}: bytes"))?;
         assert_eq!(
             sha3_512_hex(&bytes),

@@ -28,7 +28,7 @@ impl RngCore for SystemRng {
     fn try_fill_bytes(&mut self, dest: &mut [u8]) -> core::result::Result<(), RngError> {
         fill_random(dest).map_err(|_| {
             NonZeroU32::new(RngError::CUSTOM_START)
-                .expect("rand_core custom error base is nonzero")
+                .unwrap_or(NonZeroU32::MIN)
                 .into()
         })
     }

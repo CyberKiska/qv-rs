@@ -66,7 +66,8 @@ fn corpus_bytes_match_oracle_when_qv_oracle_root_set() {
         let mirror_bytes = fs::read(mirror_path).unwrap();
         let oracle_bytes = fs::read(&oracle_path).unwrap();
         assert_eq!(
-            mirror_bytes, oracle_bytes,
+            mirror_bytes,
+            oracle_bytes,
             "corpus drift: mirror {} differs from oracle {}",
             mirror_path.display(),
             oracle_path.display()

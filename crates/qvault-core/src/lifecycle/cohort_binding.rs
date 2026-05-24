@@ -386,10 +386,7 @@ pub fn validate_cohort_binding_value(value: &Value) -> Result<CohortBinding> {
                             "cohortBinding.bodyDefinition.includes",
                         )?,
                     ),
-                    (
-                        "excludes",
-                        body_definition_excludes,
-                    ),
+                    ("excludes", body_definition_excludes),
                 ]),
             ),
             (

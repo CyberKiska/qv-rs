@@ -919,7 +919,7 @@ mod successor_main {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let restored = match restore_qvqcont7_from_shards(
+        let restored = restore_qvqcont7_from_shards(
             &shards,
             &RestoreQvqcont7Options {
                 selection: RestoreQvqcont7Selection {
@@ -940,13 +940,9 @@ mod successor_main {
                 },
                 enforce_policy: true,
             },
-        ) {
-            Ok(restored) => restored,
-            Err(error) => return Err(error.into()),
-        };
+        )?;
 
-        let variant_ack_required =
-            restored.mixed_lifecycle_bundle_variants_within_selected_cohort;
+        let variant_ack_required = restored.mixed_lifecycle_bundle_variants_within_selected_cohort;
         let policy_ok = restored.authenticity.policy.satisfied;
         let base_ok = restored.qenc_ok && restored.qkey_ok && policy_ok;
         let variant_ok = !variant_ack_required || args.accept_policy_warnings;
@@ -984,7 +980,9 @@ mod successor_main {
                 if would_succeed {
                     println!("Restore dry run succeeded.");
                 } else {
-                    eprintln!("Restore dry run completed without success (see warnings and policy).");
+                    eprintln!(
+                        "Restore dry run completed without success (see warnings and policy)."
+                    );
                 }
                 println!("Archive ID: {}", restored.archive_id);
                 println!("State ID: {}", restored.state_id);
@@ -1076,24 +1074,19 @@ mod successor_main {
         if !args.maintenance_timestamps.is_empty() && args.maintenance_signatures.is_empty() {
             bail!("--maintenance-ots requires at least one --maintenance-sig");
         }
-        let maintenance_signature_imports = load_named_artifacts(&args.maintenance_signatures, ctx)?
-            .into_iter()
-            .map(|artifact| {
-                signature_import(
-                    artifact,
-                    LifecycleSignatureFamily::Maintenance,
-                    None,
-                    None,
-                )
-            })
-            .collect::<Vec<_>>();
+        let maintenance_signature_imports =
+            load_named_artifacts(&args.maintenance_signatures, ctx)?
+                .into_iter()
+                .map(|artifact| {
+                    signature_import(artifact, LifecycleSignatureFamily::Maintenance, None, None)
+                })
+                .collect::<Vec<_>>();
         let maintenance_pq_public_key_file_bytes_list =
             load_named_artifacts(&args.maintenance_pq_public_keys, ctx)?
                 .into_iter()
                 .map(|artifact| artifact.bytes)
                 .collect::<Vec<_>>();
-        let maintenance_timestamps =
-            load_named_artifacts(&args.maintenance_timestamps, ctx)?;
+        let maintenance_timestamps = load_named_artifacts(&args.maintenance_timestamps, ctx)?;
         let predecessor_shards = args
             .shards
             .iter()
@@ -1339,7 +1332,8 @@ mod successor_main {
             },
         )?;
 
-        let required_policy = build_required_policy_report(&authenticity, args.required_policy_level);
+        let required_policy =
+            build_required_policy_report(&authenticity, args.required_policy_level);
         let verify_ok = verify_cli_report_satisfied(&authenticity, required_policy.as_ref());
 
         let detached_summary = if args.include_detached_summary {
@@ -1950,42 +1944,6 @@ mod successor_main {
         }
     }
 
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        #[test]
-        fn qv_code_exit_golden_bytes_match_exit_js() {
-            let mut entries = vec![serde_json::json!({"qvCode":"USAGE","exitCode":2})];
-            for code in [
-                QvCode::VerificationFailed,
-                QvCode::EntropyFailed,
-                QvCode::InvalidFormat,
-                QvCode::KeyRejected,
-                QvCode::AeadFailed,
-                QvCode::NotEnoughShards,
-                QvCode::SignatureImportFailed,
-                QvCode::AmbiguousInputs,
-                QvCode::ReshareContractViolation,
-                QvCode::RestoredIntegrityFailed,
-                QvCode::PolicyNotSatisfied,
-                QvCode::RestoreLifecycleVariantAckRequired,
-            ] {
-                let error: anyhow::Error = coded(code, "fixture").into();
-                entries.push(serde_json::json!({
-                    "qvCode": qv_code_string(&error),
-                    "exitCode": exit_code(&error)
-                }));
-            }
-
-            let bytes = serde_json::to_string(&entries).expect("golden JSON");
-            assert_eq!(
-                bytes,
-                r#"[{"exitCode":2,"qvCode":"USAGE"},{"exitCode":1,"qvCode":"UNEXPECTED"},{"exitCode":3,"qvCode":"ENTROPY_FAILED"},{"exitCode":4,"qvCode":"FORMAT_POLICY_REJECT"},{"exitCode":5,"qvCode":"KEY_REJECTED"},{"exitCode":6,"qvCode":"AEAD_FAILED"},{"exitCode":7,"qvCode":"QUORUM_UNREACHABLE"},{"exitCode":8,"qvCode":"SIGNATURE_IMPORT_FAILED"},{"exitCode":9,"qvCode":"AMBIGUOUS_INPUTS"},{"exitCode":10,"qvCode":"RESHARE_CONTRACT_VIOLATION"},{"exitCode":11,"qvCode":"RESTORED_INTEGRITY_FAILED"},{"exitCode":1,"qvCode":"POLICY_NOT_SATISFIED"},{"exitCode":12,"qvCode":"RESTORE_LIFECYCLE_VARIANT_ACK_REQUIRED"}]"#
-            );
-        }
-    }
-
     fn build_required_policy_report(
         authenticity: &AuthenticityReport,
         required_level: Option<AuthPolicyLevelArg>,
@@ -2021,7 +1979,7 @@ mod successor_main {
         authenticity: &AuthenticityReport,
         required_policy: Option<&Value>,
     ) -> bool {
-        if authenticity.policy.satisfied != true {
+        if !authenticity.policy.satisfied {
             return false;
         }
         let Some(req) = required_policy else {
@@ -2063,5 +2021,41 @@ mod successor_main {
             .find(|arg| commands.contains(&arg.as_str()))
             .map(Value::String)
             .unwrap_or(Value::Null)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn qv_code_exit_golden_bytes_match_exit_js() {
+            let mut entries = vec![serde_json::json!({"qvCode":"USAGE","exitCode":2})];
+            for code in [
+                QvCode::VerificationFailed,
+                QvCode::EntropyFailed,
+                QvCode::InvalidFormat,
+                QvCode::KeyRejected,
+                QvCode::AeadFailed,
+                QvCode::NotEnoughShards,
+                QvCode::SignatureImportFailed,
+                QvCode::AmbiguousInputs,
+                QvCode::ReshareContractViolation,
+                QvCode::RestoredIntegrityFailed,
+                QvCode::PolicyNotSatisfied,
+                QvCode::RestoreLifecycleVariantAckRequired,
+            ] {
+                let error: anyhow::Error = coded(code, "fixture").into();
+                entries.push(serde_json::json!({
+                    "qvCode": qv_code_string(&error),
+                    "exitCode": exit_code(&error)
+                }));
+            }
+
+            let bytes = serde_json::to_string(&entries).expect("golden JSON");
+            assert_eq!(
+                bytes,
+                r#"[{"exitCode":2,"qvCode":"USAGE"},{"exitCode":1,"qvCode":"UNEXPECTED"},{"exitCode":3,"qvCode":"ENTROPY_FAILED"},{"exitCode":4,"qvCode":"FORMAT_POLICY_REJECT"},{"exitCode":5,"qvCode":"KEY_REJECTED"},{"exitCode":6,"qvCode":"AEAD_FAILED"},{"exitCode":7,"qvCode":"QUORUM_UNREACHABLE"},{"exitCode":8,"qvCode":"SIGNATURE_IMPORT_FAILED"},{"exitCode":9,"qvCode":"AMBIGUOUS_INPUTS"},{"exitCode":10,"qvCode":"RESHARE_CONTRACT_VIOLATION"},{"exitCode":11,"qvCode":"RESTORED_INTEGRITY_FAILED"},{"exitCode":1,"qvCode":"POLICY_NOT_SATISFIED"},{"exitCode":12,"qvCode":"RESTORE_LIFECYCLE_VARIANT_ACK_REQUIRED"}]"#
+            );
+        }
     }
 }

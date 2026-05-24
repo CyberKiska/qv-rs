@@ -1,9 +1,7 @@
 use serde_json::Value;
 use zeroize::Zeroize;
 
-use super::attach::{
-    import_maintenance_evidence_for_new_transition, LifecycleSignatureImport,
-};
+use super::attach::{import_maintenance_evidence_for_new_transition, LifecycleSignatureImport};
 use crate::auth::{AuthPolicyLevel, NamedBinaryArtifact};
 use crate::error::{coded, err, QvCode, Result};
 use crate::lifecycle::{
@@ -248,7 +246,7 @@ fn validate_reshare_params(params: ReshareSameStateParams) -> Result<()> {
         ));
     }
     let parity = params.n - params.k;
-    if parity % 2 != 0 {
+    if !parity.is_multiple_of(2) {
         return Err(coded(
             QvCode::ReshareContractViolation,
             "Invalid reshare parameters: parity must be even",

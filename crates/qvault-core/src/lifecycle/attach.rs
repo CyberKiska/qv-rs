@@ -235,7 +235,7 @@ pub fn attach_lifecycle_bundle(
         imported_public_keys.extend(imported.public_keys);
         imported_signatures
             .get_mut(import.signature_family.attachment_field())
-            .expect("known signature family")
+            .ok_or_else(|| err("Internal lifecycle signature family map is missing"))?
             .push(imported.signature);
     }
 
@@ -273,7 +273,7 @@ pub fn attach_lifecycle_bundle(
             )?,
             imported_signatures
                 .get(field)
-                .expect("known signature field"),
+                .ok_or_else(|| err("Internal lifecycle signature field map is missing"))?,
         )?;
         set_object_field(&mut attachments, field, Value::Array(merged))?;
     }
@@ -396,7 +396,9 @@ fn resolve_attach_context<'a>(
                 .lifecycle_bundle_variants
                 .values()
                 .next()
-                .expect("single variant");
+                .ok_or_else(|| {
+                    err("Selected successor shards contain no lifecycle-bundle bytes")
+                })?;
             parse_lifecycle_bundle_bytes(bytes)?
         } else {
             return Err(err(
@@ -1125,7 +1127,9 @@ pub fn import_maintenance_evidence_for_new_transition(
             &label,
             &import.bytes,
             &pins,
-            expected_ed25519_signer.map(str::trim).filter(|s| !s.is_empty()),
+            expected_ed25519_signer
+                .map(str::trim)
+                .filter(|s| !s.is_empty()),
         )?;
         public_keys_out.extend(imported.public_keys);
         signatures_out.push(imported.signature);
@@ -1278,12 +1282,8 @@ fn attachment_id(prefix: &str, bytes: &[u8]) -> String {
     format!("{prefix}-{}", &sha3_512_hex(bytes)[..16])
 }
 
-fn signature_attachment_id(format: &str, bytes: &[u8]) -> String {
-    let digest = if format == "stellar-sig" {
-        sha3_512_hex(bytes)
-    } else {
-        sha3_512_hex(bytes)
-    };
+fn signature_attachment_id(_format: &str, bytes: &[u8]) -> String {
+    let digest = sha3_512_hex(bytes);
     format!("sig-{}", &digest[..16])
 }
 

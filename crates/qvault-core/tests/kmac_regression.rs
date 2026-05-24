@@ -1,8 +1,8 @@
 use anyhow::Result;
 
 use qvault_core::aead::{
-    derive_chunk_iv_from_k, IV_STRATEGY_KMAC_PREFIX64_CTR32_V3, NONCE_COUNTER_BITS_U32,
-    NONCE_MAX_CHUNK_COUNT_U32,
+    derive_chunk_iv_from_k, PerChunkIvParams, IV_STRATEGY_KMAC_PREFIX64_CTR32_V3,
+    NONCE_COUNTER_BITS_U32, NONCE_MAX_CHUNK_COUNT_U32,
 };
 use qvault_core::kdf::kmac256;
 
@@ -37,10 +37,12 @@ fn derive_chunk_iv_matches_qv_hotfix_vector() -> Result<()> {
         &container_nonce,
         7,
         "quantum-vault:chunk-iv:v2",
-        Some(16),
-        NONCE_MAX_CHUNK_COUNT_U32,
-        NONCE_COUNTER_BITS_U32,
-        IV_STRATEGY_KMAC_PREFIX64_CTR32_V3,
+        PerChunkIvParams {
+            chunk_count: Some(16),
+            max_chunk_count: NONCE_MAX_CHUNK_COUNT_U32,
+            counter_bits: NONCE_COUNTER_BITS_U32,
+            iv_strategy: IV_STRATEGY_KMAC_PREFIX64_CTR32_V3,
+        },
     )?;
 
     assert_eq!(hex::encode(iv), "1a0f9d63bb6bf37300000007");

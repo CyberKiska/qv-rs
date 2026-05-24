@@ -30,6 +30,8 @@ use crate::qenc::{build_qenc_header, parse_qenc_header, parse_qenc_metadata_byte
 use crate::sss::combine_shares;
 
 const RS_MAX_CODEWORD: usize = 255;
+type MaintenanceSignatureEvidence = (BTreeSet<String>, BTreeSet<String>, BTreeSet<String>);
+type SignatureDigestEvidence = (BTreeSet<String>, BTreeSet<String>);
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RestoreQvqcont7Selection {
@@ -462,7 +464,7 @@ fn reconstruct_lifecycle_cohort_material<'a>(
         "shareCount",
         "cohortBinding.sharding.shamir.shareCount",
     )? as usize;
-    if n != share_count || m != n.saturating_sub(k) || (m % 2) != 0 || t != k + (m / 2) {
+    if n != share_count || m != n.saturating_sub(k) || !m.is_multiple_of(2) || t != k + (m / 2) {
         return Err(coded(
             QvCode::InvalidFormat,
             "Invalid lifecycle cohort sharding tuple",
@@ -1339,10 +1341,8 @@ fn transition_maintenance_purpose_labels(
 
 fn collect_maintenance_purpose_labels(value: Option<&Value>, out: &mut BTreeSet<String>) {
     match value {
-        Some(Value::String(text)) => {
-            if is_known_maintenance_purpose_label(text) {
-                out.insert(text.trim().to_string());
-            }
+        Some(Value::String(text)) if is_known_maintenance_purpose_label(text) => {
+            out.insert(text.trim().to_string());
         }
         Some(Value::Array(values)) => {
             for value in values {
@@ -1379,10 +1379,7 @@ fn build_successor_transition_report(
         &canonical_current_cohort.digest,
     )?;
 
-    let mut maintenance_by_digest: HashMap<
-        String,
-        (BTreeSet<String>, BTreeSet<String>, BTreeSet<String>),
-    > = HashMap::new();
+    let mut maintenance_by_digest: HashMap<String, MaintenanceSignatureEvidence> = HashMap::new();
     for result in signature_results {
         if result.family != "maintenance" {
             continue;
@@ -1494,8 +1491,7 @@ fn build_successor_source_evidence_report(
     bundle_value: &Value,
     signature_results: &[SignatureCheckResult],
 ) -> Result<SourceEvidenceReport> {
-    let mut signatures_by_digest: HashMap<String, (BTreeSet<String>, BTreeSet<String>)> =
-        HashMap::new();
+    let mut signatures_by_digest: HashMap<String, SignatureDigestEvidence> = HashMap::new();
     for result in signature_results {
         if result.family != "source-evidence" {
             continue;
@@ -1860,36 +1856,6 @@ fn timestamp_evidence_from_resolved(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn ots_completion_label_marks_complete_proofs_as_heuristic() {
-        let evidence = timestamp_evidence_from_resolved(
-            "complete.ots".to_string(),
-            crate::auth::opentimestamps::ResolvedOpenTimestampTarget {
-                target_ref: "sig-1".to_string(),
-                target_name: "sig-1.qsig".to_string(),
-                target_source: "bundle".to_string(),
-                target_verified: true,
-                linked: true,
-                apparently_complete: true,
-                complete_proof: true,
-                stamped_digest_hex: "00".repeat(32),
-            },
-        );
-        assert_eq!(
-            evidence.completion_label,
-            "OTS proof appears complete (heuristic)"
-        );
-        assert_eq!(
-            evidence.link_label,
-            "OTS evidence linked to detached signature bytes"
-        );
-    }
-}
-
 fn public_key_map(attachments: &Value) -> Result<HashMap<String, Value>> {
     let mut out = HashMap::new();
     for key in array_field(
@@ -2072,4 +2038,34 @@ fn string_array_field(value: &Value, key: &str, field: &str) -> Result<Vec<Strin
                 .ok_or_else(|| err(format!("Invalid {field}")))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ots_completion_label_marks_complete_proofs_as_heuristic() {
+        let evidence = timestamp_evidence_from_resolved(
+            "complete.ots".to_string(),
+            crate::auth::opentimestamps::ResolvedOpenTimestampTarget {
+                target_ref: "sig-1".to_string(),
+                target_name: "sig-1.qsig".to_string(),
+                target_source: "bundle".to_string(),
+                target_verified: true,
+                linked: true,
+                apparently_complete: true,
+                complete_proof: true,
+                stamped_digest_hex: "00".repeat(32),
+            },
+        );
+        assert_eq!(
+            evidence.completion_label,
+            "OTS proof appears complete (heuristic)"
+        );
+        assert_eq!(
+            evidence.link_label,
+            "OTS evidence linked to detached signature bytes"
+        );
+    }
 }

@@ -11,6 +11,14 @@ pub const NONCE_MAX_CHUNK_COUNT_U32: u64 = 0xffff_ffff;
 pub const IV_STRATEGY_SINGLE_IV: &str = "single-iv";
 pub const IV_STRATEGY_KMAC_PREFIX64_CTR32_V3: &str = "kmac-prefix64-ctr32-v3";
 
+#[derive(Debug, Clone, Copy)]
+pub struct PerChunkIvParams<'a> {
+    pub chunk_count: Option<u64>,
+    pub max_chunk_count: u64,
+    pub counter_bits: u32,
+    pub iv_strategy: &'a str,
+}
+
 pub fn assert_per_chunk_nonce_contract(
     chunk_count: u64,
     max_chunk_count: u64,
@@ -51,31 +59,35 @@ pub fn derive_chunk_iv_from_k(
     container_nonce: &[u8; 12],
     chunk_index: u32,
     iv_customization: &str,
-    chunk_count: Option<u64>,
-    max_chunk_count: u64,
-    counter_bits: u32,
-    iv_strategy: &str,
+    params: PerChunkIvParams<'_>,
 ) -> Result<[u8; 12]> {
     if iv_customization.is_empty() {
         return Err(err("IV customization domain is required"));
     }
 
-    if let Some(chunk_count) = chunk_count {
-        assert_per_chunk_nonce_contract(chunk_count, max_chunk_count, counter_bits, iv_strategy)?;
+    if let Some(chunk_count) = params.chunk_count {
+        assert_per_chunk_nonce_contract(
+            chunk_count,
+            params.max_chunk_count,
+            params.counter_bits,
+            params.iv_strategy,
+        )?;
         if u64::from(chunk_index) >= chunk_count {
             return Err(err(format!(
                 "chunkIndex {chunk_index} out of bounds for chunkCount {chunk_count}"
             )));
         }
-    } else if iv_strategy != IV_STRATEGY_KMAC_PREFIX64_CTR32_V3 {
+    } else if params.iv_strategy != IV_STRATEGY_KMAC_PREFIX64_CTR32_V3 {
         return Err(err(format!(
-            "Unsupported per-chunk iv_strategy: {iv_strategy}"
+            "Unsupported per-chunk iv_strategy: {}",
+            params.iv_strategy
         )));
     }
 
-    if iv_strategy != IV_STRATEGY_KMAC_PREFIX64_CTR32_V3 {
+    if params.iv_strategy != IV_STRATEGY_KMAC_PREFIX64_CTR32_V3 {
         return Err(err(format!(
-            "Unsupported per-chunk iv_strategy: {iv_strategy}"
+            "Unsupported per-chunk iv_strategy: {}",
+            params.iv_strategy
         )));
     }
 

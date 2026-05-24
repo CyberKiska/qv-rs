@@ -2,7 +2,7 @@ use anyhow::Result;
 use serde_json::Value;
 
 use qvault_core::aead::{
-    build_chunk_aad, decrypt_chunk, derive_chunk_iv_from_k, encrypt_chunk,
+    build_chunk_aad, decrypt_chunk, derive_chunk_iv_from_k, encrypt_chunk, PerChunkIvParams,
     IV_STRATEGY_KMAC_PREFIX64_CTR32_V3, NONCE_COUNTER_BITS_U32, NONCE_MAX_CHUNK_COUNT_U32,
 };
 use qvault_core::auth::signature_suites::{
@@ -157,20 +157,24 @@ fn per_chunk_iv_counter_is_unique_big_endian_and_bounded() -> Result<()> {
         &container_nonce,
         0,
         "quantum-vault:chunk-iv:v2",
-        Some(2),
-        NONCE_MAX_CHUNK_COUNT_U32,
-        NONCE_COUNTER_BITS_U32,
-        IV_STRATEGY_KMAC_PREFIX64_CTR32_V3,
+        PerChunkIvParams {
+            chunk_count: Some(2),
+            max_chunk_count: NONCE_MAX_CHUNK_COUNT_U32,
+            counter_bits: NONCE_COUNTER_BITS_U32,
+            iv_strategy: IV_STRATEGY_KMAC_PREFIX64_CTR32_V3,
+        },
     )?;
     let iv1 = derive_chunk_iv_from_k(
         &kiv,
         &container_nonce,
         1,
         "quantum-vault:chunk-iv:v2",
-        Some(2),
-        NONCE_MAX_CHUNK_COUNT_U32,
-        NONCE_COUNTER_BITS_U32,
-        IV_STRATEGY_KMAC_PREFIX64_CTR32_V3,
+        PerChunkIvParams {
+            chunk_count: Some(2),
+            max_chunk_count: NONCE_MAX_CHUNK_COUNT_U32,
+            counter_bits: NONCE_COUNTER_BITS_U32,
+            iv_strategy: IV_STRATEGY_KMAC_PREFIX64_CTR32_V3,
+        },
     )?;
 
     assert_eq!(
@@ -187,10 +191,12 @@ fn per_chunk_iv_counter_is_unique_big_endian_and_bounded() -> Result<()> {
         &container_nonce,
         2,
         "quantum-vault:chunk-iv:v2",
-        Some(2),
-        NONCE_MAX_CHUNK_COUNT_U32,
-        NONCE_COUNTER_BITS_U32,
-        IV_STRATEGY_KMAC_PREFIX64_CTR32_V3,
+        PerChunkIvParams {
+            chunk_count: Some(2),
+            max_chunk_count: NONCE_MAX_CHUNK_COUNT_U32,
+            counter_bits: NONCE_COUNTER_BITS_U32,
+            iv_strategy: IV_STRATEGY_KMAC_PREFIX64_CTR32_V3,
+        },
     )
     .unwrap_err();
     assert!(error.to_string().contains("chunkIndex 2 out of bounds"));

@@ -199,7 +199,7 @@ mod tests {
     #[test]
     fn rfc8785_composite_reference_vector_matches_js_oracle() {
         let sample = json!({
-            "numbers": [333333333.33333329, 1e30, 4.5, 2e-3, 1e-27],
+            "numbers": [333_333_333.333_333_3, 1e30, 4.5, 2e-3, 1e-27],
             "string": "Euro:\u{20ac} control:\u{000f} newline:\n quote:\" slash:/ backslash:\\",
             "literals": [null, true, false],
         });
@@ -228,7 +228,7 @@ mod tests {
             ("Number.MAX_VALUE", number_value(f64::MAX)),
             ("-Number.MAX_VALUE", number_value(-f64::MAX)),
             ("9007199254740993", json!(9_007_199_254_740_993u64)),
-            ("333333333.33333329", number_value(333333333.33333329)),
+            ("333333333.33333329", number_value(333_333_333.333_333_3)),
             ("1e30", number_value(1e30)),
             ("2e-3", number_value(2e-3)),
             ("1e-27", number_value(1e-27)),
