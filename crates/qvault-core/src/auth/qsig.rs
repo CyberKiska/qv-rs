@@ -1,6 +1,7 @@
 use crc32fast::Hasher as Crc32;
 use fips204::traits::{SerDes as MlDsaSerDes, Verifier as MlDsaVerifier};
 use fips205::traits::{SerDes as SlhDsaSerDes, Verifier as SlhDsaVerifier};
+use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 use crate::auth::{get_signature_suite_info, SignatureCheckResult};
 use crate::bytes::timing_safe_equal;
@@ -12,6 +13,12 @@ const MAGIC_TBS: &[u8; 4] = b"QSTB";
 const MAGIC_PQPK: &[u8; 4] = b"PQPK";
 const FILE_HASH_LEN: usize = 64;
 const AUTH_META_DIGEST_LEN: usize = 32;
+const MAX_SIGNATURE_BYTES: usize = 64 * 1024;
+const MAX_AUTH_METADATA_BYTES: usize = 8 * 1024;
+const MAX_DISPLAY_METADATA_BYTES: usize = 4 * 1024;
+const MAX_SIGNATURE_FILE_BYTES: usize = 128 * 1024;
+const MAX_KEY_BYTES: usize = 16 * 1024;
+const MAX_KEY_FILE_BYTES: usize = 32 * 1024;
 const SIG_HASH_ALG_ID_SHA3_512: u8 = 0x01;
 const AUTH_DIGEST_ALG_ID_SHA3_256: u8 = 0x01;
 const SIGNATURE_PROFILE_ID_PQ_DETACHED_PURE_CONTEXT_V2: u8 = 0x01;
@@ -21,7 +28,13 @@ const SUPPORTED_QSIG_CONTEXT: &[u8] = b"quantum-signer/v2";
 const FP_ALG_ID_SHA3_256: u8 = 0x01;
 const FP_RECORD_LEN: usize = 33;
 const QSIG_FLAG_CTX_PRESENT: u16 = 0x0001;
+const QSIG_FLAG_FILENAME_PRESENT: u16 = 0x0002;
+const QSIG_FLAG_FILESIZE_PRESENT: u16 = 0x0004;
+const QSIG_FLAG_CREATED_AT_PRESENT: u16 = 0x0008;
 const QSIG_KNOWN_FLAGS: u16 = 0x000f;
+const DISPLAY_TAG_FILENAME: u8 = 0x01;
+const DISPLAY_TAG_FILESIZE: u8 = 0x02;
+const DISPLAY_TAG_CREATED_AT: u8 = 0x03;
 const META_TAG_SIGNER_PUBLIC_KEY: u8 = 0x10;
 const META_TAG_SIGNER_FINGERPRINT: u8 = 0x11;
 
@@ -64,6 +77,13 @@ pub struct ParsedQsig {
 pub struct ParsedPqpk {
     pub suite_id: u8,
     pub key_bytes: Vec<u8>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct DisplayMetadataPresence {
+    filename: bool,
+    filesize: bool,
+    created_at: bool,
 }
 
 struct Reader<'a> {
@@ -132,6 +152,9 @@ fn decode_metadata_tlv(bytes: &[u8]) -> Result<QsigMetadata> {
         let len = usize::from(reader.u16le("meta.len")?);
         let value = reader.take(len, &format!("meta.tag.{tag}"))?.to_vec();
 
+        if tag == 0 {
+            return Err(err("Invalid zero tag in authMeta"));
+        }
         if i32::from(tag) <= last_tag {
             return Err(err("Non-canonical metadata TLV order"));
         }
@@ -143,7 +166,7 @@ fn decode_metadata_tlv(bytes: &[u8]) -> Result<QsigMetadata> {
             other if other >= 0x80 => {
                 return Err(err(format!("Unknown critical metadata TLV tag: {other}")))
             }
-            _ => {}
+            other => return Err(err(format!("Unexpected authMeta tag: {other}"))),
         }
     }
 
@@ -153,22 +176,41 @@ fn decode_metadata_tlv(bytes: &[u8]) -> Result<QsigMetadata> {
     })
 }
 
-fn decode_display_metadata_tlv(bytes: &[u8]) -> Result<()> {
+fn decode_display_metadata_tlv(bytes: &[u8]) -> Result<DisplayMetadataPresence> {
     let mut reader = Reader::new(bytes);
     let mut last_tag = 0i32 - 1;
+    let mut presence = DisplayMetadataPresence::default();
 
     while reader.remaining() > 0 {
         let tag = reader.u8("displayMeta.tag")?;
         let len = usize::from(reader.u16le("displayMeta.len")?);
-        let _value = reader.take(len, &format!("displayMeta.tag.{tag}"))?;
+        let value = reader.take(len, &format!("displayMeta.tag.{tag}"))?;
 
+        if tag == 0 {
+            return Err(err("Invalid zero tag in displayMeta"));
+        }
         if i32::from(tag) <= last_tag {
             return Err(err("Non-canonical displayMeta TLV order"));
         }
         last_tag = i32::from(tag);
 
         match tag {
-            0x01..=0x03 => {}
+            DISPLAY_TAG_FILENAME => {
+                std::str::from_utf8(value).map_err(|error| {
+                    err(format!("Invalid UTF-8 in displayMeta.filename: {error}"))
+                })?;
+                presence.filename = true;
+            }
+            DISPLAY_TAG_FILESIZE => {
+                if value.len() != 8 {
+                    return Err(err("Invalid displayMeta.filesize length"));
+                }
+                presence.filesize = true;
+            }
+            DISPLAY_TAG_CREATED_AT => {
+                validate_display_created_at(value)?;
+                presence.created_at = true;
+            }
             other if other >= 0x80 => {
                 return Err(err(format!(
                     "Unknown critical displayMeta TLV tag: {other}"
@@ -176,6 +218,33 @@ fn decode_display_metadata_tlv(bytes: &[u8]) -> Result<()> {
             }
             other => return Err(err(format!("Unexpected displayMeta tag: {other}"))),
         }
+    }
+    Ok(presence)
+}
+
+fn validate_display_created_at(value: &[u8]) -> Result<()> {
+    if value.len() == 8 {
+        return Ok(());
+    }
+    let text = std::str::from_utf8(value)
+        .map_err(|error| err(format!("Invalid UTF-8 in displayMeta.createdAt: {error}")))?;
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err(err("createdAt is empty"));
+    }
+    OffsetDateTime::parse(trimmed, &Rfc3339).map_err(|_| err("createdAt is not valid ISO-8601"))?;
+    Ok(())
+}
+
+fn validate_display_flags(flags: u16, presence: DisplayMetadataPresence) -> Result<()> {
+    if ((flags & QSIG_FLAG_FILENAME_PRESENT) != 0) != presence.filename {
+        return Err(err("Detached PQ signature filename flag mismatch"));
+    }
+    if ((flags & QSIG_FLAG_FILESIZE_PRESENT) != 0) != presence.filesize {
+        return Err(err("Detached PQ signature filesize flag mismatch"));
+    }
+    if ((flags & QSIG_FLAG_CREATED_AT_PRESENT) != 0) != presence.created_at {
+        return Err(err("Detached PQ signature createdAt flag mismatch"));
     }
     Ok(())
 }
@@ -195,34 +264,44 @@ fn unpack_signer_fingerprint(record: &[u8]) -> Result<SignerFingerprint> {
     Ok(SignerFingerprint { alg_id, digest })
 }
 
-fn build_tbs(
+struct TbsFields<'a> {
     version_major: u8,
     version_minor: u8,
     suite_id: u8,
     hash_alg_id: u8,
     signature_profile_id: u8,
     auth_digest_alg_id: u8,
-    file_hash: &[u8; 64],
-    auth_meta_digest: &[u8; AUTH_META_DIGEST_LEN],
-) -> Result<Vec<u8>> {
-    let mut out = Vec::with_capacity(4 + 8 + file_hash.len() + auth_meta_digest.len());
+    file_hash: &'a [u8; FILE_HASH_LEN],
+    auth_meta_digest: &'a [u8; AUTH_META_DIGEST_LEN],
+}
+
+fn build_tbs(fields: TbsFields<'_>) -> Vec<u8> {
+    let mut out = Vec::with_capacity(
+        MAGIC_TBS.len() + 8 + fields.file_hash.len() + fields.auth_meta_digest.len(),
+    );
     out.extend_from_slice(MAGIC_TBS);
     out.extend_from_slice(&[
         QSIG_TBS_VERSION_MAJOR,
         0x00,
-        version_major,
-        version_minor,
-        suite_id,
-        signature_profile_id,
-        hash_alg_id,
-        auth_digest_alg_id,
+        fields.version_major,
+        fields.version_minor,
+        fields.suite_id,
+        fields.signature_profile_id,
+        fields.hash_alg_id,
+        fields.auth_digest_alg_id,
     ]);
-    out.extend_from_slice(file_hash);
-    out.extend_from_slice(auth_meta_digest);
-    Ok(out)
+    out.extend_from_slice(fields.file_hash);
+    out.extend_from_slice(fields.auth_meta_digest);
+    out
 }
 
 pub fn unpack_qsig(sig_bytes: &[u8]) -> Result<ParsedQsig> {
+    if sig_bytes.len() > MAX_SIGNATURE_FILE_BYTES {
+        return Err(err(format!(
+            "Detached PQ signature exceeds maximum size ({MAX_SIGNATURE_FILE_BYTES} bytes)"
+        )));
+    }
+
     let mut reader = Reader::new(sig_bytes);
     if reader.take(4, "magic")? != MAGIC_QSIG {
         return Err(err("Invalid .qsig magic"));
@@ -279,6 +358,21 @@ pub fn unpack_qsig(sig_bytes: &[u8]) -> Result<ParsedQsig> {
     let auth_meta_len = usize::from(reader.u16le("authMetaLen")?);
     let display_meta_len = usize::from(reader.u16le("displayMetaLen")?);
     let sig_len = reader.u32le("sigLen")? as usize;
+    if auth_meta_len > MAX_AUTH_METADATA_BYTES {
+        return Err(err(format!(
+            "Detached PQ signature authMetaLen exceeds maximum size ({MAX_AUTH_METADATA_BYTES} bytes)"
+        )));
+    }
+    if display_meta_len > MAX_DISPLAY_METADATA_BYTES {
+        return Err(err(format!(
+            "Detached PQ signature displayMetaLen exceeds maximum size ({MAX_DISPLAY_METADATA_BYTES} bytes)"
+        )));
+    }
+    if sig_len > MAX_SIGNATURE_BYTES {
+        return Err(err(format!(
+            "Detached PQ signature sigLen exceeds maximum size ({MAX_SIGNATURE_BYTES} bytes)"
+        )));
+    }
 
     let expected_remaining = ctx_len + auth_meta_len + display_meta_len + sig_len;
     if reader.remaining() != expected_remaining {
@@ -313,7 +407,6 @@ pub fn unpack_qsig(sig_bytes: &[u8]) -> Result<ParsedQsig> {
             "Detached PQ signature authMeta is missing signer binding",
         ));
     }
-    let _display_metadata = decode_display_metadata_tlv(display_meta_bytes)?;
     let signer_fingerprint = metadata
         .signer_fingerprint_record
         .as_deref()
@@ -329,16 +422,19 @@ pub fn unpack_qsig(sig_bytes: &[u8]) -> Result<ParsedQsig> {
         }
     }
 
-    let tbs = build_tbs(
+    let display_metadata = decode_display_metadata_tlv(display_meta_bytes)?;
+    validate_display_flags(flags, display_metadata)?;
+
+    let tbs = build_tbs(TbsFields {
         version_major,
         version_minor,
         suite_id,
         hash_alg_id,
         signature_profile_id,
         auth_digest_alg_id,
-        &file_hash,
-        &auth_meta_digest,
-    )?;
+        file_hash: &file_hash,
+        auth_meta_digest: &auth_meta_digest,
+    });
 
     Ok(ParsedQsig {
         version_major,
@@ -362,6 +458,12 @@ fn crc32(bytes: &[u8]) -> u32 {
 }
 
 pub fn unpack_pqpk(public_key_file_bytes: &[u8]) -> Result<ParsedPqpk> {
+    if public_key_file_bytes.len() > MAX_KEY_FILE_BYTES {
+        return Err(err(format!(
+            "Detached PQ public key exceeds maximum size ({MAX_KEY_FILE_BYTES} bytes)"
+        )));
+    }
+
     let mut reader = Reader::new(public_key_file_bytes);
     if reader.take(4, "magic")? != MAGIC_PQPK {
         return Err(err("Invalid detached PQ public key magic"));
@@ -384,6 +486,11 @@ pub fn unpack_pqpk(public_key_file_bytes: &[u8]) -> Result<ParsedPqpk> {
     }
 
     let key_len = reader.u32le("keyLen")? as usize;
+    if key_len > MAX_KEY_BYTES {
+        return Err(err(format!(
+            "Detached PQ public key keyLen exceeds maximum size ({MAX_KEY_BYTES} bytes)"
+        )));
+    }
     let key_bytes = reader.take(key_len, "keyBytes")?.to_vec();
     let checksum = reader.u32le("crc32")?;
     if reader.remaining() != 0 {

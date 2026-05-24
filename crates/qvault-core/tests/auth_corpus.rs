@@ -8,7 +8,7 @@ use qvault_core::auth::{
     parse_open_timestamp_proof, resolve_open_timestamp_target, unpack_pqpk, unpack_qsig,
     verify_qsig_against_bytes, SignatureArtifact,
 };
-use qvault_core::hash::{sha256_hex, sha3_512_hex};
+use qvault_core::hash::{sha256_hex, sha3_256, sha3_512_hex};
 use serde_json::Value;
 
 fn data_dir() -> PathBuf {
@@ -28,6 +28,11 @@ fn fixture_bytes(fixture: &Value) -> Result<Vec<u8>> {
     Ok(BASE64_STANDARD.decode(fixture["bytes"].as_str().context("bytes")?)?)
 }
 
+fn qsig_fixture_bytes(name: &str) -> Result<Vec<u8>> {
+    let fixture = read_fixture(&data_dir().join("qsig").join(name))?;
+    fixture_bytes(&fixture)
+}
+
 fn assert_fixture_digest(name: &str, fixture: &Value, bytes: &[u8]) -> Result<()> {
     assert_eq!(
         fixture["expectedDigestAlg"].as_str().unwrap_or("SHA3-512"),
@@ -42,6 +47,49 @@ fn assert_fixture_digest(name: &str, fixture: &Value, bytes: &[u8]) -> Result<()
         "{name}: SHA3-512 digest"
     );
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+struct QsigLayout {
+    auth_meta_start: usize,
+    auth_meta_len: usize,
+    display_meta_start: usize,
+    display_meta_len: usize,
+}
+
+fn read_u16le(bytes: &[u8], offset: usize) -> usize {
+    usize::from(u16::from_le_bytes([bytes[offset], bytes[offset + 1]]))
+}
+
+fn qsig_layout(bytes: &[u8]) -> QsigLayout {
+    let ctx_len = usize::from(bytes[108]);
+    let auth_meta_len = read_u16le(bytes, 110);
+    let display_meta_len = read_u16le(bytes, 112);
+    let auth_meta_start = 118 + ctx_len;
+    let display_meta_start = auth_meta_start + auth_meta_len;
+    QsigLayout {
+        auth_meta_start,
+        auth_meta_len,
+        display_meta_start,
+        display_meta_len,
+    }
+}
+
+fn tlv_block_has_tag(bytes: &[u8], tag: u8) -> bool {
+    let mut offset = 0;
+    while offset + 3 <= bytes.len() {
+        let current_tag = bytes[offset];
+        let len = read_u16le(bytes, offset + 1);
+        offset += 3;
+        if offset + len > bytes.len() {
+            return false;
+        }
+        if current_tag == tag {
+            return true;
+        }
+        offset += len;
+    }
+    false
 }
 
 fn suite_name(suite_id: u8) -> &'static str {
@@ -108,6 +156,67 @@ fn qsig_corpus_parses_and_verifies_like_oracle() -> Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+#[test]
+fn qsig_rejects_display_flag_mismatch_like_oracle() -> Result<()> {
+    let mut bytes = qsig_fixture_bytes("mldsa-65.valid.json")?;
+    let layout = qsig_layout(&bytes);
+    let display_meta =
+        &bytes[layout.display_meta_start..layout.display_meta_start + layout.display_meta_len];
+    let has_filename = tlv_block_has_tag(display_meta, 0x01);
+
+    let mut flags = u16::from_le_bytes([bytes[10], bytes[11]]);
+    if has_filename {
+        flags &= !0x0002;
+    } else {
+        flags |= 0x0002;
+    }
+    bytes[10..12].copy_from_slice(&flags.to_le_bytes());
+
+    let error = unpack_qsig(&bytes).expect_err("expected display flag mismatch");
+    assert!(
+        error.to_string().contains("filename flag mismatch"),
+        "unexpected error: {error}"
+    );
+    Ok(())
+}
+
+#[test]
+fn qsig_rejects_unexpected_authenticated_metadata_tag_like_oracle() -> Result<()> {
+    let mut bytes = qsig_fixture_bytes("mldsa-65.valid.json")?;
+    let layout = qsig_layout(&bytes);
+    let inserted = [0x12, 0x00, 0x00];
+    bytes.splice(
+        layout.display_meta_start..layout.display_meta_start,
+        inserted,
+    );
+
+    let auth_meta_len = layout.auth_meta_len + inserted.len();
+    bytes[110..112].copy_from_slice(&(auth_meta_len as u16).to_le_bytes());
+    let auth_meta_end = layout.auth_meta_start + auth_meta_len;
+    let auth_meta_digest = sha3_256(&bytes[layout.auth_meta_start..auth_meta_end]);
+    bytes[76..108].copy_from_slice(&auth_meta_digest);
+
+    let error = unpack_qsig(&bytes).expect_err("expected unexpected authMeta tag rejection");
+    assert!(
+        error.to_string().contains("Unexpected authMeta tag"),
+        "unexpected error: {error}"
+    );
+    Ok(())
+}
+
+#[test]
+fn qsig_rejects_oversized_signature_file_like_oracle() -> Result<()> {
+    let mut bytes = qsig_fixture_bytes("mldsa-65.valid.json")?;
+    bytes.resize((128 * 1024) + 1, 0);
+
+    let error = unpack_qsig(&bytes).expect_err("expected oversized qsig rejection");
+    assert!(
+        error.to_string().contains("exceeds maximum size"),
+        "unexpected error: {error}"
+    );
     Ok(())
 }
 
