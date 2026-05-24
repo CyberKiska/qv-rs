@@ -7,6 +7,7 @@ fn main() {
 
 mod successor_main {
     use std::env;
+    use std::ffi::OsString;
     use std::fs;
     use std::io::{self, Write};
     use std::path::{Path, PathBuf};
@@ -486,7 +487,7 @@ mod successor_main {
 
         let (public_key, mut private_key) = generate_key_pair(None)?;
         write_file_checked(&public_key_path, &public_key, ctx)?;
-        write_file_checked(&private_key_path, &private_key, ctx)?;
+        write_secret_file_checked(&private_key_path, &private_key, args.force, ctx)?;
 
         if ctx.json {
             let mut report = serde_json::json!({
@@ -1021,7 +1022,7 @@ mod successor_main {
         )?;
         write_file_checked(&output_qenc, &restored.qenc_bytes, ctx)
             .with_context(|| format!("failed to write {}", output_qenc.display()))?;
-        write_file_checked(&output_secret_key, &restored.priv_key, ctx)
+        write_secret_file_checked(&output_secret_key, &restored.priv_key, args.force, ctx)
             .with_context(|| format!("failed to write {}", output_secret_key.display()))?;
 
         if ctx.json {
@@ -1707,6 +1708,115 @@ mod successor_main {
         fs::write(path, bytes).with_context(|| format!("failed to write {}", path.display()))
     }
 
+    fn write_secret_file_checked(
+        path: &Path,
+        bytes: &[u8],
+        force: bool,
+        ctx: CliContext,
+    ) -> Result<()> {
+        if let Some(parent) = path.parent().filter(|value| !value.as_os_str().is_empty()) {
+            reject_symlink_components(parent, ctx.allow_symlink)?;
+        }
+        if path.exists() {
+            reject_symlink_components(path, ctx.allow_symlink)?;
+        }
+        write_secret_file_platform(path, bytes, force)
+            .with_context(|| format!("failed to write secret file {}", path.display()))
+    }
+
+    #[cfg(unix)]
+    fn write_secret_file_platform(path: &Path, bytes: &[u8], force: bool) -> Result<()> {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        fn create_secret_file(path: &Path) -> io::Result<fs::File> {
+            fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(path)
+        }
+
+        fn write_and_sync_secret_file(
+            path: &Path,
+            mut file: fs::File,
+            bytes: &[u8],
+            cleanup_path: &Path,
+        ) -> Result<()> {
+            let result = (|| -> io::Result<()> {
+                file.write_all(bytes)?;
+                file.sync_all()?;
+                Ok(())
+            })();
+            drop(file);
+            if let Err(error) = result {
+                let _ = fs::remove_file(cleanup_path);
+                return Err(error).with_context(|| format!("failed to write {}", path.display()));
+            }
+            Ok(())
+        }
+
+        if !force {
+            let file = create_secret_file(path)?;
+            return write_and_sync_secret_file(path, file, bytes, path);
+        }
+
+        let (temp_path, file) = create_unique_secret_temp_file(path)?;
+        write_and_sync_secret_file(path, file, bytes, &temp_path)?;
+        if let Err(error) = fs::rename(&temp_path, path) {
+            let _ = fs::remove_file(&temp_path);
+            return Err(error).with_context(|| format!("failed to replace {}", path.display()));
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn create_unique_secret_temp_file(path: &Path) -> Result<(PathBuf, fs::File)> {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let parent = path.parent().unwrap_or_else(|| Path::new(""));
+        let file_name = path
+            .file_name()
+            .unwrap_or_else(|| std::ffi::OsStr::new("secret"));
+        for attempt in 0..100u32 {
+            let mut temp_name = OsString::from(".");
+            temp_name.push(file_name);
+            temp_name.push(format!(
+                ".qvault-secret-{}-{attempt}.tmp",
+                std::process::id()
+            ));
+            let temp_path = parent.join(temp_name);
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&temp_path)
+            {
+                Ok(file) => return Ok((temp_path, file)),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        bail!(
+            "failed to create unique secret temp file for {}",
+            path.display()
+        )
+    }
+
+    #[cfg(not(unix))]
+    fn write_secret_file_platform(path: &Path, bytes: &[u8], force: bool) -> Result<()> {
+        let mut options = fs::OpenOptions::new();
+        options.write(true);
+        if force {
+            options.create(true).truncate(true);
+        } else {
+            options.create_new(true);
+        }
+        let mut file = options.open(path)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        Ok(())
+    }
+
     fn preflight_outputs(paths: &[PathBuf], force: bool, ctx: CliContext) -> Result<()> {
         for path in paths {
             if let Some(parent) = path.parent().filter(|value| !value.as_os_str().is_empty()) {
@@ -2027,6 +2137,16 @@ mod successor_main {
     mod tests {
         use super::*;
 
+        #[cfg(unix)]
+        fn unique_test_dir(name: &str) -> PathBuf {
+            use std::sync::atomic::{AtomicU64, Ordering};
+
+            static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+            let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+            let base = fs::canonicalize(env::temp_dir()).unwrap_or_else(|_| env::temp_dir());
+            base.join(format!("qvault-cli-{name}-{}-{id}", std::process::id()))
+        }
+
         #[test]
         fn qv_code_exit_golden_bytes_match_exit_js() {
             let mut entries = vec![serde_json::json!({"qvCode":"USAGE","exitCode":2})];
@@ -2056,6 +2176,33 @@ mod successor_main {
                 bytes,
                 r#"[{"exitCode":2,"qvCode":"USAGE"},{"exitCode":1,"qvCode":"UNEXPECTED"},{"exitCode":3,"qvCode":"ENTROPY_FAILED"},{"exitCode":4,"qvCode":"FORMAT_POLICY_REJECT"},{"exitCode":5,"qvCode":"KEY_REJECTED"},{"exitCode":6,"qvCode":"AEAD_FAILED"},{"exitCode":7,"qvCode":"QUORUM_UNREACHABLE"},{"exitCode":8,"qvCode":"SIGNATURE_IMPORT_FAILED"},{"exitCode":9,"qvCode":"AMBIGUOUS_INPUTS"},{"exitCode":10,"qvCode":"RESHARE_CONTRACT_VIOLATION"},{"exitCode":11,"qvCode":"RESTORED_INTEGRITY_FAILED"},{"exitCode":1,"qvCode":"POLICY_NOT_SATISFIED"},{"exitCode":12,"qvCode":"RESTORE_LIFECYCLE_VARIANT_ACK_REQUIRED"}]"#
             );
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn secret_writer_creates_and_replaces_owner_only_files() -> Result<()> {
+            use std::os::unix::fs::PermissionsExt;
+
+            let dir = unique_test_dir("secret-mode");
+            fs::create_dir(&dir)?;
+            let path = dir.join("private.qkey");
+            let ctx = CliContext {
+                json: false,
+                quiet: true,
+                allow_symlink: false,
+            };
+
+            write_secret_file_checked(&path, b"first-secret", false, ctx)?;
+            assert_eq!(fs::read(&path)?, b"first-secret");
+            assert_eq!(fs::metadata(&path)?.permissions().mode() & 0o777, 0o600);
+
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o644))?;
+            write_secret_file_checked(&path, b"second-secret", true, ctx)?;
+            assert_eq!(fs::read(&path)?, b"second-secret");
+            assert_eq!(fs::metadata(&path)?.permissions().mode() & 0o777, 0o600);
+
+            fs::remove_dir_all(&dir)?;
+            Ok(())
         }
     }
 }
