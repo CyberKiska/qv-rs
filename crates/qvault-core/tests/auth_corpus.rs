@@ -1,9 +1,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
+use crc32fast::Hasher as Crc32Hasher;
 use qvault_core::auth::{
     parse_open_timestamp_proof, resolve_open_timestamp_target, unpack_pqpk, unpack_qsig,
     verify_qsig_against_bytes, SignatureArtifact,
@@ -33,6 +34,22 @@ fn qsig_fixture_bytes(name: &str) -> Result<Vec<u8>> {
     fixture_bytes(&fixture)
 }
 
+fn qsig_fixture_bytes_and_message(name: &str) -> Result<(Vec<u8>, Vec<u8>)> {
+    let fixture = read_fixture(&data_dir().join("qsig").join(name))?;
+    let bytes = fixture_bytes(&fixture)?;
+    let message = BASE64_STANDARD.decode(
+        fixture["runtime"]["messageBytes"]
+            .as_str()
+            .context("runtime.messageBytes")?,
+    )?;
+    Ok((bytes, message))
+}
+
+fn pqpk_fixture_bytes(name: &str) -> Result<Vec<u8>> {
+    let fixture = read_fixture(&data_dir().join("pqpk").join(name))?;
+    fixture_bytes(&fixture)
+}
+
 fn assert_fixture_digest(name: &str, fixture: &Value, bytes: &[u8]) -> Result<()> {
     assert_eq!(
         fixture["expectedDigestAlg"].as_str().unwrap_or("SHA3-512"),
@@ -59,6 +76,23 @@ struct QsigLayout {
 
 fn read_u16le(bytes: &[u8], offset: usize) -> usize {
     usize::from(u16::from_le_bytes([bytes[offset], bytes[offset + 1]]))
+}
+
+fn read_u32le(bytes: &[u8], offset: usize) -> usize {
+    u32::from_le_bytes([
+        bytes[offset],
+        bytes[offset + 1],
+        bytes[offset + 2],
+        bytes[offset + 3],
+    ]) as usize
+}
+
+fn write_u16le(bytes: &mut [u8], offset: usize, value: u16) {
+    bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+}
+
+fn write_u32le(bytes: &mut [u8], offset: usize, value: u32) {
+    bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
 }
 
 fn qsig_layout(bytes: &[u8]) -> QsigLayout {
@@ -92,6 +126,75 @@ fn tlv_block_has_tag(bytes: &[u8], tag: u8) -> bool {
     false
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TlvRecord {
+    tag: u8,
+    start: usize,
+    value_start: usize,
+    end: usize,
+}
+
+fn tlv_records(bytes: &[u8]) -> Result<Vec<TlvRecord>> {
+    let mut records = Vec::new();
+    let mut offset = 0usize;
+    while offset < bytes.len() {
+        if offset + 3 > bytes.len() {
+            bail!("truncated TLV header at offset {offset}");
+        }
+        let tag = bytes[offset];
+        let len = read_u16le(bytes, offset + 1);
+        let value_start = offset + 3;
+        let end = value_start + len;
+        if end > bytes.len() {
+            bail!("truncated TLV value at offset {offset}");
+        }
+        records.push(TlvRecord {
+            tag,
+            start: offset,
+            value_start,
+            end,
+        });
+        offset = end;
+    }
+    Ok(records)
+}
+
+fn auth_meta_bytes(bytes: &[u8]) -> &[u8] {
+    let layout = qsig_layout(bytes);
+    &bytes[layout.auth_meta_start..layout.auth_meta_start + layout.auth_meta_len]
+}
+
+fn replace_auth_meta(bytes: &mut Vec<u8>, replacement: &[u8]) {
+    let layout = qsig_layout(bytes);
+    bytes.splice(
+        layout.auth_meta_start..layout.auth_meta_start + layout.auth_meta_len,
+        replacement.iter().copied(),
+    );
+    write_u16le(bytes, 110, replacement.len() as u16);
+    let auth_meta_digest =
+        sha3_256(&bytes[layout.auth_meta_start..layout.auth_meta_start + replacement.len()]);
+    bytes[76..108].copy_from_slice(&auth_meta_digest);
+}
+
+fn qsig_auth_record(bytes: &[u8], tag: u8) -> Result<TlvRecord> {
+    tlv_records(auth_meta_bytes(bytes))?
+        .into_iter()
+        .find(|record| record.tag == tag)
+        .with_context(|| format!("authMeta tag {tag:#04x} not found"))
+}
+
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut hasher = Crc32Hasher::new();
+    hasher.update(bytes);
+    hasher.finalize()
+}
+
+fn refresh_pqpk_crc(bytes: &mut [u8]) {
+    let checksum_offset = bytes.len() - 4;
+    let checksum = crc32(&bytes[..checksum_offset]);
+    bytes[checksum_offset..].copy_from_slice(&checksum.to_le_bytes());
+}
+
 fn suite_name(suite_id: u8) -> &'static str {
     match suite_id {
         1 => "mldsa-44",
@@ -103,6 +206,106 @@ fn suite_name(suite_id: u8) -> &'static str {
         0x14 => "slhdsa-shake-256f",
         _ => "unknown",
     }
+}
+
+#[test]
+fn qsig_rejects_malformed_authenticated_metadata_order_like_oracle() -> Result<()> {
+    let mut bytes = qsig_fixture_bytes("mldsa-65.valid.json")?;
+    let auth_meta = auth_meta_bytes(&bytes);
+    let records = tlv_records(auth_meta)?;
+    let signer_public_key = records
+        .iter()
+        .find(|record| record.tag == 0x10)
+        .context("signer public key record")?;
+    let signer_fingerprint = records
+        .iter()
+        .find(|record| record.tag == 0x11)
+        .context("signer fingerprint record")?;
+
+    let mut reordered = Vec::with_capacity(auth_meta.len());
+    reordered.extend_from_slice(&auth_meta[signer_fingerprint.start..signer_fingerprint.end]);
+    reordered.extend_from_slice(&auth_meta[signer_public_key.start..signer_public_key.end]);
+    replace_auth_meta(&mut bytes, &reordered);
+
+    let error = unpack_qsig(&bytes).expect_err("expected non-canonical authMeta rejection");
+    assert!(
+        error
+            .to_string()
+            .contains("Non-canonical metadata TLV order"),
+        "unexpected error: {error}"
+    );
+    Ok(())
+}
+
+#[test]
+fn qsig_rejects_duplicate_authenticated_metadata_tags_like_oracle() -> Result<()> {
+    let mut bytes = qsig_fixture_bytes("mldsa-65.valid.json")?;
+    let auth_meta = auth_meta_bytes(&bytes);
+    let records = tlv_records(auth_meta)?;
+    let signer_public_key = records
+        .iter()
+        .find(|record| record.tag == 0x10)
+        .context("signer public key record")?;
+    let signer_fingerprint = records
+        .iter()
+        .find(|record| record.tag == 0x11)
+        .context("signer fingerprint record")?;
+
+    let mut duplicated = Vec::with_capacity(auth_meta.len() + signer_public_key.end);
+    duplicated.extend_from_slice(&auth_meta[signer_public_key.start..signer_public_key.end]);
+    duplicated.extend_from_slice(&auth_meta[signer_public_key.start..signer_public_key.end]);
+    duplicated.extend_from_slice(&auth_meta[signer_fingerprint.start..signer_fingerprint.end]);
+    replace_auth_meta(&mut bytes, &duplicated);
+
+    let error = unpack_qsig(&bytes).expect_err("expected duplicate authMeta tag rejection");
+    assert!(
+        error
+            .to_string()
+            .contains("Non-canonical metadata TLV order"),
+        "unexpected error: {error}"
+    );
+    Ok(())
+}
+
+#[test]
+fn qsig_rejects_oversized_length_fields_like_oracle() -> Result<()> {
+    let cases = [
+        (110usize, 8193u32, "authMetaLen exceeds maximum size"),
+        (112usize, 4097u32, "displayMetaLen exceeds maximum size"),
+        (114usize, 65537u32, "sigLen exceeds maximum size"),
+    ];
+
+    for (offset, value, expected) in cases {
+        let mut bytes = qsig_fixture_bytes("mldsa-65.valid.json")?;
+        if offset == 114 {
+            write_u32le(&mut bytes, offset, value);
+        } else {
+            write_u16le(&mut bytes, offset, value as u16);
+        }
+
+        let error = unpack_qsig(&bytes).expect_err("expected oversized field rejection");
+        assert!(
+            error.to_string().contains(expected),
+            "expected {expected:?}, got {error}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn qsig_rejects_context_mismatch_like_oracle() -> Result<()> {
+    let mut bytes = qsig_fixture_bytes("mldsa-65.valid.json")?;
+    let ctx_start = 118usize;
+    bytes[ctx_start] ^= 0x01;
+
+    let error = unpack_qsig(&bytes).expect_err("expected context mismatch rejection");
+    assert!(
+        error
+            .to_string()
+            .contains("Unsupported detached PQ signature context"),
+        "unexpected error: {error}"
+    );
+    Ok(())
 }
 
 #[test]
@@ -184,6 +387,80 @@ fn qsig_rejects_display_flag_mismatch_like_oracle() -> Result<()> {
 }
 
 #[test]
+fn qsig_rejects_bad_signer_fingerprint_binding_like_oracle() -> Result<()> {
+    let mut bytes = qsig_fixture_bytes("mldsa-65.valid.json")?;
+    let mut auth_meta = auth_meta_bytes(&bytes).to_vec();
+    let signer_fingerprint = qsig_auth_record(&bytes, 0x11)?;
+    auth_meta[signer_fingerprint.value_start + 1] ^= 0x01;
+    replace_auth_meta(&mut bytes, &auth_meta);
+
+    let error = unpack_qsig(&bytes).expect_err("expected signer fingerprint rejection");
+    assert!(
+        error
+            .to_string()
+            .contains("Signer fingerprint does not match signer public key in authMeta"),
+        "unexpected error: {error}"
+    );
+    Ok(())
+}
+
+#[test]
+fn qsig_signature_length_mismatch_fails_verification_like_oracle() -> Result<()> {
+    let (mut bytes, message) = qsig_fixture_bytes_and_message("mldsa-65.valid.json")?;
+    let sig_len = read_u32le(&bytes, 114);
+    write_u32le(&mut bytes, 114, (sig_len - 1) as u32);
+    bytes.pop();
+
+    let parsed = unpack_qsig(&bytes).context("truncated signature should still parse")?;
+    assert_eq!(parsed.signature.len(), sig_len - 1);
+    let result = verify_qsig_against_bytes(&message, &bytes, None, None)?;
+    assert!(!result.ok, "signature length mismatch must not verify");
+    assert_eq!(
+        result.error.as_deref(),
+        Some("PQ signature verification failed")
+    );
+    Ok(())
+}
+
+#[test]
+fn qsig_wrong_declared_suite_fails_verification_like_oracle() -> Result<()> {
+    let (mut bytes, message) = qsig_fixture_bytes_and_message("mldsa-65.valid.json")?;
+    bytes[6] = 0x01;
+
+    let parsed = unpack_qsig(&bytes).context("wrong supported suite should still parse")?;
+    assert_eq!(suite_name(parsed.suite_id), "mldsa-44");
+    let result = verify_qsig_against_bytes(&message, &bytes, None, None)?;
+    assert!(!result.ok, "wrong declared suite must not verify");
+    assert_eq!(
+        result.error.as_deref(),
+        Some("PQ signature verification failed")
+    );
+    Ok(())
+}
+
+#[test]
+fn qsig_embedded_key_only_verifies_but_is_not_pinned_like_oracle() -> Result<()> {
+    let (bytes, message) = qsig_fixture_bytes_and_message("mldsa-65.valid.json")?;
+    let result = verify_qsig_against_bytes(&message, &bytes, None, None)?;
+
+    assert!(result.ok);
+    assert!(result.self_signed);
+    assert!(!result.signer_pinned);
+    assert!(!result.bundle_pinned);
+    assert!(!result.user_pinned);
+    assert_eq!(result.key_source.as_deref(), Some("embedded-signature-key"));
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("signer identity is not pinned")),
+        "{:?}",
+        result.warnings
+    );
+    Ok(())
+}
+
+#[test]
 fn qsig_rejects_unexpected_authenticated_metadata_tag_like_oracle() -> Result<()> {
     let mut bytes = qsig_fixture_bytes("mldsa-65.valid.json")?;
     let layout = qsig_layout(&bytes);
@@ -215,6 +492,67 @@ fn qsig_rejects_oversized_signature_file_like_oracle() -> Result<()> {
     let error = unpack_qsig(&bytes).expect_err("expected oversized qsig rejection");
     assert!(
         error.to_string().contains("exceeds maximum size"),
+        "unexpected error: {error}"
+    );
+    Ok(())
+}
+
+#[test]
+fn pqpk_rejects_oversized_key_len_like_oracle() -> Result<()> {
+    let mut bytes = pqpk_fixture_bytes("mldsa-65.valid.json")?;
+    write_u32le(&mut bytes, 8, (16 * 1024) + 1);
+
+    let error = unpack_pqpk(&bytes).expect_err("expected oversized key length rejection");
+    assert!(
+        error.to_string().contains("keyLen exceeds maximum size"),
+        "unexpected error: {error}"
+    );
+    Ok(())
+}
+
+#[test]
+fn pqpk_rejects_unsupported_suite_byte_like_oracle() -> Result<()> {
+    let mut bytes = pqpk_fixture_bytes("mldsa-65.valid.json")?;
+    bytes[6] = 0x21;
+    refresh_pqpk_crc(&mut bytes);
+
+    let error = unpack_pqpk(&bytes).expect_err("expected unsupported suite rejection");
+    assert!(
+        error
+            .to_string()
+            .contains("Unsupported detached PQ signature suiteId"),
+        "unexpected error: {error}"
+    );
+    Ok(())
+}
+
+#[test]
+fn qsig_wrong_suite_pqpk_optional_vs_authoritative() -> Result<()> {
+    let (qsig, message) = qsig_fixture_bytes_and_message("mldsa-65.valid.json")?;
+    let wrong_suite_pqpk = pqpk_fixture_bytes("mldsa-44.valid.json")?;
+
+    let result = verify_qsig_against_bytes(&message, &qsig, None, Some(&wrong_suite_pqpk))?;
+    assert!(
+        result.ok,
+        "embedded key should still verify cryptographically"
+    );
+    assert!(result.self_signed);
+    assert!(!result.user_pinned);
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("suite does not match this .qsig and was ignored")),
+        "{:?}",
+        result.warnings
+    );
+
+    let error = verify_qsig_against_bytes(&message, &qsig, Some(&wrong_suite_pqpk), None)
+        .expect_err("authoritative bundled wrong-suite key must fail closed");
+    assert!(
+        error
+            .to_string()
+            .contains("Bundled PQ public key suite does not match this .qsig"),
         "unexpected error: {error}"
     );
     Ok(())
