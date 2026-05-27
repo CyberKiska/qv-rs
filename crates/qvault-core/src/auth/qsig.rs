@@ -1,8 +1,12 @@
-use crc32fast::Hasher as Crc32;
 use fips204::traits::{SerDes as MlDsaSerDes, Verifier as MlDsaVerifier};
 use fips205::traits::{SerDes as SlhDsaSerDes, Verifier as SlhDsaVerifier};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
+pub use crate::auth::pqkey::{
+    unpack_pqpk, ParsedPqpk, SUITE_ID_ML_DSA_44, SUITE_ID_ML_DSA_65, SUITE_ID_ML_DSA_87,
+    SUITE_ID_SLH_DSA_SHAKE_128S, SUITE_ID_SLH_DSA_SHAKE_192S, SUITE_ID_SLH_DSA_SHAKE_256F,
+    SUITE_ID_SLH_DSA_SHAKE_256S,
+};
 use crate::auth::{get_signature_suite_info, SignatureCheckResult};
 use crate::bytes::timing_safe_equal;
 use crate::error::{err, Result};
@@ -10,15 +14,12 @@ use crate::hash::{sha3_256, sha3_512};
 
 const MAGIC_QSIG: &[u8; 4] = b"PQSG";
 const MAGIC_TBS: &[u8; 4] = b"QSTB";
-const MAGIC_PQPK: &[u8; 4] = b"PQPK";
 const FILE_HASH_LEN: usize = 64;
 const AUTH_META_DIGEST_LEN: usize = 32;
 const MAX_SIGNATURE_BYTES: usize = 64 * 1024;
 const MAX_AUTH_METADATA_BYTES: usize = 8 * 1024;
 const MAX_DISPLAY_METADATA_BYTES: usize = 4 * 1024;
 const MAX_SIGNATURE_FILE_BYTES: usize = 128 * 1024;
-const MAX_KEY_BYTES: usize = 16 * 1024;
-const MAX_KEY_FILE_BYTES: usize = 32 * 1024;
 const SIG_HASH_ALG_ID_SHA3_512: u8 = 0x01;
 const AUTH_DIGEST_ALG_ID_SHA3_256: u8 = 0x01;
 const SIGNATURE_PROFILE_ID_PQ_DETACHED_PURE_CONTEXT_V2: u8 = 0x01;
@@ -37,14 +38,6 @@ const DISPLAY_TAG_FILESIZE: u8 = 0x02;
 const DISPLAY_TAG_CREATED_AT: u8 = 0x03;
 const META_TAG_SIGNER_PUBLIC_KEY: u8 = 0x10;
 const META_TAG_SIGNER_FINGERPRINT: u8 = 0x11;
-
-pub const SUITE_ID_ML_DSA_44: u8 = 0x01;
-pub const SUITE_ID_ML_DSA_65: u8 = 0x02;
-pub const SUITE_ID_ML_DSA_87: u8 = 0x03;
-pub const SUITE_ID_SLH_DSA_SHAKE_128S: u8 = 0x11;
-pub const SUITE_ID_SLH_DSA_SHAKE_192S: u8 = 0x12;
-pub const SUITE_ID_SLH_DSA_SHAKE_256S: u8 = 0x13;
-pub const SUITE_ID_SLH_DSA_SHAKE_256F: u8 = 0x14;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QsigMetadata {
@@ -71,12 +64,6 @@ pub struct ParsedQsig {
     pub metadata: QsigMetadata,
     pub signer_fingerprint: Option<SignerFingerprint>,
     pub tbs: Vec<u8>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParsedPqpk {
-    pub suite_id: u8,
-    pub key_bytes: Vec<u8>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -448,61 +435,6 @@ pub fn unpack_qsig(sig_bytes: &[u8]) -> Result<ParsedQsig> {
         metadata,
         signer_fingerprint,
         tbs,
-    })
-}
-
-fn crc32(bytes: &[u8]) -> u32 {
-    let mut hasher = Crc32::new();
-    hasher.update(bytes);
-    hasher.finalize()
-}
-
-pub fn unpack_pqpk(public_key_file_bytes: &[u8]) -> Result<ParsedPqpk> {
-    if public_key_file_bytes.len() > MAX_KEY_FILE_BYTES {
-        return Err(err(format!(
-            "Detached PQ public key exceeds maximum size ({MAX_KEY_FILE_BYTES} bytes)"
-        )));
-    }
-
-    let mut reader = Reader::new(public_key_file_bytes);
-    if reader.take(4, "magic")? != MAGIC_PQPK {
-        return Err(err("Invalid detached PQ public key magic"));
-    }
-
-    let version_major = reader.u8("versionMajor")?;
-    let _version_minor = reader.u8("versionMinor")?;
-    if version_major != 0x01 {
-        return Err(err(format!(
-            "Unsupported detached PQ public key major version: {version_major}"
-        )));
-    }
-
-    let suite_id = reader.u8("suiteId")?;
-    qsig_suite_name(suite_id)?;
-
-    let reserved = reader.u8("reserved")?;
-    if reserved != 0 {
-        return Err(err("Invalid detached PQ public key flags"));
-    }
-
-    let key_len = reader.u32le("keyLen")? as usize;
-    if key_len > MAX_KEY_BYTES {
-        return Err(err(format!(
-            "Detached PQ public key keyLen exceeds maximum size ({MAX_KEY_BYTES} bytes)"
-        )));
-    }
-    let key_bytes = reader.take(key_len, "keyBytes")?.to_vec();
-    let checksum = reader.u32le("crc32")?;
-    if reader.remaining() != 0 {
-        return Err(err("Trailing bytes in detached PQ public key"));
-    }
-    if checksum != crc32(&public_key_file_bytes[..public_key_file_bytes.len() - 4]) {
-        return Err(err("Invalid detached PQ public key CRC32"));
-    }
-
-    Ok(ParsedPqpk {
-        suite_id,
-        key_bytes,
     })
 }
 

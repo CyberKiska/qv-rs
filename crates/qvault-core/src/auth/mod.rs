@@ -1,5 +1,6 @@
 pub mod detached_archive_approval_format;
 pub mod opentimestamps;
+pub mod pqkey;
 pub mod qsig;
 pub mod signature_identity;
 pub mod signature_suites;
@@ -435,7 +436,11 @@ pub use detached_archive_approval_format::{
     DetachedArchiveApprovalKind,
 };
 pub use opentimestamps::{parse_open_timestamp_proof, resolve_open_timestamp_target};
-pub use qsig::{unpack_pqpk, unpack_qsig, verify_qsig_against_bytes, ParsedPqpk, ParsedQsig};
+pub use pqkey::{
+    pack_public_key_file, pack_secret_key_file, unpack_pqpk, unpack_public_key_file,
+    unpack_secret_key_file, ParsedPqpk, PqPublicKeyFile, PqSecretKeyFile, PqSignatureSuite,
+};
+pub use qsig::{unpack_qsig, verify_qsig_against_bytes, ParsedQsig};
 pub use signature_identity::compute_detached_signature_identity_digest_hex;
 pub use signature_suites::{
     get_signature_suite_info, is_strong_pq_suite, list_supported_signature_suites,
