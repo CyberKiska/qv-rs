@@ -12,32 +12,35 @@ use crate::bytes::timing_safe_equal;
 use crate::error::{err, Result};
 use crate::hash::{sha3_256, sha3_512};
 
-const MAGIC_QSIG: &[u8; 4] = b"PQSG";
+pub(crate) const MAGIC_QSIG: &[u8; 4] = b"PQSG";
 const MAGIC_TBS: &[u8; 4] = b"QSTB";
-const FILE_HASH_LEN: usize = 64;
-const AUTH_META_DIGEST_LEN: usize = 32;
-const MAX_SIGNATURE_BYTES: usize = 64 * 1024;
-const MAX_AUTH_METADATA_BYTES: usize = 8 * 1024;
-const MAX_DISPLAY_METADATA_BYTES: usize = 4 * 1024;
-const MAX_SIGNATURE_FILE_BYTES: usize = 128 * 1024;
-const SIG_HASH_ALG_ID_SHA3_512: u8 = 0x01;
-const AUTH_DIGEST_ALG_ID_SHA3_256: u8 = 0x01;
-const SIGNATURE_PROFILE_ID_PQ_DETACHED_PURE_CONTEXT_V2: u8 = 0x01;
-const QSIG_FORMAT_VERSION_MAJOR: u8 = 0x02;
-const QSIG_TBS_VERSION_MAJOR: u8 = 0x02;
-const SUPPORTED_QSIG_CONTEXT: &[u8] = b"quantum-signer/v2";
-const FP_ALG_ID_SHA3_256: u8 = 0x01;
+pub(crate) const FILE_HASH_LEN: usize = 64;
+pub(crate) const AUTH_META_DIGEST_LEN: usize = 32;
+pub(crate) const MAX_CONTEXT_BYTES: usize = 255;
+pub(crate) const MAX_SIGNATURE_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_AUTH_METADATA_BYTES: usize = 8 * 1024;
+pub(crate) const MAX_DISPLAY_METADATA_BYTES: usize = 4 * 1024;
+pub(crate) const MAX_SIGNATURE_FILE_BYTES: usize = 128 * 1024;
+pub(crate) const SIG_HASH_ALG_ID_SHA3_512: u8 = 0x01;
+pub(crate) const AUTH_DIGEST_ALG_ID_SHA3_256: u8 = 0x01;
+pub(crate) const SIGNATURE_PROFILE_ID_PQ_DETACHED_PURE_CONTEXT_V2: u8 = 0x01;
+pub(crate) const QSIG_FORMAT_VERSION_MAJOR: u8 = 0x02;
+pub(crate) const QSIG_FORMAT_VERSION_MINOR: u8 = 0x00;
+pub(crate) const QSIG_TBS_VERSION_MAJOR: u8 = 0x02;
+pub(crate) const QSIG_TBS_VERSION_MINOR: u8 = 0x00;
+pub(crate) const SUPPORTED_QSIG_CONTEXT: &[u8] = b"quantum-signer/v2";
+pub(crate) const FP_ALG_ID_SHA3_256: u8 = 0x01;
 const FP_RECORD_LEN: usize = 33;
-const QSIG_FLAG_CTX_PRESENT: u16 = 0x0001;
-const QSIG_FLAG_FILENAME_PRESENT: u16 = 0x0002;
-const QSIG_FLAG_FILESIZE_PRESENT: u16 = 0x0004;
-const QSIG_FLAG_CREATED_AT_PRESENT: u16 = 0x0008;
+pub(crate) const QSIG_FLAG_CTX_PRESENT: u16 = 0x0001;
+pub(crate) const QSIG_FLAG_FILENAME_PRESENT: u16 = 0x0002;
+pub(crate) const QSIG_FLAG_FILESIZE_PRESENT: u16 = 0x0004;
+pub(crate) const QSIG_FLAG_CREATED_AT_PRESENT: u16 = 0x0008;
 const QSIG_KNOWN_FLAGS: u16 = 0x000f;
-const DISPLAY_TAG_FILENAME: u8 = 0x01;
-const DISPLAY_TAG_FILESIZE: u8 = 0x02;
-const DISPLAY_TAG_CREATED_AT: u8 = 0x03;
-const META_TAG_SIGNER_PUBLIC_KEY: u8 = 0x10;
-const META_TAG_SIGNER_FINGERPRINT: u8 = 0x11;
+pub(crate) const DISPLAY_TAG_FILENAME: u8 = 0x01;
+pub(crate) const DISPLAY_TAG_FILESIZE: u8 = 0x02;
+pub(crate) const DISPLAY_TAG_CREATED_AT: u8 = 0x03;
+pub(crate) const META_TAG_SIGNER_PUBLIC_KEY: u8 = 0x10;
+pub(crate) const META_TAG_SIGNER_FINGERPRINT: u8 = 0x11;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QsigMetadata {
@@ -251,25 +254,25 @@ fn unpack_signer_fingerprint(record: &[u8]) -> Result<SignerFingerprint> {
     Ok(SignerFingerprint { alg_id, digest })
 }
 
-struct TbsFields<'a> {
-    version_major: u8,
-    version_minor: u8,
-    suite_id: u8,
-    hash_alg_id: u8,
-    signature_profile_id: u8,
-    auth_digest_alg_id: u8,
-    file_hash: &'a [u8; FILE_HASH_LEN],
-    auth_meta_digest: &'a [u8; AUTH_META_DIGEST_LEN],
+pub(crate) struct QsigTbsFields<'a> {
+    pub(crate) version_major: u8,
+    pub(crate) version_minor: u8,
+    pub(crate) suite_id: u8,
+    pub(crate) hash_alg_id: u8,
+    pub(crate) signature_profile_id: u8,
+    pub(crate) auth_digest_alg_id: u8,
+    pub(crate) file_hash: &'a [u8; FILE_HASH_LEN],
+    pub(crate) auth_meta_digest: &'a [u8; AUTH_META_DIGEST_LEN],
 }
 
-fn build_tbs(fields: TbsFields<'_>) -> Vec<u8> {
+pub(crate) fn build_qsig_tbs(fields: QsigTbsFields<'_>) -> Vec<u8> {
     let mut out = Vec::with_capacity(
         MAGIC_TBS.len() + 8 + fields.file_hash.len() + fields.auth_meta_digest.len(),
     );
     out.extend_from_slice(MAGIC_TBS);
     out.extend_from_slice(&[
         QSIG_TBS_VERSION_MAJOR,
-        0x00,
+        QSIG_TBS_VERSION_MINOR,
         fields.version_major,
         fields.version_minor,
         fields.suite_id,
@@ -412,7 +415,7 @@ pub fn unpack_qsig(sig_bytes: &[u8]) -> Result<ParsedQsig> {
     let display_metadata = decode_display_metadata_tlv(display_meta_bytes)?;
     validate_display_flags(flags, display_metadata)?;
 
-    let tbs = build_tbs(TbsFields {
+    let tbs = build_qsig_tbs(QsigTbsFields {
         version_major,
         version_minor,
         suite_id,

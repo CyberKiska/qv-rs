@@ -441,7 +441,10 @@ pub use pqkey::{
     pack_public_key_file, pack_secret_key_file, unpack_pqpk, unpack_public_key_file,
     unpack_secret_key_file, ParsedPqpk, PqPublicKeyFile, PqSecretKeyFile, PqSignatureSuite,
 };
-pub use pqsign::{generate_signing_keypair, public_from_secret, PqSigningKeypair};
+pub use pqsign::{
+    create_detached_qsig, generate_signing_keypair, public_from_secret, DetachedSignOptions,
+    DetachedSignatureArtifact, DisplayMetadata, PqSigningKeypair,
+};
 pub use qsig::{unpack_qsig, verify_qsig_against_bytes, ParsedQsig};
 pub use signature_identity::compute_detached_signature_identity_digest_hex;
 pub use signature_suites::{
