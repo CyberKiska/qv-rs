@@ -63,6 +63,12 @@ jobs:
           rustc -vV
           cargo -vV
 
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (warnings denied)
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
       - name: Test workspace
         run: cargo test --workspace --locked
 
