@@ -5,6 +5,7 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
 use qvault_core::auth::{unpack_public_key_file, unpack_secret_key_file, PqSignatureSuite};
 use qvault_core::hash::sha3_512_hex;
+use qvault_core::qcont::parse_qvqcont7_shard;
 use serde_json::Value;
 
 fn qvault_cli() -> &'static str {
@@ -57,6 +58,57 @@ fn assert_no_secret_material(stdout: &str, secret_key_file: &[u8], secret_key_by
     assert!(!stdout.contains(&sha3_512_hex(secret_key_bytes)));
     assert!(!stdout.contains(&BASE64_STANDARD.encode(secret_key_file)));
     assert!(!stdout.contains(&BASE64_STANDARD.encode(secret_key_bytes)));
+}
+
+fn create_encrypted_payload_fixture(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let root = unique_temp_path(name);
+    std::fs::create_dir_all(&root).expect("create fixture root");
+    let payload_path = root.join("payload.txt");
+    let key_dir = root.join("keys");
+    let qenc_path = root.join("payload.qenc");
+    std::fs::write(&payload_path, b"split archive approval payload").expect("write payload");
+
+    let keygen = Command::new(qvault_cli())
+        .args([
+            "--quiet",
+            "keygen",
+            "--out",
+            key_dir.to_str().expect("utf8 key dir"),
+        ])
+        .output()
+        .expect("run keygen");
+    assert!(
+        keygen.status.success(),
+        "status: {:?}, stderr: {}",
+        keygen.status,
+        String::from_utf8_lossy(&keygen.stderr)
+    );
+
+    let encrypt = Command::new(qvault_cli())
+        .args([
+            "--quiet",
+            "encrypt",
+            payload_path.to_str().expect("utf8 payload path"),
+            "--public-key",
+            key_dir
+                .join("publicKey.qkey")
+                .to_str()
+                .expect("utf8 public key path"),
+            "--out",
+            qenc_path.to_str().expect("utf8 qenc path"),
+            "--filename",
+            "payload.txt",
+        ])
+        .output()
+        .expect("run encrypt");
+    assert!(
+        encrypt.status.success(),
+        "status: {:?}, stderr: {}",
+        encrypt.status,
+        String::from_utf8_lossy(&encrypt.stderr)
+    );
+
+    (qenc_path, key_dir.join("privateKey.qkey"))
 }
 
 fn core_fixture(relative: &str) -> std::path::PathBuf {
@@ -486,6 +538,215 @@ fn sign_lifecycle_target_rejects_noncanonical_archive_state_without_output() {
         .as_str()
         .expect("error text")
         .contains("archive-state signing target must be canonical"));
+}
+
+#[test]
+fn split_archive_approval_key_embeds_qsig_and_satisfies_verify_restore() {
+    let (qenc_path, private_key_path) = create_encrypted_payload_fixture("signed-split");
+    let (signer_public_key_path, signer_secret_key_path) = {
+        let out_prefix = qenc_path.parent().expect("fixture parent").join("signer");
+        let public_key_path = append_file_name_suffix(&out_prefix, ".pqpk");
+        let secret_key_path = append_file_name_suffix(&out_prefix, ".pqsk");
+        let output = Command::new(qvault_cli())
+            .args([
+                "--quiet",
+                "signer-keygen",
+                "--suite",
+                "mldsa-87",
+                "--out",
+                out_prefix.to_str().expect("utf8 signer prefix"),
+            ])
+            .output()
+            .expect("run signer-keygen");
+        assert!(
+            output.status.success(),
+            "status: {:?}, stderr: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        (public_key_path, secret_key_path)
+    };
+    assert!(signer_public_key_path.exists());
+
+    let out_dir = qenc_path
+        .parent()
+        .expect("fixture parent")
+        .join("signed-shards");
+    let split = Command::new(qvault_cli())
+        .args([
+            "--json",
+            "split",
+            qenc_path.to_str().expect("utf8 qenc path"),
+            "--private-key",
+            private_key_path.to_str().expect("utf8 private key path"),
+            "--n",
+            "5",
+            "--k",
+            "3",
+            "--out",
+            out_dir.to_str().expect("utf8 out dir"),
+            "--auth-policy-level",
+            "strong-pq-signature",
+            "--min-valid-signatures",
+            "1",
+            "--archive-approval-key",
+            signer_secret_key_path
+                .to_str()
+                .expect("utf8 signer secret path"),
+        ])
+        .output()
+        .expect("run signed split");
+    assert!(
+        split.status.success(),
+        "status: {:?}, stderr: {}",
+        split.status,
+        String::from_utf8_lossy(&split.stderr)
+    );
+    let split_json: Value = serde_json::from_slice(&split.stdout).expect("split JSON");
+    assert_eq!(split_json["command"], "split");
+    assert_eq!(split_json["ok"], true);
+    assert_eq!(split_json["archiveApproval"]["signed"], true);
+    assert_eq!(split_json["archiveApproval"]["suite"], "mldsa-87");
+    assert_eq!(split_json["archiveApproval"]["strongPq"], true);
+    assert_eq!(split_json["archiveApproval"]["signatureEmbedded"], true);
+    assert_eq!(split_json["archiveApproval"]["publicKeyFileEmbedded"], true);
+    assert_ne!(
+        split_json["lifecycleBundleDigestHex"],
+        split_json["unsignedLifecycleBundleDigestHex"]
+    );
+
+    let archive_state_path = out_dir.join("payload.archive-state.json");
+    let lifecycle_bundle_path = out_dir.join("payload.lifecycle-bundle.json");
+    let lifecycle_bundle: Value = serde_json::from_slice(
+        &std::fs::read(&lifecycle_bundle_path).expect("read lifecycle bundle"),
+    )
+    .expect("lifecycle bundle JSON");
+    assert!(!lifecycle_bundle["attachments"]["publicKeys"]
+        .as_array()
+        .expect("public keys")
+        .is_empty());
+    assert!(
+        !lifecycle_bundle["attachments"]["archiveApprovalSignatures"]
+            .as_array()
+            .expect("archive approval signatures")
+            .is_empty()
+    );
+
+    let shard_paths = (1..=5)
+        .map(|index| out_dir.join(format!("payload.part{index}-of-5.qcont")))
+        .collect::<Vec<_>>();
+    let first_shard =
+        parse_qvqcont7_shard(&std::fs::read(&shard_paths[0]).expect("read first signed shard"))
+            .expect("parse signed shard");
+    assert_eq!(
+        first_shard.lifecycle_bundle_digest_hex,
+        split_json["lifecycleBundleDigestHex"]
+            .as_str()
+            .expect("lifecycle digest")
+    );
+
+    let verify = Command::new(qvault_cli())
+        .args([
+            "--json",
+            "verify",
+            archive_state_path
+                .to_str()
+                .expect("utf8 archive state path"),
+            "--bundle",
+            lifecycle_bundle_path
+                .to_str()
+                .expect("utf8 lifecycle bundle path"),
+            "--required-policy-level",
+            "strong-pq-signature",
+        ])
+        .output()
+        .expect("run verify for signed split");
+    assert!(
+        verify.status.success(),
+        "status: {:?}, stderr: {}",
+        verify.status,
+        String::from_utf8_lossy(&verify.stderr)
+    );
+    let verify_json: Value = serde_json::from_slice(&verify.stdout).expect("verify JSON");
+    assert_eq!(verify_json["ok"], true);
+    assert_eq!(verify_json["policy"]["satisfied"], true);
+    assert_eq!(verify_json["status"]["strongPqSignatureVerified"], true);
+
+    let mut restore_args = vec![
+        "--json".to_string(),
+        "restore".to_string(),
+        "--bundle".to_string(),
+        lifecycle_bundle_path
+            .to_str()
+            .expect("utf8 lifecycle bundle path")
+            .to_string(),
+        "--dry-run".to_string(),
+    ];
+    restore_args.extend(
+        shard_paths
+            .iter()
+            .map(|path| path.to_str().expect("utf8 shard path").to_string()),
+    );
+    let restore = Command::new(qvault_cli())
+        .args(&restore_args)
+        .output()
+        .expect("run restore dry-run for signed split");
+    assert!(
+        restore.status.success(),
+        "status: {:?}, stderr: {}",
+        restore.status,
+        String::from_utf8_lossy(&restore.stderr)
+    );
+    let restore_json: Value = serde_json::from_slice(&restore.stdout).expect("restore JSON");
+    assert_eq!(restore_json["ok"], true);
+    assert_eq!(restore_json["dryRun"], true);
+    assert_eq!(restore_json["authenticity"]["policy"]["satisfied"], true);
+}
+
+#[test]
+fn split_archive_approval_key_failure_writes_no_split_outputs() {
+    let (qenc_path, private_key_path) = create_encrypted_payload_fixture("signed-split-bad-key");
+    let bad_signer_key_path = qenc_path.parent().expect("fixture parent").join("bad.pqsk");
+    let out_dir = qenc_path
+        .parent()
+        .expect("fixture parent")
+        .join("bad-signed-shards");
+    std::fs::write(&bad_signer_key_path, b"not-a-pqsk").expect("write bad pqsk");
+
+    let output = Command::new(qvault_cli())
+        .args([
+            "--json",
+            "split",
+            qenc_path.to_str().expect("utf8 qenc path"),
+            "--private-key",
+            private_key_path.to_str().expect("utf8 private key path"),
+            "--n",
+            "5",
+            "--k",
+            "3",
+            "--out",
+            out_dir.to_str().expect("utf8 out dir"),
+            "--auth-policy-level",
+            "strong-pq-signature",
+            "--min-valid-signatures",
+            "1",
+            "--archive-approval-key",
+            bad_signer_key_path
+                .to_str()
+                .expect("utf8 bad signer key path"),
+        ])
+        .output()
+        .expect("run signed split with bad key");
+
+    assert!(!output.status.success(), "bad signing key should fail");
+    assert!(
+        !out_dir.exists(),
+        "split output directory must not be created after signing-key failure"
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).expect("error JSON");
+    assert_eq!(value["command"], "split");
+    assert_eq!(value["ok"], false);
+    assert_eq!(value["qvCode"], "FORMAT_POLICY_REJECT");
 }
 
 #[test]
