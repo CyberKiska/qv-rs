@@ -53,14 +53,21 @@ $QV --json version
 
 By default, the CLI rejects symlink path components for safer local file handling. Use `--allow-symlink` only when you intentionally trust the path tree.
 
-## Typical Archive Flow
+## Rust-Only Archive Approval Workflow
 
-This flow creates a keypair, encrypts a file, splits it into successor shards, verifies the resulting lifecycle bundle, performs a dry-run restore, restores the `.qenc` and secret key, and decrypts the restored archive.
+This flow creates a Quantum Vault archive, signs its canonical archive-state descriptor with a PQ signing key, attaches the signature and public key to lifecycle evidence, verifies policy, restores the archive, and decrypts the restored container. It uses only the Rust CLI.
+
+Container creation and signing are separate operations:
+
+- `keygen`, `encrypt`, and `split` create the encrypted archive and recoverable shard cohort.
+- `signer-keygen` creates PQ signing identity files: `signer.pqsk` and `signer.pqpk`.
+- `sign --target archive-state` signs the exact canonical archive-state bytes emitted by `split`.
+- `attach --sig --pqpk` binds the detached signature and public key into lifecycle evidence so policy evaluation can count it.
 
 ### 1. Generate An ML-KEM Keypair
 
 ```bash
-$QV keygen --out vault-keys --name archive-2026- --json
+$QV --json keygen --out vault-keys --name archive-2026-
 ```
 
 This writes:
@@ -73,11 +80,10 @@ The public key is used for encryption. The private key is needed for decrypting 
 ### 2. Encrypt A File
 
 ```bash
-$QV encrypt important.pdf \
+$QV --json encrypt important.pdf \
   --public-key vault-keys/archive-2026-publicKey.qkey \
   --out important.pdf.qenc \
-  --filename important.pdf \
-  --json
+  --filename important.pdf
 ```
 
 The output `.qenc` is the encrypted payload container. The `--filename` value is stored inside encrypted wrapped metadata and is used by `decrypt --use-original-filename`.
@@ -85,14 +91,13 @@ The output `.qenc` is the encrypted payload container. The `--filename` value is
 ### 3. Split Into QVqcont-7 Shards
 
 ```bash
-$QV split important.pdf.qenc \
+$QV --json split important.pdf.qenc \
   --private-key vault-keys/archive-2026-privateKey.qkey \
   --n 5 \
   --k 3 \
   --out important-shards \
   --auth-policy-level strong-pq-signature \
-  --min-valid-signatures 1 \
-  --json
+  --min-valid-signatures 1
 ```
 
 This writes:
@@ -104,61 +109,149 @@ This writes:
 
 The `--n` value is the number of shard files. The `--k` value is the Reed-Solomon data shard count. Under the successor profile, parity is `n - k`, parity must be even, and the Shamir threshold is derived as `k + parity / 2`. For example, `--n 5 --k 3` produces parity `2` and threshold `4`.
 
-### 4. Verify Archive State And Lifecycle Evidence
+The archive-state JSON file is canonical and stable. It is the approval target in the next step.
 
-For an integrity-only archive, verification can succeed without signatures. For a signed archive policy such as `strong-pq-signature`, provide the lifecycle bundle and signer material:
+### 4. Generate A PQ Signing Keypair
 
 ```bash
-$QV verify important-shards/important.pdf.archive-state.json \
-  --bundle important-shards/important.pdf.lifecycle-bundle.json \
-  --pqpk signer.pqpk \
-  --sig important.pdf.archive-state.json.qsig \
-  --ots important.pdf.archive-state.json.qsig.ots \
-  --required-policy-level strong-pq-signature \
-  --json
+$QV --json signer-keygen \
+  --suite mldsa-87 \
+  --out signer
 ```
 
-Archive approval signatures target canonical archive-state bytes. OpenTimestamps evidence links to `SHA-256(detached signature bytes)` and is reported separately; it does not satisfy archive policy by itself.
+This writes:
 
-### 5. Dry-Run Restore
+- `signer.pqsk`: secret PQ signing key, written through the secret-file writer
+- `signer.pqpk`: public PQ signing key, safe to distribute as signer identity material
+
+JSON output reports public/audit-safe fields such as suite, public-key path, secret-key path, and signer fingerprint. It never includes secret bytes, secret-key base64, seed material, or secret-key digests.
+
+### 5. Sign The Canonical Archive State
+
+```bash
+$QV --json sign important-shards/important.pdf.archive-state.json \
+  --secret-key signer.pqsk \
+  --target archive-state \
+  --out important.pdf.archive-state.json.qsig
+```
+
+`sign --target archive-state` signs the exact bytes read from `important-shards/important.pdf.archive-state.json` after verifying that those bytes are a canonical archive-state descriptor. It does not sign `important-shards/important.pdf.lifecycle-bundle.json`.
+
+That distinction matters. Archive-state bytes define the stable archive identity and policy commitment. Lifecycle-bundle bytes are mutable evidence: they can later receive detached signatures, `.pqpk` public keys, OpenTimestamps proofs, transition records, and source evidence without changing what the approval signature covers.
+
+For generic document signing, use the default target:
+
+```bash
+$QV --json sign document.pdf \
+  --secret-key signer.pqsk \
+  --out document.pdf.qsig
+```
+
+### 6. Attach The Signature And Public Key
+
+```bash
+$QV --json attach \
+  --shards important-shards/*.qcont \
+  --bundle important-shards/important.pdf.lifecycle-bundle.json \
+  --sig important.pdf.archive-state.json.qsig \
+  --pqpk signer.pqpk \
+  --out-bundle important-approved.lifecycle-bundle.json \
+  --out-shards important-approved-shards
+```
+
+`attach --sig --pqpk` imports the detached archive approval signature and pins the signer public key into lifecycle evidence. This is what lets `verify` and `restore` count the PQ signature toward `strong-pq-signature` policy.
+
+A `.qsig` embeds a signer public key for self-contained cryptographic verification, but that embedded key is not a trusted identity by itself. Embedded-only verification proves that the signature is internally consistent; it does not prove that the signer was authorized. Archive policy is satisfied only when signer identity is pinned by lifecycle-bundle public-key material or an explicit user pin such as `--pqpk`.
+
+### 7. Verify Archive State And Lifecycle Evidence
+
+After attachment, policy verification can use the approved lifecycle bundle directly:
+
+```bash
+$QV --json verify important-shards/important.pdf.archive-state.json \
+  --bundle important-approved.lifecycle-bundle.json \
+  --required-policy-level strong-pq-signature
+```
+
+For automation, check:
+
+- `ok`
+- `policy.satisfied`
+- `status.strongPqSignatureVerified`
+- `verification.counts.pinnedValidStrongPq`
+
+Typical successful policy JSON includes these stable fields:
+
+```json
+{
+  "command": "verify",
+  "ok": true,
+  "policy": {
+    "satisfied": true
+  },
+  "status": {
+    "strongPqSignatureVerified": true
+  }
+}
+```
+
+You can also verify a detached `.qsig` against arbitrary document bytes without lifecycle policy evaluation:
+
+```bash
+$QV --json sig-verify important-shards/important.pdf.archive-state.json \
+  --sig important.pdf.archive-state.json.qsig \
+  --pqpk signer.pqpk
+```
+
+`sig-verify` reports cryptographic verification, `trustSource`, and whether a supplied `.pqpk` was used. It does not evaluate archive policy and does not replace `verify` or `restore`.
+
+Typical successful pinned signature JSON includes:
+
+```json
+{
+  "command": "sig-verify",
+  "ok": true,
+  "cryptographicOk": true,
+  "trusted": true,
+  "trustSource": "loaded-pqpk",
+  "lifecyclePolicyEvaluated": false,
+  "countedForLifecyclePolicy": false
+}
+```
+
+Archive approval signatures target canonical archive-state bytes. OpenTimestamps evidence, when present, links to `SHA-256(detached signature bytes)` and is reported separately; it does not satisfy archive policy by itself.
+
+### 8. Restore The `.qenc` And Secret Key
 
 Dry-run restore checks shard consistency, lifecycle evidence, restored integrity, and archive policy without writing recovered secret material:
 
 ```bash
-$QV restore important-shards/*.qcont \
-  --bundle important-shards/important.pdf.lifecycle-bundle.json \
-  --pqpk signer.pqpk \
-  --sig important.pdf.archive-state.json.qsig \
-  --ots important.pdf.archive-state.json.qsig.ots \
-  --dry-run \
-  --json
+$QV --json restore important-approved-shards/*.qcont \
+  --bundle important-approved.lifecycle-bundle.json \
+  --dry-run
 ```
 
 Use dry-run before write-mode restore, especially when shards may contain multiple lifecycle-bundle variants.
 
-### 6. Restore The `.qenc` And Secret Key
+Write-mode restore emits the encrypted `.qenc` and recovered ML-KEM secret key:
 
 ```bash
-$QV restore important-shards/*.qcont \
-  --bundle important-shards/important.pdf.lifecycle-bundle.json \
-  --pqpk signer.pqpk \
-  --sig important.pdf.archive-state.json.qsig \
+$QV --json restore important-approved-shards/*.qcont \
+  --bundle important-approved.lifecycle-bundle.json \
   --output-qenc restored/important.pdf.qenc \
-  --output-secret-key restored/important-privateKey.qkey \
-  --json
+  --output-secret-key restored/important-privateKey.qkey
 ```
 
-Restore writes the encrypted `.qenc` and the recovered ML-KEM secret key. It does not automatically decrypt the restored container.
+Restore is policy-gated. A strong PQ archive will not restore unless the lifecycle bundle or explicit restore inputs include enough pinned valid signatures to satisfy the archive policy.
 
 If restore reports that lifecycle-bundle variant acknowledgement is required, inspect the JSON report and rerun with `--accept-policy-warnings` only if the operator accepts the residual bundle-variant risk.
 
-### 7. Decrypt A Restored Container
+### 9. Decrypt A Restored Container
 
 ```bash
-$QV decrypt restored/important.pdf.qenc \
+$QV --json decrypt restored/important.pdf.qenc \
   --private-key restored/important-privateKey.qkey \
-  --out restored/important.pdf \
-  --json
+  --out restored/important.pdf
 ```
 
 Or write using encrypted original filename metadata:
@@ -168,6 +261,27 @@ $QV decrypt restored/important.pdf.qenc \
   --private-key restored/important-privateKey.qkey \
   --out-dir restored-files \
   --use-original-filename
+```
+
+## Alternate Verification Without Attachment
+
+For a one-off policy check, `verify` and `restore` can accept detached signatures and signer pins directly. This does not mutate the lifecycle bundle:
+
+```bash
+$QV --json verify important-shards/important.pdf.archive-state.json \
+  --bundle important-shards/important.pdf.lifecycle-bundle.json \
+  --sig important.pdf.archive-state.json.qsig \
+  --pqpk signer.pqpk \
+  --required-policy-level strong-pq-signature \
+  --include-detached-summary
+```
+
+```bash
+$QV --json restore important-shards/*.qcont \
+  --bundle important-shards/important.pdf.lifecycle-bundle.json \
+  --sig important.pdf.archive-state.json.qsig \
+  --pqpk signer.pqpk \
+  --dry-run
 ```
 
 ## Attach Evidence

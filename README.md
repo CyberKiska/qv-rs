@@ -26,11 +26,11 @@ Implemented:
 - `QVqcont-7` split, restore, attach, and same-state reshare
 - archive policy evaluation with fail-closed restore gating
 - `.qsig`, `.pqpk`, Stellar `.sig`, and OpenTimestamps linkage handling
+- Rust-native PQ signing key generation, detached `.qsig` creation, and generic `.qsig` verification
 - stable CLI JSON envelopes and JS-aligned `qvCode` exit taxonomy
 
 Not implemented:
 
-- detached signature creation
 - automatic signing during `split`
 - full OpenTimestamps calendar attestation validation
 - network services, daemon mode, or RPC mode
@@ -100,6 +100,9 @@ Primary commands:
 - `split`
 - `attach`
 - `reshare`
+- `signer-keygen`
+- `sign`
+- `sig-verify`
 - `verify`
 - `restore`
 - `inspect`
@@ -108,6 +111,57 @@ Primary commands:
 - `version`
 
 Global reporting flags include `--json`, `--quiet`, `--allow-symlink`, `--color`, and `--no-color`.
+
+## Rust-Only Archive Approval Workflow
+
+This workflow creates a current Quantum Vault archive and satisfies a strong PQ archive-approval policy without relying on the JavaScript CLI or network services. It keeps container creation and signing separate: `encrypt` and `split` create the Quantum Vault archive artifacts, while `signer-keygen`, `sign`, and `attach` create and bind detached PQ approval evidence.
+
+```bash
+qvault-cli --json keygen --out vault-keys --name archive-2026-
+
+qvault-cli --json encrypt important.pdf \
+  --public-key vault-keys/archive-2026-publicKey.qkey \
+  --out important.pdf.qenc \
+  --filename important.pdf
+
+qvault-cli --json split important.pdf.qenc \
+  --private-key vault-keys/archive-2026-privateKey.qkey \
+  --n 5 \
+  --k 3 \
+  --out important-shards \
+  --auth-policy-level strong-pq-signature \
+  --min-valid-signatures 1
+
+qvault-cli --json signer-keygen \
+  --suite mldsa-87 \
+  --out signer
+
+qvault-cli --json sign important-shards/important.pdf.archive-state.json \
+  --secret-key signer.pqsk \
+  --target archive-state \
+  --out important.pdf.archive-state.json.qsig
+
+qvault-cli --json attach \
+  --shards important-shards/*.qcont \
+  --bundle important-shards/important.pdf.lifecycle-bundle.json \
+  --sig important.pdf.archive-state.json.qsig \
+  --pqpk signer.pqpk \
+  --out-bundle important-approved.lifecycle-bundle.json \
+  --out-shards important-approved-shards
+
+qvault-cli --json verify important-shards/important.pdf.archive-state.json \
+  --bundle important-approved.lifecycle-bundle.json \
+  --required-policy-level strong-pq-signature
+
+qvault-cli --json restore important-approved-shards/*.qcont \
+  --bundle important-approved.lifecycle-bundle.json \
+  --output-qenc restored/important.pdf.qenc \
+  --output-secret-key restored/important-privateKey.qkey
+```
+
+`sign --target archive-state` signs the exact canonical archive-state descriptor bytes read from `important-shards/important.pdf.archive-state.json`. It does not sign the lifecycle bundle. This distinction is intentional: the archive-state descriptor is the stable archive identity and policy commitment, while the lifecycle bundle is mutable evidence that can later receive signatures, public keys, timestamps, transition records, and source evidence.
+
+The `.qsig` embeds enough public key material for cryptographic self-verification, but embedded-only keys are not trusted identities. A signature satisfies archive policy only when the signer is pinned by trusted public-key material, either attached into the lifecycle bundle with `attach --sig --pqpk` or supplied explicitly to policy commands with `--pqpk`. `sig-verify` verifies arbitrary document bytes and reports whether verification used a supplied `.pqpk` or only the embedded key; it does not evaluate lifecycle policy and should not be used as a substitute for `verify` or `restore`.
 
 ## Compatibility Targets
 
@@ -143,12 +197,13 @@ OpenTimestamps evidence is linked to `SHA-256(detached signature bytes)`. OTS ev
 - Decrypt verifies the inner wrapped-payload file hash.
 - Split verifies that the provided ML-KEM secret key matches the `.qenc` before producing shards.
 - Restore validates embedded archive-state, cohort-binding, lifecycle-bundle, `.qenc` metadata, key commitment, share commitments, fragment body hashes, and policy.
-- Secret-key files written by `keygen` and `restore` use owner-only permissions on Unix where available.
+- Secret-key files written by `keygen`, `signer-keygen`, and `restore` use owner-only permissions on Unix where available.
+- `.pqsk` signing keys authorize archive approvals; keep them separate from archive storage and publish/pin only `.pqpk` public keys.
 - Secret zeroization is best-effort. Temporary shared secrets, derived keys, and intermediate buffers are cleared where feasible; returned plaintext and returned secret-key bytes remain caller-controlled memory.
 
 ## Remaining Gaps
 
 - No automated end-to-end JS/Rust fixture regeneration harness is checked in yet.
-- Detached signature creation is still external to this CLI.
+- Automatic archive approval signing during `split` is not implemented.
 - OTS validation is structural/linkage reporting, not full calendar verification.
 - Full workspace CI should continue expanding malformed and cross-implementation cases before production release.
