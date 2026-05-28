@@ -52,9 +52,10 @@ pub use reshare::{
     ReshareSameStateParams, ReshareTransitionOptions, ReshareVerificationReport, ResharedSameState,
 };
 pub use source_evidence::{
-    canonicalize_source_evidence, parse_source_evidence_bytes, CanonicalSourceEvidence,
-    SourceEvidence, SOURCE_EVIDENCE_CANONICALIZATION, SOURCE_EVIDENCE_SCHEMA,
-    SOURCE_EVIDENCE_VERSION,
+    build_source_file_evidence, canonicalize_source_evidence, parse_source_evidence_bytes,
+    CanonicalSourceEvidence, SourceEvidence, SourceFileEvidenceOptions,
+    SOURCE_EVIDENCE_CANONICALIZATION, SOURCE_EVIDENCE_OBJECT_TYPE_FILE,
+    SOURCE_EVIDENCE_RELATION_ENCRYPTED_SOURCE, SOURCE_EVIDENCE_SCHEMA, SOURCE_EVIDENCE_VERSION,
 };
 pub use transition::{
     canonicalize_transition_record, parse_transition_record_bytes, CanonicalTransitionRecord,

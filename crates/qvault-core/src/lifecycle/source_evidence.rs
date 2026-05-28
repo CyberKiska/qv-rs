@@ -9,7 +9,8 @@ use crate::manifest::jcs::{
 use crate::manifest::strict_json::{assert_canonical_bytes, parse_json_bytes_strict};
 
 use super::digests::{
-    normalize_digest_object, sha3_512_digest, DigestObject, SHA256_ALG, SHA3_256_ALG, SHA3_512_ALG,
+    digest_to_value, normalize_digest_object, sha256_digest, sha3_512_digest, DigestObject,
+    SHA256_ALG, SHA3_256_ALG, SHA3_512_ALG,
 };
 use super::validation::{
     array, exact_keys, exact_string, number, object_from_pairs, string, string_array, value_object,
@@ -19,6 +20,8 @@ pub const SOURCE_EVIDENCE_SCHEMA: &str = "quantum-vault-source-evidence/v1";
 pub const SOURCE_EVIDENCE_VERSION: u64 = 1;
 pub const SOURCE_EVIDENCE_CANONICALIZATION: &str = MANIFEST_CANONICALIZATION_LABEL;
 pub const SOURCE_EVIDENCE_TYPE_DEFAULT: &str = "source-evidence";
+pub const SOURCE_EVIDENCE_RELATION_ENCRYPTED_SOURCE: &str = "encrypted-source";
+pub const SOURCE_EVIDENCE_OBJECT_TYPE_FILE: &str = "file";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceEvidence {
@@ -32,6 +35,21 @@ pub struct CanonicalSourceEvidence {
     pub bytes: Vec<u8>,
     pub digest: DigestObject,
     pub canonicalization_label: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceFileEvidenceOptions<'a> {
+    pub relation_type: &'a str,
+    pub source_object_type: &'a str,
+}
+
+impl Default for SourceFileEvidenceOptions<'_> {
+    fn default() -> Self {
+        Self {
+            relation_type: SOURCE_EVIDENCE_RELATION_ENCRYPTED_SOURCE,
+            source_object_type: SOURCE_EVIDENCE_OBJECT_TYPE_FILE,
+        }
+    }
 }
 
 pub fn normalize_digest_array(value: Option<&Value>, field: &str) -> Result<Value> {
@@ -177,9 +195,88 @@ pub fn canonicalize_source_evidence(value: &Value) -> Result<CanonicalSourceEvid
     })
 }
 
+pub fn build_source_file_evidence(
+    source_bytes: &[u8],
+    options: SourceFileEvidenceOptions<'_>,
+) -> Result<CanonicalSourceEvidence> {
+    let value = object_from_pairs(vec![
+        ("schema", Value::String(SOURCE_EVIDENCE_SCHEMA.to_string())),
+        ("version", number(SOURCE_EVIDENCE_VERSION)),
+        (
+            "sourceEvidenceType",
+            Value::String(SOURCE_EVIDENCE_TYPE_DEFAULT.to_string()),
+        ),
+        (
+            "canonicalization",
+            Value::String(SOURCE_EVIDENCE_CANONICALIZATION.to_string()),
+        ),
+        (
+            "relationType",
+            Value::String(options.relation_type.to_string()),
+        ),
+        (
+            "sourceObjectType",
+            Value::String(options.source_object_type.to_string()),
+        ),
+        (
+            "sourceDigests",
+            Value::Array(vec![
+                digest_to_value(&sha3_512_digest(source_bytes)),
+                digest_to_value(&sha256_digest(source_bytes)),
+            ]),
+        ),
+    ]);
+    canonicalize_source_evidence(&value)
+}
+
 pub fn parse_source_evidence_bytes(bytes: &[u8]) -> Result<CanonicalSourceEvidence> {
     let parsed = parse_json_bytes_strict(bytes)?;
     let canonicalized = canonicalize_source_evidence(&parsed)?;
     assert_canonical_bytes(bytes, &canonicalized.bytes, "Source evidence")?;
     Ok(canonicalized)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hash::{sha256_hex, sha3_512_hex};
+
+    #[test]
+    fn source_file_evidence_builder_commits_to_source_bytes() {
+        let source = b"source bytes that will be encrypted";
+        let canonical =
+            build_source_file_evidence(source, SourceFileEvidenceOptions::default()).unwrap();
+
+        assert_eq!(
+            canonical
+                .source_evidence
+                .value
+                .get("relationType")
+                .and_then(Value::as_str),
+            Some(SOURCE_EVIDENCE_RELATION_ENCRYPTED_SOURCE)
+        );
+        assert_eq!(
+            canonical
+                .source_evidence
+                .value
+                .get("sourceObjectType")
+                .and_then(Value::as_str),
+            Some(SOURCE_EVIDENCE_OBJECT_TYPE_FILE)
+        );
+
+        let digests = canonical
+            .source_evidence
+            .value
+            .get("sourceDigests")
+            .and_then(Value::as_array)
+            .unwrap();
+        assert_eq!(digests.len(), 2);
+        assert_eq!(digests[0]["alg"], SHA3_512_ALG);
+        assert_eq!(digests[0]["value"], sha3_512_hex(source));
+        assert_eq!(digests[1]["alg"], SHA256_ALG);
+        assert_eq!(digests[1]["value"], sha256_hex(source));
+
+        let reparsed = parse_source_evidence_bytes(&canonical.bytes).unwrap();
+        assert_eq!(reparsed.bytes, canonical.bytes);
+    }
 }
