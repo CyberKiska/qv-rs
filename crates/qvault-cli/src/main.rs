@@ -17,10 +17,14 @@ mod successor_main {
     use base64::Engine as _;
     use clap::{Parser, Subcommand, ValueEnum};
     use qvault_core::auth::AuthPolicyLevel;
-    use qvault_core::auth::{AuthenticityReport, NamedBinaryArtifact, VerificationInputs};
-    use qvault_core::bytes::from_hex;
+    use qvault_core::auth::{
+        generate_signing_keypair, get_signature_suite_info, pack_public_key_file,
+        pack_secret_key_file, AuthenticityReport, NamedBinaryArtifact, PqSignatureSuite,
+        VerificationInputs,
+    };
+    use qvault_core::bytes::{from_hex, to_hex};
     use qvault_core::error::{coded, QvCode, QvError};
-    use qvault_core::hash::sha3_512_hex;
+    use qvault_core::hash::{sha3_256, sha3_512_hex};
     use qvault_core::lifecycle::{
         parse_archive_state_descriptor_bytes, parse_cohort_binding_bytes,
         parse_lifecycle_bundle_bytes, parse_source_evidence_bytes, parse_transition_record_bytes,
@@ -73,6 +77,7 @@ mod successor_main {
     #[derive(Subcommand)]
     enum Command {
         Keygen(KeygenArgs),
+        SignerKeygen(SignerKeygenArgs),
         Encrypt(EncryptArgs),
         Decrypt(DecryptArgs),
         Split(SplitArgs),
@@ -103,6 +108,16 @@ mod successor_main {
         force: bool,
         #[arg(long)]
         print_public: bool,
+    }
+
+    #[derive(Parser)]
+    struct SignerKeygenArgs {
+        #[arg(long, value_enum, default_value = "mldsa-87")]
+        suite: PqSignatureSuiteArg,
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long)]
+        force: bool,
     }
 
     #[derive(Parser)]
@@ -384,6 +399,38 @@ mod successor_main {
         }
     }
 
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+    enum PqSignatureSuiteArg {
+        #[value(name = "mldsa-44", alias = "ml-dsa-44")]
+        MlDsa44,
+        #[value(name = "mldsa-65", alias = "ml-dsa-65")]
+        MlDsa65,
+        #[value(name = "mldsa-87", alias = "ml-dsa-87")]
+        MlDsa87,
+        #[value(name = "slhdsa-shake-128s", alias = "slh-dsa-shake-128s")]
+        SlhDsaShake128s,
+        #[value(name = "slhdsa-shake-192s", alias = "slh-dsa-shake-192s")]
+        SlhDsaShake192s,
+        #[value(name = "slhdsa-shake-256s", alias = "slh-dsa-shake-256s")]
+        SlhDsaShake256s,
+        #[value(name = "slhdsa-shake-256f", alias = "slh-dsa-shake-256f")]
+        SlhDsaShake256f,
+    }
+
+    impl From<PqSignatureSuiteArg> for PqSignatureSuite {
+        fn from(value: PqSignatureSuiteArg) -> Self {
+            match value {
+                PqSignatureSuiteArg::MlDsa44 => PqSignatureSuite::MlDsa44,
+                PqSignatureSuiteArg::MlDsa65 => PqSignatureSuite::MlDsa65,
+                PqSignatureSuiteArg::MlDsa87 => PqSignatureSuite::MlDsa87,
+                PqSignatureSuiteArg::SlhDsaShake128s => PqSignatureSuite::SlhDsaShake128s,
+                PqSignatureSuiteArg::SlhDsaShake192s => PqSignatureSuite::SlhDsaShake192s,
+                PqSignatureSuiteArg::SlhDsaShake256s => PqSignatureSuite::SlhDsaShake256s,
+                PqSignatureSuiteArg::SlhDsaShake256f => PqSignatureSuite::SlhDsaShake256f,
+            }
+        }
+    }
+
     pub fn main() -> Result<()> {
         let cli = match Cli::try_parse() {
             Ok(cli) => cli,
@@ -410,6 +457,7 @@ mod successor_main {
         let _color_flags_accepted = (cli.color, cli.no_color);
         match cli.command {
             Command::Keygen(args) => run_keygen(args, ctx),
+            Command::SignerKeygen(args) => run_signer_keygen(args, ctx),
             Command::Encrypt(args) => run_encrypt(args, ctx),
             Command::Decrypt(args) => run_decrypt(args, ctx),
             Command::Split(args) => run_split(args, ctx),
@@ -516,6 +564,76 @@ mod successor_main {
             if args.print_public {
                 println!("{}", BASE64_STANDARD.encode(&public_key));
             }
+        }
+        Ok(())
+    }
+
+    fn run_signer_keygen(args: SignerKeygenArgs, ctx: CliContext) -> Result<()> {
+        let suite = PqSignatureSuite::from(args.suite);
+        let suite_info = get_signature_suite_info(suite.canonical_name())?;
+        let (public_key_path, secret_key_path) = signer_key_output_paths(&args.out)?;
+        let output_paths = [public_key_path.clone(), secret_key_path.clone()];
+
+        prepare_output_parent_dirs(&output_paths, ctx)?;
+        preflight_outputs(&output_paths, args.force, ctx)?;
+
+        let keypair = generate_signing_keypair(suite)?;
+        let (_, public_key, secret_key) = keypair.into_parts();
+        let public_key_file = pack_public_key_file(suite, &public_key)?;
+        let secret_key_file = Zeroizing::new(pack_secret_key_file(suite, secret_key.as_slice())?);
+        let signer_fingerprint_hex = to_hex(&sha3_256(&public_key));
+        let public_key_digest_hex = sha3_512_hex(&public_key);
+
+        write_file_checked(&public_key_path, &public_key_file, ctx).with_context(|| {
+            format!(
+                "failed to write public signing key {}; secret signing key was not written",
+                public_key_path.display()
+            )
+        })?;
+        write_secret_file_checked(
+            &secret_key_path,
+            secret_key_file.as_slice(),
+            args.force,
+            ctx,
+        )
+        .with_context(|| {
+            format!(
+                "public signing key was written to {}; failed to write secret signing key {}",
+                public_key_path.display(),
+                secret_key_path.display()
+            )
+        })?;
+
+        if ctx.json {
+            let report = serde_json::json!({
+                "command": "signer-keygen",
+                "ok": true,
+                "cliSchemaVersion": 1,
+                "suite": suite_info.canonical,
+                "suiteDisplayName": suite_info.display_name,
+                "signatureFamily": suite_info.family,
+                "strongPq": suite_info.strong_pq,
+                "publicKeyType": suite_info.public_key_type,
+                "publicKeyPath": public_key_path,
+                "secretKeyPath": secret_key_path,
+                "signerFingerprintAlg": "SHA3-256",
+                "signerFingerprintHex": signer_fingerprint_hex,
+                "publicKeyDigestAlg": "SHA3-512",
+                "publicKeyDigestHex": public_key_digest_hex,
+                "publicKeyLength": suite.public_key_len(),
+                "publicKeyFileLength": public_key_file.len()
+            });
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        } else if !ctx.quiet {
+            println!("Generated PQ signing keypair.");
+            println!("Suite: {}", suite_info.display_name);
+            println!(
+                "Strong PQ: {}",
+                if suite_info.strong_pq { "yes" } else { "no" }
+            );
+            println!("Signer fingerprint (SHA3-256): {signer_fingerprint_hex}");
+            println!("Public key: {}", public_key_path.display());
+            println!("Secret key: {}", secret_key_path.display());
         }
         Ok(())
     }
@@ -1729,6 +1847,37 @@ mod successor_main {
             .with_context(|| format!("failed to write secret file {}", path.display()))
     }
 
+    fn signer_key_output_paths(out_prefix: &Path) -> Result<(PathBuf, PathBuf)> {
+        if out_prefix.as_os_str().is_empty() || out_prefix.file_name().is_none() {
+            bail!("--out must name an output file prefix");
+        }
+        Ok((
+            append_file_name_os_suffix(out_prefix, ".pqpk"),
+            append_file_name_os_suffix(out_prefix, ".pqsk"),
+        ))
+    }
+
+    fn append_file_name_os_suffix(path: &Path, suffix: &str) -> PathBuf {
+        let mut file_name = path
+            .file_name()
+            .expect("caller checked file_name")
+            .to_os_string();
+        file_name.push(suffix);
+        path.with_file_name(file_name)
+    }
+
+    fn prepare_output_parent_dirs(paths: &[PathBuf], ctx: CliContext) -> Result<()> {
+        for path in paths {
+            if let Some(parent) = path.parent().filter(|value| !value.as_os_str().is_empty()) {
+                reject_symlink_components(parent, ctx.allow_symlink)?;
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create {}", parent.display()))?;
+                reject_symlink_components(parent, ctx.allow_symlink)?;
+            }
+        }
+        Ok(())
+    }
+
     #[cfg(unix)]
     fn write_secret_file_platform(path: &Path, bytes: &[u8], force: bool) -> Result<()> {
         use std::os::unix::fs::OpenOptionsExt;
@@ -2124,6 +2273,7 @@ mod successor_main {
             "split",
             "attach",
             "reshare",
+            "signer-keygen",
             "inspect",
             "canonicalize",
             "verify",
