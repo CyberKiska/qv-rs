@@ -573,6 +573,7 @@ dependencies = [
  "clap",
  "qvault-core",
  "serde_json",
+ "time",
  "zeroize",
 ]
 

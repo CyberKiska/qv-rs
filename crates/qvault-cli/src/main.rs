@@ -18,9 +18,10 @@ mod successor_main {
     use clap::{Parser, Subcommand, ValueEnum};
     use qvault_core::auth::AuthPolicyLevel;
     use qvault_core::auth::{
-        generate_signing_keypair, get_signature_suite_info, pack_public_key_file,
-        pack_secret_key_file, AuthenticityReport, NamedBinaryArtifact, PqSignatureSuite,
-        VerificationInputs,
+        create_detached_qsig, generate_signing_keypair, get_signature_suite_info,
+        pack_public_key_file, pack_secret_key_file, public_from_secret, unpack_secret_key_file,
+        verify_qsig_against_bytes, AuthenticityReport, DetachedSignOptions, DisplayMetadata,
+        NamedBinaryArtifact, PqSignatureSuite, SignatureCheckResult, VerificationInputs,
     };
     use qvault_core::bytes::{from_hex, to_hex};
     use qvault_core::error::{coded, QvCode, QvError};
@@ -46,7 +47,10 @@ mod successor_main {
         parse_qenc_header, EncryptQencOptions,
     };
     use serde_json::Value;
+    use time::{format_description::well_known::Rfc3339, OffsetDateTime, UtcOffset};
     use zeroize::Zeroizing;
+
+    const MAX_SIGNED_TARGET_BYTES: u64 = 512 * 1024 * 1024;
 
     #[derive(Parser)]
     #[command(name = "qvault-cli")]
@@ -78,6 +82,8 @@ mod successor_main {
     enum Command {
         Keygen(KeygenArgs),
         SignerKeygen(SignerKeygenArgs),
+        Sign(SignArgs),
+        SigVerify(SigVerifyArgs),
         Encrypt(EncryptArgs),
         Decrypt(DecryptArgs),
         Split(SplitArgs),
@@ -118,6 +124,40 @@ mod successor_main {
         out: PathBuf,
         #[arg(long)]
         force: bool,
+    }
+
+    #[derive(Parser)]
+    struct SignArgs {
+        #[arg(help = "Input file whose exact bytes are signed")]
+        input_file: PathBuf,
+        #[arg(long, help = "Detached PQ signing secret key (.pqsk)")]
+        secret_key: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long, value_enum, default_value = "bytes")]
+        target: SignTargetArg,
+        #[arg(
+            long,
+            help = "Display filename stored in unauthenticated QSIG metadata"
+        )]
+        filename: Option<String>,
+        #[arg(
+            long,
+            help = "Display creation timestamp normalized to UTC milliseconds"
+        )]
+        created_at: Option<String>,
+        #[arg(long)]
+        force: bool,
+    }
+
+    #[derive(Parser)]
+    struct SigVerifyArgs {
+        #[arg(help = "Input file whose exact bytes are verified")]
+        input_file: PathBuf,
+        #[arg(long, help = "Detached .qsig signature")]
+        sig: PathBuf,
+        #[arg(long, help = "Authoritative PQ signer public key (.pqpk)")]
+        pqpk: Option<PathBuf>,
     }
 
     #[derive(Parser)]
@@ -431,6 +471,25 @@ mod successor_main {
         }
     }
 
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+    enum SignTargetArg {
+        Bytes,
+        ArchiveState,
+        TransitionRecord,
+        SourceEvidence,
+    }
+
+    impl SignTargetArg {
+        fn as_str(self) -> &'static str {
+            match self {
+                Self::Bytes => "bytes",
+                Self::ArchiveState => "archive-state",
+                Self::TransitionRecord => "transition-record",
+                Self::SourceEvidence => "source-evidence",
+            }
+        }
+    }
+
     pub fn main() -> Result<()> {
         let cli = match Cli::try_parse() {
             Ok(cli) => cli,
@@ -458,6 +517,8 @@ mod successor_main {
         match cli.command {
             Command::Keygen(args) => run_keygen(args, ctx),
             Command::SignerKeygen(args) => run_signer_keygen(args, ctx),
+            Command::Sign(args) => run_sign(args, ctx),
+            Command::SigVerify(args) => run_sig_verify(args, ctx),
             Command::Encrypt(args) => run_encrypt(args, ctx),
             Command::Decrypt(args) => run_decrypt(args, ctx),
             Command::Split(args) => run_split(args, ctx),
@@ -634,6 +695,169 @@ mod successor_main {
             println!("Signer fingerprint (SHA3-256): {signer_fingerprint_hex}");
             println!("Public key: {}", public_key_path.display());
             println!("Secret key: {}", secret_key_path.display());
+        }
+        Ok(())
+    }
+
+    fn run_sign(args: SignArgs, ctx: CliContext) -> Result<()> {
+        validate_optional_filename(args.filename.as_deref())?;
+        prepare_output_parent_dirs(std::slice::from_ref(&args.out), ctx)?;
+        preflight_outputs(std::slice::from_ref(&args.out), args.force, ctx)?;
+
+        let target_bytes = read_bounded_file_checked(
+            &args.input_file,
+            ctx,
+            MAX_SIGNED_TARGET_BYTES,
+            "sign target",
+        )?;
+        validate_sign_target_bytes(&target_bytes, args.target)?;
+
+        let secret_key_file_bytes = Zeroizing::new(read_file_checked(&args.secret_key, ctx)?);
+        let secret_key_file =
+            unpack_secret_key_file(secret_key_file_bytes.as_slice()).map_err(|error| {
+                coded(
+                    QvCode::InvalidFormat,
+                    format!("invalid PQ signing secret key file: {error}"),
+                )
+            })?;
+        let suite = secret_key_file.suite;
+        let suite_info = get_signature_suite_info(suite.canonical_name())?;
+        let public_key = public_from_secret(suite, secret_key_file.key_bytes())?;
+        let display_metadata = build_sign_display_metadata(&args, target_bytes.len())?;
+        let display_metadata_json = serde_json::json!({
+            "filename": display_metadata.filename.as_deref(),
+            "filesize": display_metadata.filesize,
+            "createdAt": display_metadata.created_at.as_deref()
+        });
+        let artifact = create_detached_qsig(
+            DetachedSignOptions::new(suite, secret_key_file.key_bytes(), &target_bytes)
+                .with_display_metadata(display_metadata),
+        )?;
+        if artifact.public_key != public_key {
+            return Err(coded(
+                QvCode::VerificationFailed,
+                "generated detached PQ signature public key did not match derived signer key",
+            )
+            .into());
+        }
+
+        write_file_checked(&args.out, &artifact.qsig_bytes, ctx)?;
+
+        let signer_fingerprint_hex = to_hex(&artifact.signer_fingerprint_record[1..]);
+        let target_digest_hex = sha3_512_hex(&target_bytes);
+        let signature_digest_hex = sha3_512_hex(&artifact.qsig_bytes);
+        let public_key_digest_hex = sha3_512_hex(&artifact.public_key);
+
+        if ctx.json {
+            let report = serde_json::json!({
+                "command": "sign",
+                "ok": true,
+                "cliSchemaVersion": 1,
+                "signaturePath": args.out,
+                "signatureDigestAlg": "SHA3-512",
+                "signatureDigestHex": signature_digest_hex,
+                "signatureLength": artifact.qsig_bytes.len(),
+                "target": {
+                    "type": args.target.as_str(),
+                    "path": args.input_file,
+                    "digestAlg": "SHA3-512",
+                    "digestHex": target_digest_hex,
+                    "length": target_bytes.len(),
+                    "canonicalLifecycleArtifact": args.target != SignTargetArg::Bytes
+                },
+                "suite": suite_info.canonical,
+                "suiteDisplayName": suite_info.display_name,
+                "signatureFamily": suite_info.family,
+                "strongPq": suite_info.strong_pq,
+                "signerFingerprintAlg": "SHA3-256",
+                "signerFingerprintHex": signer_fingerprint_hex,
+                "publicKeyDigestAlg": "SHA3-512",
+                "publicKeyDigestHex": public_key_digest_hex,
+                "displayMetadata": display_metadata_json
+            });
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        } else if !ctx.quiet {
+            println!("Created detached PQ signature: {}", args.out.display());
+            println!("Target type: {}", args.target.as_str());
+            println!("Suite: {}", suite_info.display_name);
+            println!("Signer fingerprint (SHA3-256): {signer_fingerprint_hex}");
+        }
+        Ok(())
+    }
+
+    fn run_sig_verify(args: SigVerifyArgs, ctx: CliContext) -> Result<()> {
+        let document_bytes = read_bounded_file_checked(
+            &args.input_file,
+            ctx,
+            MAX_SIGNED_TARGET_BYTES,
+            "verification target",
+        )?;
+        let qsig_bytes = read_file_checked(&args.sig, ctx)?;
+        let pqpk_bytes = args
+            .pqpk
+            .as_ref()
+            .map(|path| read_file_checked(path, ctx))
+            .transpose()?;
+        let pqpk_provided = pqpk_bytes.is_some();
+
+        let mut verification =
+            verify_qsig_against_bytes(&document_bytes, &qsig_bytes, pqpk_bytes.as_deref(), None)
+                .map_err(|error| {
+                    coded(
+                        QvCode::InvalidFormat,
+                        format!("detached QSIG verification input rejected: {error}"),
+                    )
+                })?;
+        normalize_sig_verify_result_for_cli(&mut verification, pqpk_provided);
+
+        let reason_code = sig_verify_reason_code(&verification, pqpk_provided);
+        let trust_source = sig_verify_trust_source(&verification, pqpk_provided);
+        let trusted = verification.ok && (verification.bundle_pinned || verification.user_pinned);
+        let document_digest_hex = sha3_512_hex(&document_bytes);
+        let signature_digest_hex = sha3_512_hex(&qsig_bytes);
+
+        if ctx.json {
+            let report = serde_json::json!({
+                "command": "sig-verify",
+                "ok": verification.ok,
+                "cliSchemaVersion": 1,
+                "cryptographicOk": verification.ok,
+                "trusted": trusted,
+                "trustSource": trust_source,
+                "reasonCode": reason_code,
+                "lifecyclePolicyEvaluated": false,
+                "countedForLifecyclePolicy": false,
+                "documentPath": args.input_file,
+                "signaturePath": args.sig,
+                "publicKeyPath": args.pqpk,
+                "documentDigestAlg": "SHA3-512",
+                "documentDigestHex": document_digest_hex,
+                "signatureDigestAlg": "SHA3-512",
+                "signatureDigestHex": signature_digest_hex,
+                "verification": serde_json::to_value(&verification)?,
+                "warnings": verification.warnings
+            });
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if !verification.ok {
+                std::process::exit(map_qv_code_to_exit(QvCode::VerificationFailed));
+            }
+            return Ok(());
+        }
+
+        if !verification.ok {
+            let reason = verification
+                .error
+                .clone()
+                .unwrap_or_else(|| "detached PQ signature verification failed".to_string());
+            return Err(coded(QvCode::VerificationFailed, reason).into());
+        }
+
+        if !ctx.quiet {
+            println!("Detached PQ signature is cryptographically valid.");
+            println!("Trust source: {trust_source}");
+            if !trusted {
+                println!("Signer identity is not pinned by a supplied .pqpk.");
+            }
         }
         Ok(())
     }
@@ -1787,6 +2011,156 @@ mod successor_main {
             .map(str::to_string)
     }
 
+    fn validate_sign_target_bytes(bytes: &[u8], target: SignTargetArg) -> Result<()> {
+        let result = match target {
+            SignTargetArg::Bytes => return Ok(()),
+            SignTargetArg::ArchiveState => parse_archive_state_descriptor_bytes(bytes).map(|_| ()),
+            SignTargetArg::TransitionRecord => parse_transition_record_bytes(bytes).map(|_| ()),
+            SignTargetArg::SourceEvidence => parse_source_evidence_bytes(bytes).map(|_| ()),
+        };
+        result.map_err(|error| {
+            coded(
+                QvCode::InvalidFormat,
+                format!(
+                    "{} signing target must be canonical and valid: {error}",
+                    target.as_str()
+                ),
+            )
+            .into()
+        })
+    }
+
+    fn build_sign_display_metadata(args: &SignArgs, target_len: usize) -> Result<DisplayMetadata> {
+        let filename = args.filename.clone().or_else(|| {
+            (args.target == SignTargetArg::Bytes)
+                .then(|| {
+                    args.input_file
+                        .file_name()
+                        .and_then(|value| value.to_str())
+                        .map(str::to_string)
+                })
+                .flatten()
+        });
+        validate_optional_filename(filename.as_deref())?;
+        let filesize = if args.target == SignTargetArg::Bytes {
+            Some(u64::try_from(target_len).map_err(|_| {
+                coded(
+                    QvCode::UnsupportedFormat,
+                    "sign target length does not fit in display metadata filesize",
+                )
+            })?)
+        } else {
+            None
+        };
+        let created_at = args
+            .created_at
+            .as_deref()
+            .map(normalize_created_at)
+            .transpose()?;
+        Ok(DisplayMetadata {
+            filename,
+            filesize,
+            created_at,
+        })
+    }
+
+    fn normalize_created_at(value: &str) -> Result<String> {
+        let parsed = OffsetDateTime::parse(value, &Rfc3339).map_err(|error| {
+            coded(
+                QvCode::InvalidFormat,
+                format!("--created-at must be valid RFC3339/ISO-8601: {error}"),
+            )
+        })?;
+        let utc = parsed.to_offset(UtcOffset::UTC);
+        if !(0..=9999).contains(&utc.year()) {
+            return Err(coded(
+                QvCode::InvalidFormat,
+                "--created-at year must fit canonical four-digit UTC form",
+            )
+            .into());
+        }
+        Ok(format!(
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+            utc.year(),
+            u8::from(utc.month()),
+            utc.day(),
+            utc.hour(),
+            utc.minute(),
+            utc.second(),
+            utc.millisecond()
+        ))
+    }
+
+    fn sig_verify_reason_code(
+        verification: &SignatureCheckResult,
+        pqpk_provided: bool,
+    ) -> &'static str {
+        if verification.ok {
+            if pqpk_provided && (verification.bundle_pinned || verification.user_pinned) {
+                return "VERIFIED_WITH_PQPK";
+            }
+            if verification.self_signed {
+                return "VERIFIED_EMBEDDED_KEY_UNPINNED";
+            }
+            return "VERIFIED";
+        }
+
+        let error = verification.error.as_deref().unwrap_or_default();
+        if error.contains("Signed SHA3-512 hash does not match") {
+            return "TARGET_DIGEST_MISMATCH";
+        }
+        if error.contains("No verification key available") {
+            return "NO_VERIFICATION_KEY";
+        }
+        if pqpk_provided {
+            return "PQPK_VERIFICATION_FAILED";
+        }
+        "SIGNATURE_VERIFICATION_FAILED"
+    }
+
+    fn normalize_sig_verify_result_for_cli(
+        verification: &mut SignatureCheckResult,
+        pqpk_provided: bool,
+    ) {
+        if !pqpk_provided {
+            return;
+        }
+        if verification.ok {
+            verification.bundle_pinned = false;
+            verification.user_pinned = true;
+            verification.signer_pinned = true;
+            verification.key_source = Some("user-pqpk".to_string());
+            return;
+        }
+        if let Some(error) = verification.error.as_mut() {
+            *error = error
+                .replace("Bundled PQ public key", "Supplied .pqpk")
+                .replace("bundled public key", "supplied .pqpk");
+        }
+    }
+
+    fn sig_verify_trust_source(verification: &SignatureCheckResult, pqpk_provided: bool) -> String {
+        if verification.ok
+            && pqpk_provided
+            && (verification.bundle_pinned || verification.user_pinned)
+        {
+            return "loaded-pqpk".to_string();
+        }
+        if verification.ok && verification.self_signed {
+            return "embedded-only".to_string();
+        }
+        if !verification.ok && pqpk_provided {
+            return "loaded-pqpk-failed".to_string();
+        }
+        if !verification.ok {
+            return "none".to_string();
+        }
+        verification
+            .key_source
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string())
+    }
+
     fn default_restore_output_base(shards: &[PathBuf]) -> PathBuf {
         let Some(first) = shards.first() else {
             return PathBuf::from("restored");
@@ -1819,6 +2193,42 @@ mod successor_main {
     fn read_file_checked(path: &Path, ctx: CliContext) -> Result<Vec<u8>> {
         reject_symlink_components(path, ctx.allow_symlink)?;
         fs::read(path).with_context(|| format!("failed to read {}", path.display()))
+    }
+
+    fn read_bounded_file_checked(
+        path: &Path,
+        ctx: CliContext,
+        max_bytes: u64,
+        label: &str,
+    ) -> Result<Vec<u8>> {
+        reject_symlink_components(path, ctx.allow_symlink)?;
+        let metadata =
+            fs::metadata(path).with_context(|| format!("failed to stat {}", path.display()))?;
+        if !metadata.is_file() {
+            bail!("{label} must be a regular file: {}", path.display());
+        }
+        if metadata.len() > max_bytes {
+            return Err(coded(
+                QvCode::UnsupportedFormat,
+                format!(
+                    "{label} exceeds maximum supported size of {max_bytes} bytes: {}",
+                    path.display()
+                ),
+            )
+            .into());
+        }
+        let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max_bytes {
+            return Err(coded(
+                QvCode::UnsupportedFormat,
+                format!(
+                    "{label} exceeded maximum supported size of {max_bytes} bytes while reading: {}",
+                    path.display()
+                ),
+            )
+            .into());
+        }
+        Ok(bytes)
     }
 
     fn write_file_checked(path: &Path, bytes: &[u8], ctx: CliContext) -> Result<()> {
@@ -2274,6 +2684,8 @@ mod successor_main {
             "attach",
             "reshare",
             "signer-keygen",
+            "sign",
+            "sig-verify",
             "inspect",
             "canonicalize",
             "verify",
