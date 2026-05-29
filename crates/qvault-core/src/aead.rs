@@ -135,5 +135,5 @@ pub fn encrypt_chunk(
                 aad,
             },
         )
-        .map_err(|_| err("AES-GCM encryption failed"))
+        .map_err(|_| coded(QvCode::AeadFailed, "AES-GCM encryption failed"))
 }
