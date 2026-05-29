@@ -566,7 +566,7 @@ dependencies = [
 
 [[package]]
 name = "qvault-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -579,7 +579,7 @@ dependencies = [
 
 [[package]]
 name = "qvault-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
