@@ -2,6 +2,7 @@ use std::sync::OnceLock;
 
 use crate::error::{err, Result};
 use crate::rng::fill_random;
+use zeroize::Zeroizing;
 
 const GENERATOR: u8 = 0xe5;
 const REDUCTION_POLY: u8 = 0x1b;
@@ -129,8 +130,8 @@ fn new_coefficients(
     intercept: u8,
     degree: usize,
     random: &mut RandomSource<'_>,
-) -> Result<Vec<u8>> {
-    let mut coefficients = vec![0u8; degree + 1];
+) -> Result<Zeroizing<Vec<u8>>> {
+    let mut coefficients = Zeroizing::new(vec![0u8; degree + 1]);
     coefficients[0] = intercept;
     random.fill(&mut coefficients[1..])?;
     Ok(coefficients)
@@ -138,8 +139,8 @@ fn new_coefficients(
 
 fn new_coordinates(random: &mut RandomSource<'_>) -> Result<[u8; 255]> {
     let mut coordinates = std::array::from_fn(|i| (i + 1) as u8);
-    let mut random_indices = [0u8; 255];
-    random.fill(&mut random_indices)?;
+    let mut random_indices = Zeroizing::new([0u8; 255]);
+    random.fill(&mut random_indices[..])?;
     for (i, random_index) in random_indices.iter().copied().enumerate() {
         let j = usize::from(random_index % 255);
         coordinates.swap(i, j);
@@ -168,7 +169,7 @@ pub fn split_secret(
 
     let mut random = RandomSource::new(deterministic_random);
     let x_coordinates = new_coordinates(&mut random)?;
-    let mut result = Vec::with_capacity(shares);
+    let mut result = Zeroizing::new(Vec::with_capacity(shares));
     for x in x_coordinates.iter().copied().take(shares) {
         let mut share = vec![0u8; secret.len() + 1];
         share[secret.len()] = x;
@@ -184,7 +185,7 @@ pub fn split_secret(
         }
     }
 
-    Ok(result)
+    Ok(std::mem::take(&mut *result))
 }
 
 pub fn combine_shares<S: AsRef<[u8]>>(shares: &[S]) -> Result<Vec<u8>> {
@@ -209,9 +210,9 @@ pub fn combine_shares<S: AsRef<[u8]>>(shares: &[S]) -> Result<Vec<u8>> {
     }
 
     let secret_length = share_length - 1;
-    let mut secret = vec![0u8; secret_length];
-    let mut x_samples = vec![0u8; shares.len()];
-    let mut y_samples = vec![0u8; shares.len()];
+    let mut secret = Zeroizing::new(vec![0u8; secret_length]);
+    let mut x_samples = Zeroizing::new(vec![0u8; shares.len()]);
+    let mut y_samples = Zeroizing::new(vec![0u8; shares.len()]);
     let mut seen = [false; 256];
 
     for (i, share) in shares.iter().enumerate() {
@@ -233,7 +234,7 @@ pub fn combine_shares<S: AsRef<[u8]>>(shares: &[S]) -> Result<Vec<u8>> {
         *out_byte = interpolate_polynomial(&x_samples, &y_samples, 0)?;
     }
 
-    Ok(secret)
+    Ok(std::mem::take(&mut *secret))
 }
 
 pub fn calculate_threshold_from_rs(n: usize, k: usize) -> Result<usize> {

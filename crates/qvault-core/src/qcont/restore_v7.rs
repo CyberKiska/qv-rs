@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use serde_json::Value;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::auth::successor_policy::finalize_successor_lifecycle_verification;
 use crate::auth::{
@@ -103,6 +103,12 @@ impl std::fmt::Debug for RestoredQvqcont7 {
     }
 }
 
+impl Drop for RestoredQvqcont7 {
+    fn drop(&mut self) {
+        self.priv_key.zeroize();
+    }
+}
+
 struct CandidateCohort<'a> {
     archive_id: String,
     state_id: String,
@@ -152,7 +158,8 @@ pub fn restore_qvqcont7_from_shards(
 
     let candidates = collect_candidate_cohorts(shards)?;
     let (candidate, selected_bundle) = resolve_successor_archive_context(&candidates, options)?;
-    let reconstruction = reconstruct_lifecycle_cohort_material(candidate)?;
+    let mut reconstruction = reconstruct_lifecycle_cohort_material(candidate)?;
+    let mut reconstruction_priv_key = Zeroizing::new(std::mem::take(&mut reconstruction.priv_key));
     let authenticity = evaluate_successor_authenticity(
         &selected_bundle.bundle,
         &selected_bundle.bytes,
@@ -182,7 +189,7 @@ pub fn restore_qvqcont7_from_shards(
 
     Ok(RestoredQvqcont7 {
         qenc_bytes: reconstruction.qenc_bytes,
-        priv_key: reconstruction.priv_key,
+        priv_key: std::mem::take(&mut *reconstruction_priv_key),
         archive_id: candidate.archive_id.clone(),
         state_id: candidate.state_id.clone(),
         cohort_id: candidate.cohort_id.clone(),
@@ -577,21 +584,22 @@ fn reconstruct_lifecycle_cohort_material<'a>(
         ));
     }
 
-    let mut shares = valid_by_index
-        .iter()
-        .flatten()
-        .take(t)
-        .map(|entry| entry.shard.share.clone())
-        .collect::<Vec<_>>();
-    let mut priv_key = combine_shares(&shares).map_err(|error| {
+    let shares = Zeroizing::new(
+        valid_by_index
+            .iter()
+            .flatten()
+            .take(t)
+            .map(|entry| entry.shard.share.clone())
+            .collect::<Vec<_>>(),
+    );
+    let priv_key = combine_shares(shares.as_slice()).map_err(|error| {
         coded(
             QvCode::RestoreFailed,
             format!("Shamir private key reconstruction failed: {error}"),
         )
     })?;
-    for share in &mut shares {
-        share.zeroize();
-    }
+    let mut priv_key = Zeroizing::new(priv_key);
+    drop(shares);
 
     let is_per_chunk = qenc_meta.aead_mode == "per-chunk-aead";
     let mut cipher_chunks = Vec::new();
@@ -645,21 +653,21 @@ fn reconstruct_lifecycle_cohort_material<'a>(
         ));
     }
 
-    let mut shared_secret = decapsulate(&base.encapsulated_key, &priv_key).map_err(|error| {
-        coded(
-            QvCode::RestoreFailed,
-            format!("Recovered private key cannot decapsulate this container: {error}"),
-        )
-    })?;
+    let shared_secret = Zeroizing::new(
+        decapsulate(&base.encapsulated_key, priv_key.as_slice()).map_err(|error| {
+            coded(
+                QvCode::RestoreFailed,
+                format!("Recovered private key cannot decapsulate this container: {error}"),
+            )
+        })?,
+    );
     let derived = derive_key_with_kmac(
-        &shared_secret,
+        &shared_secret[..],
         &base.kdf_salt,
         &base.qenc_meta_bytes,
         &qenc_meta.domain_strings,
     )?;
-    shared_secret.zeroize();
     if !verify_key_commitment(&derived.kenc, &base.key_commitment) {
-        priv_key.zeroize();
         return Err(coded(
             QvCode::RestoredIntegrityFailed,
             "Recovered private key does not satisfy the shard key commitment",
@@ -699,7 +707,7 @@ fn reconstruct_lifecycle_cohort_material<'a>(
         ));
     }
 
-    let recovered_priv_hash = sha3_512_hex(&priv_key);
+    let recovered_priv_hash = sha3_512_hex(priv_key.as_slice());
     let private_key_hash = base
         .meta_json
         .get("privateKeyHash")
@@ -718,7 +726,7 @@ fn reconstruct_lifecycle_cohort_material<'a>(
 
     Ok(Reconstruction {
         qenc_bytes,
-        priv_key,
+        priv_key: std::mem::take(&mut *priv_key),
         container_id,
         container_hash: expected_qenc_hash,
         private_key_hash,

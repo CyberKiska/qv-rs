@@ -189,12 +189,16 @@ pub fn reshare_same_state(
 
     Ok(ResharedSameState {
         shards: rewritten_shards,
-        archive_id: restored.archive_id,
-        state_id: restored.state_id,
-        predecessor_cohort_id: restored.cohort_id,
-        predecessor_cohort_binding_digest_hex: restored.cohort_binding_digest_hex,
-        predecessor_lifecycle_bundle_bytes: restored.lifecycle_bundle_bytes,
-        predecessor_lifecycle_bundle_digest_hex: restored.lifecycle_bundle_digest_hex,
+        archive_id: std::mem::take(&mut restored.archive_id),
+        state_id: std::mem::take(&mut restored.state_id),
+        predecessor_cohort_id: std::mem::take(&mut restored.cohort_id),
+        predecessor_cohort_binding_digest_hex: std::mem::take(
+            &mut restored.cohort_binding_digest_hex,
+        ),
+        predecessor_lifecycle_bundle_bytes: std::mem::take(&mut restored.lifecycle_bundle_bytes),
+        predecessor_lifecycle_bundle_digest_hex: std::mem::take(
+            &mut restored.lifecycle_bundle_digest_hex,
+        ),
         archive_state: successor_base.archive_state.value,
         archive_state_bytes: successor_base.archive_state_bytes,
         archive_state_digest_hex: successor_base.archive_state_digest_hex,
@@ -209,7 +213,7 @@ pub fn reshare_same_state(
         transition_record_bytes: canonical_transition.bytes,
         transition_record_digest_hex: canonical_transition.digest.value,
         verification_report: ReshareVerificationReport {
-            rejected_shard_indices: restored.rejected_shard_indices,
+            rejected_shard_indices: std::mem::take(&mut restored.rejected_shard_indices),
             private_key_hash_matches_metadata: restored.qkey_ok,
         },
         maintenance_signature_count_added: maintenance_artifacts.maintenance_signatures.len(),

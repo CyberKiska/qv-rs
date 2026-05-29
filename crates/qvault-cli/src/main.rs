@@ -50,7 +50,7 @@ mod successor_main {
     };
     use serde_json::Value;
     use time::{format_description::well_known::Rfc3339, OffsetDateTime, UtcOffset};
-    use zeroize::Zeroizing;
+    use zeroize::{Zeroize, Zeroizing};
 
     const MAX_SIGNED_TARGET_BYTES: u64 = 512 * 1024 * 1024;
 
@@ -435,6 +435,12 @@ mod successor_main {
     struct SplitShardOutput {
         index: u16,
         bytes: Vec<u8>,
+    }
+
+    impl Drop for SplitShardOutput {
+        fn drop(&mut self) {
+            self.bytes.zeroize();
+        }
     }
 
     struct SplitArchiveApproval {
@@ -1393,9 +1399,9 @@ mod successor_main {
                 split_shards = attached
                     .shards
                     .into_iter()
-                    .map(|shard| SplitShardOutput {
+                    .map(|mut shard| SplitShardOutput {
                         index: shard.index,
-                        bytes: shard.bytes,
+                        bytes: std::mem::take(&mut shard.bytes),
                     })
                     .collect();
                 Some(approval)

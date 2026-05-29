@@ -1,5 +1,5 @@
 use serde_json::Value;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::auth::AuthPolicyLevel;
 use crate::erasure;
@@ -55,6 +55,12 @@ impl std::fmt::Debug for BuiltQvqcont7Shard {
             .field("index", &self.index)
             .field("bytes_len", &self.bytes.len())
             .finish()
+    }
+}
+
+impl Drop for BuiltQvqcont7Shard {
+    fn drop(&mut self) {
+        self.bytes.zeroize();
     }
 }
 
@@ -124,22 +130,22 @@ pub fn build_qvqcont7_shards(
     }
 
     {
-        let mut trial_shared_secret = decapsulate(&parsed.encapsulated_key, priv_key_bytes)
-            .map_err(|error| {
+        let trial_shared_secret = Zeroizing::new(
+            decapsulate(&parsed.encapsulated_key, priv_key_bytes).map_err(|error| {
                 coded(
                     QvCode::KeyRejected,
                     format!("Key verification failed: {error}"),
                 )
-            })?;
+            })?,
+        );
         let derived = derive_key_with_kmac(
-            &trial_shared_secret,
+            &trial_shared_secret[..],
             &parsed.kdf_salt,
             &parsed.meta_bytes,
             ds,
         )
         .map_err(|error| err(format!("Key verification failed: {error}")))?;
         let key_match = verify_key_commitment(&derived.kenc, &key_commitment);
-        trial_shared_secret.zeroize();
         if !key_match {
             return Err(coded(
                 QvCode::KeyRejected,
@@ -167,7 +173,12 @@ pub fn build_qvqcont7_shards(
     };
     let _nonce_contract = get_nonce_contract_for_aead_mode(&parsed.metadata.aead_mode)?;
 
-    let shares = split_secret(priv_key_bytes, n, t, options.sss_random_bytes.as_deref())?;
+    let shares = Zeroizing::new(split_secret(
+        priv_key_bytes,
+        n,
+        t,
+        options.sss_random_bytes.as_deref(),
+    )?);
     let share_commitments = shares
         .iter()
         .map(|share| sha3_512_hex(share))
@@ -359,6 +370,7 @@ pub fn build_qvqcont7_shards(
             index: j as u16,
         });
     }
+    drop(shares);
 
     Ok(BuiltQvqcont7Shards {
         shards,

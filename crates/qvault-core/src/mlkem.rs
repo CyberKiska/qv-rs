@@ -1,5 +1,6 @@
 use fips203::ml_kem_1024;
 use fips203::traits::{Decaps, Encaps, KeyGen, SerDes};
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::error::{coded, err, QvCode, Result};
 use crate::rng::SystemRng;
@@ -11,12 +12,13 @@ pub const ML_KEM_1024_SHARED_SECRET_SIZE: usize = 32;
 
 pub fn generate_key_pair(custom_seed: Option<[u8; 64]>) -> Result<(Vec<u8>, Vec<u8>)> {
     let (encaps_key, decaps_key) = match custom_seed {
-        Some(seed) => {
-            let mut d = [0u8; 32];
-            let mut z = [0u8; 32];
+        Some(mut seed) => {
+            let mut d = Zeroizing::new([0u8; 32]);
+            let mut z = Zeroizing::new([0u8; 32]);
             d.copy_from_slice(&seed[..32]);
             z.copy_from_slice(&seed[32..]);
-            ml_kem_1024::KG::keygen_from_seed(d, z)
+            seed.zeroize();
+            ml_kem_1024::KG::keygen_from_seed(*d, *z)
         }
         None => ml_kem_1024::KG::try_keygen_with_rng(&mut SystemRng).map_err(|error| {
             coded(
@@ -27,7 +29,8 @@ pub fn generate_key_pair(custom_seed: Option<[u8; 64]>) -> Result<(Vec<u8>, Vec<
     };
 
     let public_key = encaps_key.into_bytes().to_vec();
-    let secret_key = decaps_key.into_bytes().to_vec();
+    let secret_key_bytes = Zeroizing::new(decaps_key.into_bytes());
+    let secret_key = secret_key_bytes.to_vec();
     validate_public_key(&public_key)?;
     validate_secret_key(&secret_key)?;
     Ok((public_key, secret_key))
@@ -48,7 +51,11 @@ pub fn encapsulate(public_key: &[u8], seed: Option<[u8; 32]>) -> Result<(Vec<u8>
     })?;
 
     let (shared_secret, ciphertext) = match seed {
-        Some(seed) => encaps_key.encaps_from_seed(&seed),
+        Some(mut seed) => {
+            let result = encaps_key.encaps_from_seed(&seed);
+            seed.zeroize();
+            result
+        }
         None => encaps_key
             .try_encaps_with_rng(&mut SystemRng)
             .map_err(|error| {
@@ -66,17 +73,15 @@ pub fn decapsulate(ciphertext: &[u8], secret_key: &[u8]) -> Result<[u8; 32]> {
     validate_encapsulated_key(ciphertext)?;
     validate_secret_key(secret_key)?;
 
-    let decaps_key = ml_kem_1024::DecapsKey::try_from_bytes(
-        secret_key
-            .try_into()
-            .map_err(|_| coded(QvCode::KeyRejected, "Secret key must be 3168 bytes"))?,
-    )
-    .map_err(|error| {
-        coded(
-            QvCode::KeyRejected,
-            format!("Invalid ML-KEM-1024 secret key bytes: {error}"),
-        )
-    })?;
+    let mut secret_key_bytes = Zeroizing::new([0u8; ML_KEM_1024_SECRET_KEY_SIZE]);
+    secret_key_bytes.copy_from_slice(secret_key);
+    let decaps_key =
+        ml_kem_1024::DecapsKey::try_from_bytes(*secret_key_bytes).map_err(|error| {
+            coded(
+                QvCode::KeyRejected,
+                format!("Invalid ML-KEM-1024 secret key bytes: {error}"),
+            )
+        })?;
     let ciphertext = ml_kem_1024::CipherText::try_from_bytes(
         ciphertext
             .try_into()

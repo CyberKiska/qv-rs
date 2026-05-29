@@ -1,4 +1,5 @@
 use serde_json::Value;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::error::{err, Result};
 use crate::hash::sha3_512;
@@ -60,6 +61,13 @@ impl std::fmt::Debug for Qvqcont7Shard {
             .field("share_len", &self.share.len())
             .field("fragments_len", &self.fragments.len())
             .finish()
+    }
+}
+
+impl Drop for Qvqcont7Shard {
+    fn drop(&mut self) {
+        self.share.zeroize();
+        self.fragments.zeroize();
     }
 }
 
@@ -285,7 +293,7 @@ pub fn build_qvqcont7_shard(shard: &Qvqcont7Shard) -> Result<Vec<u8>> {
         return Err(err("Shard fragment payload is empty"));
     }
 
-    let mut out = Vec::with_capacity(
+    let mut out = Zeroizing::new(Vec::with_capacity(
         LIFECYCLE_QCONT_MIN_HEADER_BYTES
             + shard.meta_bytes.len()
             + shard.archive_state_bytes.len()
@@ -296,7 +304,7 @@ pub fn build_qvqcont7_shard(shard: &Qvqcont7Shard) -> Result<Vec<u8>> {
             + shard.key_commitment.len()
             + shard.share.len()
             + shard.fragments.len(),
-    );
+    ));
     out.extend_from_slice(LIFECYCLE_QCONT_MAGIC);
     write_u16(&mut out, shard.meta_bytes.len())?;
     out.extend_from_slice(&shard.meta_bytes);
@@ -317,7 +325,7 @@ pub fn build_qvqcont7_shard(shard: &Qvqcont7Shard) -> Result<Vec<u8>> {
     out.extend_from_slice(&shard.fragments);
 
     parse_qvqcont7_shard(&out)?;
-    Ok(out)
+    Ok(std::mem::take(&mut *out))
 }
 
 fn validate_shard_format(meta_json: &Value) -> Result<()> {

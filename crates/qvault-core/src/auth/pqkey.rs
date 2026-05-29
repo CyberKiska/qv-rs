@@ -304,6 +304,7 @@ fn pack_key_file(suite: PqSignatureSuite, key_bytes: &[u8], kind: KeyFileKind) -
     out.extend_from_slice(&checksum.to_le_bytes());
 
     if out.len() > MAX_KEY_FILE_BYTES {
+        zeroize_if_secret(out.as_mut_slice(), kind);
         return Err(err(format!(
             "Detached PQ {} key exceeds maximum size ({MAX_KEY_FILE_BYTES} bytes)",
             kind.label()
