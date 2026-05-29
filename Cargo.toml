@@ -27,3 +27,10 @@ time = { version = "0.3.47", default-features = false, features = ["std", "parsi
 tiny-keccak = { version = "2.0.2", features = ["sha3", "kmac"] }
 zeroize = { version = "1.8.2", features = ["zeroize_derive"] }
 proptest = { version = "=1.6.0", default-features = false, features = ["std"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"

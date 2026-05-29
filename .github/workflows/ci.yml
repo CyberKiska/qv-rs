@@ -1,4 +1,4 @@
-# CI: fast tests on every PR; cached supply-chain checks after tests; release binaries only on non-PR pushes.
+# CI: lint, test, and supply-chain checks on one Ubuntu runner; release binaries only on non-PR pushes.
 
 name: CI
 
@@ -14,13 +14,13 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  CARGO_DENY_VERSION: 0.19.6
+  CARGO_DENY_VERSION: 0.19.8
   # SHA-256 of EmbarkStudios/cargo-deny asset `cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl.tar.gz` (update when bumping CARGO_DENY_VERSION).
-  CARGO_DENY_LINUX_MUSL_SHA256: 0021d321c781f0159a150ca308859ad93ccce64a887b22ad2e129f096a8a2c07
+  CARGO_DENY_LINUX_MUSL_SHA256: 70e769ae3872e34d45132b17040859175e11401dc12dddb0303e0b8c7d088f3f
 
 jobs:
   test:
-    name: Test (ubuntu-latest)
+    name: Checks (ubuntu-latest)
     runs-on: ubuntu-latest
     outputs:
       rust_version: ${{ steps.rust-toolchain.outputs.version }}
@@ -66,55 +66,6 @@ jobs:
           rustfmt -V
           cargo clippy -V
 
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
-      - name: Clippy (warnings denied)
-        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-
-      - name: Test workspace
-        run: cargo test --workspace --locked
-
-  dependency-integrity:
-    name: Supply chain (ubuntu-latest)
-    runs-on: ubuntu-latest
-    needs: test
-    env:
-      RUST_VERSION: ${{ needs.test.outputs.rust_version }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      # Same key as `test` so this job reuses downloaded crate sources (no second cold download).
-      - name: Cache Cargo registry and git sources
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-rust-${{ env.RUST_VERSION }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-rust-${{ env.RUST_VERSION }}-cargo-
-
-      - name: Cache cargo-deny binary
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
-        with:
-          path: ~/.cargo/bin/cargo-deny
-          key: cargo-deny-${{ runner.os }}-${{ env.CARGO_DENY_VERSION }}-${{ env.CARGO_DENY_LINUX_MUSL_SHA256 }}
-
-      - name: Install Rust (${{ env.RUST_VERSION }})
-        shell: bash
-        run: |
-          set -euo pipefail
-          if ! command -v rustup >/dev/null 2>&1; then
-            curl --proto '=https' --tlsv1.3 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
-            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          fi
-          rustup toolchain install "${RUST_VERSION}" --profile minimal --no-self-update
-          rustup default "${RUST_VERSION}"
-          rustc -vV
-          cargo -vV
-
       - name: Install cargo-deny (pinned musl binary, no cargo install)
         shell: bash
         env:
@@ -123,10 +74,6 @@ jobs:
         run: |
           set -euo pipefail
           cargo_deny="${HOME}/.cargo/bin/cargo-deny"
-          if [[ -x "${cargo_deny}" ]]; then
-            "${cargo_deny}" --version
-            exit 0
-          fi
           base="https://github.com/EmbarkStudios/cargo-deny/releases/download/${V}"
           name="cargo-deny-${V}-x86_64-unknown-linux-musl"
           tgz="${name}.tar.gz"
@@ -138,18 +85,32 @@ jobs:
           echo "${EXPECT_SHA}  ${tgz}" | sha256sum -c -
           tar -xzf "${tgz}"
           install -m 0755 "${name}/cargo-deny" "${cargo_deny}"
-          "${cargo_deny}" --version
+          actual="$("${cargo_deny}" --version)"
+          if [[ "${actual}" != "cargo-deny ${V}" ]]; then
+            echo "Unexpected cargo-deny version: ${actual}"
+            exit 1
+          fi
+          echo "${actual}"
 
-      - name: Deny duplicate normal dependencies
-        run: cargo tree --workspace --locked --edges normal --duplicates
+      - name: Check formatting
+        run: cargo fmt --all -- --check
 
-      - name: Deny advisories (RustSec) and disallowed sources
-        run: cargo deny check advisories sources
+      - name: Supply chain (duplicates, advisories, sources)
+        run: |
+          set -euo pipefail
+          cargo tree --workspace --locked --edges normal --duplicates
+          cargo deny check advisories sources
+
+      - name: Clippy (warnings denied) and test workspace
+        run: |
+          set -euo pipefail
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+          cargo test --workspace --all-targets --locked
 
   build-release-linux-windows:
     name: Release binaries (Linux + Windows, ubuntu-latest)
     runs-on: ubuntu-latest
-    needs: [test, dependency-integrity]
+    needs: test
     if: github.event_name != 'pull_request'
     env:
       RUST_VERSION: ${{ needs.test.outputs.rust_version }}
@@ -225,7 +186,7 @@ jobs:
   build-release-macos:
     name: Release binaries (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
-    needs: [test, dependency-integrity]
+    needs: test
     if: github.event_name != 'pull_request'
     env:
       RUST_VERSION: ${{ needs.test.outputs.rust_version }}
