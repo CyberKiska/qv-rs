@@ -60,8 +60,11 @@ jobs:
           fi
           rustup toolchain install "${{ steps.rust-toolchain.outputs.version }}" --profile minimal --no-self-update
           rustup default "${{ steps.rust-toolchain.outputs.version }}"
+          rustup component add --toolchain "${{ steps.rust-toolchain.outputs.version }}" rustfmt clippy
           rustc -vV
           cargo -vV
+          rustfmt -V
+          cargo clippy -V
 
       - name: Check formatting
         run: cargo fmt --all -- --check
