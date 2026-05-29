@@ -1,5 +1,5 @@
 use tiny_keccak::{Hasher, Kmac};
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::bytes::timing_safe_equal;
 use crate::error::{err, Result};
@@ -62,7 +62,7 @@ pub fn derive_key_with_kmac(
         return Err(err("KMAC customization domains must be distinct"));
     }
 
-    let mut message = Vec::with_capacity(salt.len() + meta_bytes.len());
+    let mut message = Zeroizing::new(Vec::with_capacity(salt.len() + meta_bytes.len()));
     message.extend_from_slice(salt);
     message.extend_from_slice(meta_bytes);
 
