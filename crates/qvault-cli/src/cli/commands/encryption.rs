@@ -82,10 +82,10 @@ pub(super) fn run_encrypt(args: EncryptArgs, ctx: CliContext) -> Result<()> {
             "fileCount": 1
         });
         if let Some(source_evidence) = source_evidence.as_ref() {
-            report
+            let report_object = report
                 .as_object_mut()
-                .expect("encrypt report is an object")
-                .insert(
+                .ok_or_else(|| anyhow::anyhow!("encrypt JSON report must be an object"))?;
+            report_object.insert(
                     "sourceEvidence".to_string(),
                     encrypt_source_evidence_json(source_evidence)?,
                 );
