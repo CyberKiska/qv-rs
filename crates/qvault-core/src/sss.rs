@@ -94,7 +94,7 @@ fn div(a: u8, b: u8) -> Result<u8> {
 
 fn interpolate_polynomial(x_samples: &[u8], y_samples: &[u8], x: u8) -> Result<u8> {
     if x_samples.len() != y_samples.len() {
-        return Err(err("sample length mistmatch"));
+        return Err(err("sample length mismatch"));
     }
 
     let mut result = 0u8;
