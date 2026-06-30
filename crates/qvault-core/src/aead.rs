@@ -1,4 +1,4 @@
-use aes_gcm::aead::{Aead, KeyInit, Payload};
+use aes_gcm::aead::{Aead, AeadCore, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
 
 use crate::error::{coded, err, QvCode, Result};
@@ -10,6 +10,8 @@ pub const NONCE_COUNTER_BITS_U32: u32 = 32;
 pub const NONCE_MAX_CHUNK_COUNT_U32: u64 = 0xffff_ffff;
 pub const IV_STRATEGY_SINGLE_IV: &str = "single-iv";
 pub const IV_STRATEGY_KMAC_PREFIX64_CTR32_V3: &str = "kmac-prefix64-ctr32-v3";
+
+type Aes256GcmNonce = Nonce<<Aes256Gcm as AeadCore>::NonceSize>;
 
 #[derive(Debug, Clone, Copy)]
 pub struct PerChunkIvParams<'a> {
@@ -101,15 +103,15 @@ pub fn derive_chunk_iv_from_k(
 pub fn decrypt_chunk(
     kenc: &[u8; 32],
     ciphertext: &[u8],
-    iv: &[u8; 12],
+    iv: &[u8; AES_IV_SIZE],
     aad: &[u8],
 ) -> Result<Vec<u8>> {
     let cipher = Aes256Gcm::new_from_slice(kenc)
         .map_err(|error| err(format!("Invalid AES-256-GCM key: {error}")))?;
-    let nonce = Nonce::from_slice(iv);
+    let nonce = nonce_from_iv(iv)?;
     cipher
         .decrypt(
-            nonce,
+            &nonce,
             Payload {
                 msg: ciphertext,
                 aad,
@@ -121,19 +123,23 @@ pub fn decrypt_chunk(
 pub fn encrypt_chunk(
     kenc: &[u8; 32],
     plaintext: &[u8],
-    iv: &[u8; 12],
+    iv: &[u8; AES_IV_SIZE],
     aad: &[u8],
 ) -> Result<Vec<u8>> {
     let cipher = Aes256Gcm::new_from_slice(kenc)
         .map_err(|error| err(format!("Invalid AES-256-GCM key: {error}")))?;
-    let nonce = Nonce::from_slice(iv);
+    let nonce = nonce_from_iv(iv)?;
     cipher
         .encrypt(
-            nonce,
+            &nonce,
             Payload {
                 msg: plaintext,
                 aad,
             },
         )
         .map_err(|_| coded(QvCode::AeadFailed, "AES-GCM encryption failed"))
+}
+
+fn nonce_from_iv(iv: &[u8; AES_IV_SIZE]) -> Result<Aes256GcmNonce> {
+    Aes256GcmNonce::try_from(iv.as_slice()).map_err(|_| err("Invalid AES-GCM nonce length"))
 }
