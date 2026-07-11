@@ -391,11 +391,14 @@ fn read_bytes<'a>(
     length: usize,
     field: &str,
 ) -> Result<&'a [u8]> {
-    if *offset + length > bytes.len() {
+    let end = offset
+        .checked_add(length)
+        .ok_or_else(|| err(format!("Shard offset overflow: {field}")))?;
+    if end > bytes.len() {
         return Err(err(format!("Shard is truncated: {field}")));
     }
-    let out = &bytes[*offset..*offset + length];
-    *offset += length;
+    let out = &bytes[*offset..end];
+    *offset = end;
     Ok(out)
 }
 

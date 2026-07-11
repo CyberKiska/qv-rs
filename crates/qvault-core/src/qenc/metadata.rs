@@ -11,6 +11,17 @@ pub const FORMAT_VERSION: &str = "QVv1-5-0";
 pub const KEM_ALG_ID_ML_KEM_1024: &str = "ML-KEM-1024";
 pub const KDF_ALG_ID_KMAC256: &str = "KMAC256";
 pub const AEAD_ALG_ID_AES_256_GCM: &str = "AES-256-GCM";
+const QENC_CHUNK_SIZE: u64 = 8 * 1024 * 1024;
+const JS_MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+const AES_GCM_TAG_SIZE: u64 = 16;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AuthenticatedGeometry {
+    pub payload_length: u64,
+    pub chunk_size: u64,
+    pub chunk_count: u64,
+    pub ciphertext_length: u64,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -165,29 +176,16 @@ pub fn validate_qenc_metadata(metadata: &QencMetadata) -> Result<()> {
             "Invalid metadata: maxChunkCount exceeds uint32 counter capacity ({NONCE_MAX_CHUNK_COUNT_U32})"
         )));
     }
-    if let Some(payload_length) = metadata.payload_length {
-        if payload_length == 0 {
-            return Err(err(
-                "Invalid metadata: payloadLength must be a positive integer",
-            ));
-        }
+    let payload_length = required_safe_positive_integer(metadata.payload_length, "payloadLength")?;
+    let chunk_count = required_safe_positive_integer(metadata.chunk_count, "chunkCount")?;
+    let chunk_size = required_safe_positive_integer(metadata.chunk_size, "chunkSize")?;
+    if chunk_size != QENC_CHUNK_SIZE {
+        return Err(err(format!(
+            "Invalid metadata: unsupported chunkSize {chunk_size}; expected {QENC_CHUNK_SIZE}"
+        )));
     }
-    if let Some(chunk_count) = metadata.chunk_count {
-        if chunk_count == 0 {
-            return Err(err(
-                "Invalid metadata: chunkCount must be a positive integer",
-            ));
-        }
-        if chunk_count > metadata.max_chunk_count {
-            return Err(err("Invalid metadata: chunkCount exceeds maxChunkCount"));
-        }
-    }
-    if let Some(chunk_size) = metadata.chunk_size {
-        if chunk_size == 0 {
-            return Err(err(
-                "Invalid metadata: chunkSize must be a positive integer",
-            ));
-        }
+    if chunk_count > metadata.max_chunk_count {
+        return Err(err("Invalid metadata: chunkCount exceeds maxChunkCount"));
     }
     match metadata.aead_mode.as_str() {
         "single-container-aead" => {
@@ -206,6 +204,11 @@ pub fn validate_qenc_metadata(metadata: &QencMetadata) -> Result<()> {
                     "Invalid metadata: single-container-aead requires maxChunkCount=1",
                 ));
             }
+            if chunk_count != 1 {
+                return Err(err(
+                    "Invalid metadata: single-container-aead requires chunkCount=1",
+                ));
+            }
         }
         "per-chunk-aead" => {
             if metadata.iv_strategy != IV_STRATEGY_KMAC_PREFIX64_CTR32_V3 {
@@ -218,8 +221,11 @@ pub fn validate_qenc_metadata(metadata: &QencMetadata) -> Result<()> {
                     "Invalid metadata: per-chunk-aead requires counterBits={NONCE_COUNTER_BITS_U32}"
                 )));
             }
-            if metadata.chunk_count.is_none() {
-                return Err(err("Invalid metadata: per-chunk-aead requires chunkCount"));
+            let expected_chunk_count = checked_chunk_count(payload_length, chunk_size)?;
+            if chunk_count != expected_chunk_count {
+                return Err(err(format!(
+                    "Invalid metadata: chunkCount does not match payloadLength/chunkSize geometry (expected {expected_chunk_count})"
+                )));
             }
         }
         other => return Err(err(format!("Unsupported AEAD mode: {other}"))),
@@ -228,6 +234,43 @@ pub fn validate_qenc_metadata(metadata: &QencMetadata) -> Result<()> {
         return Err(err("Invalid metadata: hasKeyCommitment must be true"));
     }
     Ok(())
+}
+
+pub(crate) fn authenticated_geometry(metadata: &QencMetadata) -> Result<AuthenticatedGeometry> {
+    validate_qenc_metadata(metadata)?;
+
+    let payload_length = required_safe_positive_integer(metadata.payload_length, "payloadLength")?;
+    let chunk_size = required_safe_positive_integer(metadata.chunk_size, "chunkSize")?;
+    let chunk_count = required_safe_positive_integer(metadata.chunk_count, "chunkCount")?;
+    let tag_length = AES_GCM_TAG_SIZE
+        .checked_mul(chunk_count)
+        .ok_or_else(|| err("Invalid metadata: ciphertext length overflows uint64"))?;
+    let ciphertext_length = payload_length
+        .checked_add(tag_length)
+        .ok_or_else(|| err("Invalid metadata: ciphertext length overflows uint64"))?;
+
+    Ok(AuthenticatedGeometry {
+        payload_length,
+        chunk_size,
+        chunk_count,
+        ciphertext_length,
+    })
+}
+
+fn required_safe_positive_integer(value: Option<u64>, field: &str) -> Result<u64> {
+    match value {
+        Some(value) if (1..=JS_MAX_SAFE_INTEGER).contains(&value) => Ok(value),
+        _ => Err(err(format!(
+            "Invalid metadata: {field} must be a positive integer"
+        ))),
+    }
+}
+
+fn checked_chunk_count(payload_length: u64, chunk_size: u64) -> Result<u64> {
+    let rounded_length = payload_length.checked_add(chunk_size - 1).ok_or_else(|| {
+        err("Invalid metadata: payloadLength/chunkSize geometry overflows uint64")
+    })?;
+    Ok(rounded_length / chunk_size)
 }
 
 fn reject_unsupported_optional_alg(field: &str, value: Option<&str>, expected: &str) -> Result<()> {

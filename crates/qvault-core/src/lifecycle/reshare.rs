@@ -62,11 +62,13 @@ pub struct ReshareMaintenanceArtifacts {
     pub timestamps: Vec<Value>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ReshareSameStateOptions {
     pub selection: RestoreQvqcont7Selection,
     pub lifecycle_bundle_bytes: Option<Vec<u8>>,
     pub transition: ReshareTransitionOptions,
+    /// Deterministic interoperability-test hook. Production callers must leave
+    /// this unset and are responsible for clearing any supplied bytes.
     pub sss_random_bytes: Option<Vec<u8>>,
     pub maintenance_artifacts: Vec<ReshareMaintenanceArtifacts>,
     /// Detached maintenance signatures over the **new** transition (same semantics as attach
@@ -78,9 +80,53 @@ pub struct ReshareSameStateOptions {
     pub forbidden_overrides: Vec<String>,
 }
 
+impl std::fmt::Debug for ReshareSameStateOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReshareSameStateOptions")
+            .field("selection", &self.selection)
+            .field(
+                "lifecycle_bundle_bytes_len",
+                &self.lifecycle_bundle_bytes.as_ref().map(Vec::len),
+            )
+            .field("transition", &self.transition)
+            .field(
+                "sss_random_bytes",
+                &self
+                    .sss_random_bytes
+                    .as_ref()
+                    .map(|bytes| format!("<redacted:{} bytes>", bytes.len())),
+            )
+            .field(
+                "maintenance_artifacts_len",
+                &self.maintenance_artifacts.len(),
+            )
+            .field(
+                "maintenance_signature_imports_len",
+                &self.maintenance_signature_imports.len(),
+            )
+            .field(
+                "maintenance_pq_public_key_file_bytes_list_len",
+                &self.maintenance_pq_public_key_file_bytes_list.len(),
+            )
+            .field(
+                "maintenance_timestamps_len",
+                &self.maintenance_timestamps.len(),
+            )
+            .field(
+                "maintenance_expected_ed25519_signer",
+                &self.maintenance_expected_ed25519_signer,
+            )
+            .field("forbidden_overrides", &self.forbidden_overrides)
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReshareVerificationReport {
     pub rejected_shard_indices: Vec<u16>,
+    pub invalid_share_indices: Vec<u16>,
+    pub corrupted_shard_indices: Vec<u16>,
+    pub missing_shard_indices: Vec<u16>,
     pub private_key_hash_matches_metadata: bool,
 }
 
@@ -214,7 +260,10 @@ pub fn reshare_same_state(
         transition_record_digest_hex: canonical_transition.digest.value,
         verification_report: ReshareVerificationReport {
             rejected_shard_indices: std::mem::take(&mut restored.rejected_shard_indices),
-            private_key_hash_matches_metadata: restored.qkey_ok,
+            invalid_share_indices: std::mem::take(&mut restored.invalid_share_indices),
+            corrupted_shard_indices: std::mem::take(&mut restored.corrupted_shard_indices),
+            missing_shard_indices: std::mem::take(&mut restored.missing_shard_indices),
+            private_key_hash_matches_metadata: restored.private_key_hash_matches_metadata,
         },
         maintenance_signature_count_added: maintenance_artifacts.maintenance_signatures.len(),
         operational_warnings: RESHARE_OPERATIONAL_WARNINGS

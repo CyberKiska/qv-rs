@@ -5,6 +5,9 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
+# Feature anchors: AesGcm owns AES/GHASH state whose Drop zeroization is
+# implemented by these transitive crates only when their features are enabled.
+aes.workspace = true
 aes-gcm.workspace = true
 base64.workspace = true
 crc32fast.workspace = true
@@ -13,10 +16,12 @@ fips203.workspace = true
 fips204.workspace = true
 fips205.workspace = true
 getrandom.workspace = true
+ghash.workspace = true
 hex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+subtle.workspace = true
 thiserror.workspace = true
 time.workspace = true
 tiny-keccak.workspace = true

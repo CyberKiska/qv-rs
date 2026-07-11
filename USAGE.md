@@ -42,7 +42,7 @@ These flags work with every command:
 
 - `--json`: emit a stable `cliSchemaVersion: 1` JSON envelope
 - `--quiet`: suppress non-error text output
-- `--allow-symlink`: permit symlink input paths and path components
+- `--allow-symlink`: permit symlink paths and path components
 - `--color` / `--no-color`: accepted for JavaScript CLI parity
 
 Use `--json` for automation:

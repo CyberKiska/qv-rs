@@ -10,7 +10,9 @@ use crate::kdf::{
 use crate::mlkem::{decapsulate, encapsulate};
 use crate::policy::validate_container_policy_metadata;
 use crate::qenc::header::{build_qenc_header, parse_qenc_header};
-use crate::qenc::metadata::{build_qenc_metadata, serialize_qenc_metadata};
+use crate::qenc::metadata::{
+    authenticated_geometry, build_qenc_metadata, serialize_qenc_metadata, AuthenticatedGeometry,
+};
 use crate::qenc::payload::{
     unwrap_wrapped_payload, wrap_wrapped_payload, WrappedPayloadPrivateMetadata,
 };
@@ -49,8 +51,14 @@ impl Drop for DecryptedQenc {
 pub struct EncryptQencOptions {
     pub original_filename: Option<String>,
     pub timestamp: Option<String>,
+    /// Deterministic interoperability-test hook. Production callers must leave
+    /// this unset; reusing it with the nonce/salt tuple repeats AEAD key material.
     pub encapsulation_seed: Option<[u8; 32]>,
+    /// Deterministic interoperability-test hook. Production callers must leave
+    /// this unset so each container receives a fresh 96-bit nonce.
     pub container_nonce: Option<[u8; 12]>,
+    /// Deterministic interoperability-test hook. Production callers should
+    /// leave this unset and use the operating-system RNG.
     pub kdf_salt: Option<[u8; KDF_SALT_SIZE]>,
 }
 
@@ -154,6 +162,9 @@ pub fn encrypt_qenc(
 
 pub fn decrypt_qenc(container_bytes: &[u8], secret_key: &[u8]) -> Result<DecryptedQenc> {
     let parsed = parse_qenc_header(container_bytes)?;
+    let geometry = authenticated_geometry(&parsed.metadata)?;
+    let expected_payload_length = usize::try_from(geometry.payload_length)
+        .map_err(|_| err("Invalid metadata: payloadLength exceeds platform limits"))?;
     let _nonce_contract = validate_container_policy_metadata(&parsed.metadata, false)?;
     let shared_secret = Zeroizing::new(decapsulate(&parsed.encapsulated_key, secret_key)?);
     let mut derived = derive_key_with_kmac(
@@ -179,11 +190,24 @@ pub fn decrypt_qenc(container_bytes: &[u8], secret_key: &[u8]) -> Result<Decrypt
                 &parsed.container_nonce,
                 &parsed.header,
             )?,
-            "per-chunk-aead" => {
-                decrypt_per_chunk(&parsed, encrypted_data, &derived.kenc, &derived.kiv)?
-            }
+            "per-chunk-aead" => decrypt_per_chunk(
+                &parsed,
+                encrypted_data,
+                &geometry,
+                &derived.kenc,
+                &derived.kiv,
+            )?,
             other => return Err(err(format!("Unsupported AEAD mode: {other}"))),
         });
+        if decrypted_payload.len() != expected_payload_length {
+            return Err(coded(
+                QvCode::RestoredIntegrityFailed,
+                format!(
+                    "Decrypted payload length mismatch: expected {expected_payload_length}, got {}",
+                    decrypted_payload.len()
+                ),
+            ));
+        }
 
         let payload_format = parsed.metadata.payload_format.clone().unwrap_or_default();
         if payload_format != "wrapped-v1" {
@@ -197,22 +221,33 @@ pub fn decrypt_qenc(container_bytes: &[u8], secret_key: &[u8]) -> Result<Decrypt
             )));
         }
 
-        let (private_metadata, mut file_bytes) = unwrap_wrapped_payload(&decrypted_payload)?;
+        let (private_metadata, file_bytes) = unwrap_wrapped_payload(&decrypted_payload)?;
+        let mut file_bytes = Zeroizing::new(file_bytes);
         drop(decrypted_payload);
 
+        let recovered_file_length = u64::try_from(file_bytes.len()).map_err(|_| {
+            err("Decrypted file length exceeds the supported metadata integer range")
+        })?;
+        if private_metadata.original_length != recovered_file_length {
+            return Err(coded(
+                QvCode::RestoredIntegrityFailed,
+                format!(
+                    "Decrypted file length mismatch: expected {}, got {recovered_file_length}",
+                    private_metadata.original_length
+                ),
+            ));
+        }
+
         let recovered_file_hash = sha3_512_hex(&file_bytes);
-        if !private_metadata
-            .file_hash
-            .eq_ignore_ascii_case(&recovered_file_hash)
-        {
-            file_bytes.zeroize();
-            return Err(err(
+        if private_metadata.file_hash != recovered_file_hash {
+            return Err(coded(
+                QvCode::RestoredIntegrityFailed,
                 "Wrapped payload fileHash does not match decrypted payload",
             ));
         }
 
         Ok(DecryptedQenc {
-            file_bytes,
+            file_bytes: std::mem::take(&mut *file_bytes),
             private_metadata,
             warnings: Vec::new(),
         })
@@ -239,61 +274,82 @@ pub fn current_iso8601_utc_millis() -> String {
 fn decrypt_per_chunk(
     parsed: &QencHeader,
     encrypted_data: &[u8],
+    geometry: &AuthenticatedGeometry,
     kenc: &[u8; 32],
     kiv: &[u8; 32],
 ) -> Result<Vec<u8>> {
-    let payload_length = parsed
-        .metadata
-        .payload_length
-        .ok_or_else(|| err("Invalid metadata: payloadLength must be a positive integer"))?;
-    let chunk_count = parsed
-        .metadata
-        .chunk_count
-        .ok_or_else(|| err("Invalid metadata: per-chunk-aead requires chunkCount"))?;
-    let chunk_size = parsed
-        .metadata
-        .chunk_size
-        .ok_or_else(|| err("Invalid metadata: chunkSize must be a positive integer"))?;
+    let payload_length = usize::try_from(geometry.payload_length)
+        .map_err(|_| err("Invalid metadata: payloadLength exceeds platform limits"))?;
+    let chunk_count = usize::try_from(geometry.chunk_count)
+        .map_err(|_| err("Invalid metadata: chunkCount exceeds platform limits"))?;
+    let chunk_size = usize::try_from(geometry.chunk_size)
+        .map_err(|_| err("Invalid metadata: chunkSize exceeds platform limits"))?;
 
     assert_per_chunk_nonce_contract(
-        chunk_count,
+        geometry.chunk_count,
         parsed.metadata.max_chunk_count,
         parsed.metadata.counter_bits,
         &parsed.metadata.iv_strategy,
     )?;
 
-    let mut plaintext = Zeroizing::new(Vec::with_capacity(payload_length as usize));
+    let mut plaintext = Zeroizing::new(Vec::new());
+    plaintext
+        .try_reserve_exact(payload_length)
+        .map_err(|_| err("Unable to allocate authenticated payloadLength"))?;
     let mut encrypted_offset = 0usize;
 
     for index in 0..chunk_count {
-        let plain_len = chunk_size.min(payload_length - (index * chunk_size));
-        let enc_len = plain_len + 16;
-        let enc_end = encrypted_offset + enc_len as usize;
+        let plain_offset = index
+            .checked_mul(chunk_size)
+            .ok_or_else(|| err("Invalid metadata: chunk plaintext offset overflow"))?;
+        let remaining = payload_length
+            .checked_sub(plain_offset)
+            .ok_or_else(|| err("Invalid metadata: chunk geometry exceeds payloadLength"))?;
+        let plain_len = chunk_size.min(remaining);
+        let enc_len = plain_len
+            .checked_add(16)
+            .ok_or_else(|| err("Invalid metadata: encrypted chunk length overflow"))?;
+        let enc_end = encrypted_offset
+            .checked_add(enc_len)
+            .ok_or_else(|| err("Invalid metadata: encrypted payload offset overflow"))?;
         if enc_end > encrypted_data.len() {
             return Err(err(
                 "Encrypted payload has trailing or truncated chunk data",
             ));
         }
         let chunk_ciphertext = &encrypted_data[encrypted_offset..enc_end];
+        let index_u32 = u32::try_from(index)
+            .map_err(|_| err("Invalid metadata: chunk index exceeds uint32 capacity"))?;
+        let plain_len_u32 = u32::try_from(plain_len)
+            .map_err(|_| err("Invalid metadata: chunk length exceeds uint32 capacity"))?;
         let iv = derive_chunk_iv_from_k(
             kiv,
             &parsed.container_nonce,
-            index as u32,
+            index_u32,
             &parsed.metadata.domain_strings.iv,
             PerChunkIvParams {
-                chunk_count: Some(chunk_count),
+                chunk_count: Some(geometry.chunk_count),
                 max_chunk_count: parsed.metadata.max_chunk_count,
                 counter_bits: parsed.metadata.counter_bits,
                 iv_strategy: &parsed.metadata.iv_strategy,
             },
         )?;
-        let aad = build_chunk_aad(&parsed.header, index as u32, plain_len as u32);
+        let aad = build_chunk_aad(&parsed.header, index_u32, plain_len_u32);
         let chunk_plaintext = match decrypt_chunk(kenc, chunk_ciphertext, &iv, &aad) {
             Ok(chunk_plaintext) => Zeroizing::new(chunk_plaintext),
             Err(error) => {
                 return Err(error);
             }
         };
+        if chunk_plaintext.len() != plain_len {
+            return Err(coded(
+                QvCode::RestoredIntegrityFailed,
+                format!(
+                    "Decrypted chunk length mismatch: expected {plain_len}, got {}",
+                    chunk_plaintext.len()
+                ),
+            ));
+        }
         plaintext.extend_from_slice(&chunk_plaintext);
         encrypted_offset = enc_end;
     }
@@ -301,6 +357,15 @@ fn decrypt_per_chunk(
     if encrypted_offset != encrypted_data.len() {
         return Err(err(
             "Encrypted payload has trailing or truncated chunk data",
+        ));
+    }
+    if plaintext.len() != payload_length {
+        return Err(coded(
+            QvCode::RestoredIntegrityFailed,
+            format!(
+                "Decrypted payload length mismatch: expected {payload_length}, got {}",
+                plaintext.len()
+            ),
         ));
     }
 

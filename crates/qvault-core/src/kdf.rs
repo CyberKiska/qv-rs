@@ -88,7 +88,9 @@ pub fn verify_key_commitment(kenc: &[u8; 32], expected_commitment: &[u8; 32]) ->
 }
 
 fn to_fixed_32(bytes: Vec<u8>) -> Result<[u8; 32]> {
+    let bytes = Zeroizing::new(bytes);
     bytes
+        .as_slice()
         .try_into()
         .map_err(|_| err("Expected 32-byte KMAC output"))
 }

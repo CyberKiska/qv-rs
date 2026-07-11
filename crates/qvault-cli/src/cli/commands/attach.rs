@@ -4,23 +4,29 @@ pub(super) fn run_attach(args: AttachArgs, ctx: CliContext) -> Result<()> {
     let archive_state_bytes = args
         .archive_state
         .as_ref()
-        .map(|path| read_file_checked(path, ctx))
+        .map(|path| read_small_artifact_checked(path, ctx, "Archive-state descriptor"))
         .transpose()
         .with_context(|| "failed to read --archive-state")?;
     let lifecycle_bundle_bytes = args
         .bundle
         .as_ref()
-        .map(|path| read_file_checked(path, ctx))
+        .map(|path| read_small_artifact_checked(path, ctx, "Lifecycle bundle"))
         .transpose()
         .with_context(|| "failed to read --bundle")?;
     let shards = args
         .shards
         .iter()
         .map(|path| {
-            let bytes = read_file_checked(path, ctx)
-                .with_context(|| format!("failed to read {}", path.display()))?;
-            parse_qvqcont7_shard(&bytes)
-                .with_context(|| format!("failed to parse shard {}", path.display()))
+            let bytes = Zeroizing::new(
+                read_file_checked(path, ctx)
+                    .with_context(|| format!("failed to read {}", path.display()))?,
+            );
+            parse_qvqcont7_shard(bytes.as_slice()).map_err(|error| {
+                anyhow::Error::from(coded(
+                    QvCode::InvalidFormat,
+                    format!("failed to parse shard {}: {error}", path.display()),
+                ))
+            })
         })
         .collect::<Result<Vec<_>>>()?;
     let source_evidence = args
@@ -30,7 +36,7 @@ pub(super) fn run_attach(args: AttachArgs, ctx: CliContext) -> Result<()> {
         .map(|path| {
             Ok(LifecycleSourceEvidenceImport {
                 bytes: Some(
-                    read_file_checked(path, ctx)
+                    read_small_artifact_checked(path, ctx, "Source-evidence artifact")
                         .with_context(|| format!("failed to read {}", path.display()))?,
                 ),
                 value: None,
@@ -96,10 +102,15 @@ pub(super) fn run_attach(args: AttachArgs, ctx: CliContext) -> Result<()> {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-    write_file_checked(&args.out_bundle, &attached.lifecycle_bundle_bytes, ctx)
-        .with_context(|| format!("failed to write {}", args.out_bundle.display()))?;
+    write_file_checked(
+        &args.out_bundle,
+        &attached.lifecycle_bundle_bytes,
+        args.force,
+        ctx,
+    )
+    .with_context(|| format!("failed to write {}", args.out_bundle.display()))?;
     for (shard, path) in attached.shards.iter().zip(shard_output_plan.iter()) {
-        write_file_checked(path, &shard.bytes, ctx)
+        write_secret_file_checked(path, &shard.bytes, args.force, ctx)
             .with_context(|| format!("failed to write {}", path.display()))?;
     }
 

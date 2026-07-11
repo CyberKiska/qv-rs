@@ -13,6 +13,7 @@ use qvault_core::qcont::{
     build_qvqcont7_shards, parse_qvqcont7_shard, restore_qvqcont7_from_shards,
     Qvqcont7BuildOptions, Qvqcont7BuildParams, RestoreQvqcont7Options, RestoreQvqcont7Selection,
 };
+use qvault_core::qenc::{parse_qenc_metadata_bytes, serialize_qenc_metadata};
 use qvault_core::verify_successor_lifecycle_authenticity;
 use serde_json::{json, Value};
 
@@ -68,6 +69,12 @@ fn restore_v7_fails_closed_on_ambiguous_same_state_cohorts() -> Result<()> {
         },
     )?;
     assert_eq!(restored.cohort_id, second.cohort_id);
+    assert!(restored.same_state_fork_detected);
+    assert_eq!(restored.known_same_state_cohort_ids.len(), 2);
+    assert!(restored
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("Multiple cohorts were supplied")));
     Ok(())
 }
 
@@ -166,6 +173,134 @@ fn restore_v7_tolerates_one_corrupted_shard_under_rs_policy() -> Result<()> {
     assert_eq!(restored.priv_key, SECRET_KEY_BYTES);
     assert_eq!(restored.rejected_shard_indices, vec![0]);
     Ok(())
+}
+
+#[test]
+fn restore_v7_rejects_mismatched_bundle_bytes_and_selected_digest() -> Result<()> {
+    let built = build_fixture_split(vec![0x42; 10_000])?;
+    let shards = parse_built_shards(&built)?;
+    let error = restore_qvqcont7_from_shards(
+        &shards,
+        &RestoreQvqcont7Options {
+            selection: RestoreQvqcont7Selection {
+                lifecycle_bundle_bytes: Some(built.lifecycle_bundle_bytes.clone()),
+                selected_lifecycle_bundle_digest_hex: Some("00".repeat(64)),
+                ..RestoreQvqcont7Selection::default()
+            },
+            ..RestoreQvqcont7Options::default()
+        },
+    )
+    .expect_err("bundle bytes must not override a conflicting selected digest");
+    assert_eq!(error.qv_code(), Some(QvCode::InvalidSelection));
+    Ok(())
+}
+
+#[test]
+fn restore_v7_ignores_uncommitted_allocation_geometry() -> Result<()> {
+    let built = build_fixture_split(vec![0x42; 10_000])?;
+    let mut shards = parse_built_shards(&built)?;
+    let metadata = shards[0]
+        .meta_json
+        .as_object_mut()
+        .expect("shard metadata object");
+    metadata.insert("chunkCount".to_string(), Value::from(u64::MAX));
+    metadata.insert("chunkSize".to_string(), Value::from(u64::MAX));
+    metadata.insert("payloadLength".to_string(), Value::from(u64::MAX));
+    metadata.insert("ciphertextLength".to_string(), Value::from(u64::MAX));
+    metadata.insert("rsEncodeBase".to_string(), Value::from(u64::MAX));
+
+    let outcome = std::panic::catch_unwind(|| {
+        restore_qvqcont7_from_shards(&shards, &RestoreQvqcont7Options::default())
+    });
+    let restored = outcome
+        .expect("uncommitted geometry must not panic or abort")
+        .expect("committed geometry and valid shard bodies remain sufficient");
+    assert_eq!(restored.qenc_bytes, QENC_BYTES);
+    assert!(restored
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("unauthenticated redundant metadata")));
+    Ok(())
+}
+
+#[test]
+fn restore_v7_treats_private_key_hash_metadata_as_diagnostic() -> Result<()> {
+    let built = build_fixture_split(vec![0x42; 10_000])?;
+    let mut shards = parse_built_shards(&built)?;
+    shards[0]
+        .meta_json
+        .as_object_mut()
+        .expect("shard metadata object")
+        .insert("privateKeyHash".to_string(), Value::String("00".repeat(64)));
+
+    let restored = restore_qvqcont7_from_shards(&shards, &RestoreQvqcont7Options::default())?;
+    assert_eq!(restored.priv_key, SECRET_KEY_BYTES);
+    assert!(restored.qkey_ok, "the QENC key commitment is authoritative");
+    assert!(!restored.private_key_hash_matches_metadata);
+    assert!(restored
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("unauthenticated shard metadata")));
+    Ok(())
+}
+
+#[test]
+fn restore_v7_validates_shares_and_fragments_independently() -> Result<()> {
+    let built = build_qvqcont7_shards(
+        QENC_BYTES,
+        SECRET_KEY_BYTES,
+        Qvqcont7BuildParams { n: 6, k: 2 },
+        &Qvqcont7BuildOptions {
+            archive_id: Some("31".repeat(32)),
+            sss_random_bytes: Some(vec![0x55; 20_000]),
+            auth_policy_level: Some(AuthPolicyLevel::IntegrityOnly),
+            min_valid_signatures: Some(1),
+            ..Qvqcont7BuildOptions::default()
+        },
+    )?;
+    let mut shards = parse_built_shards(&built)?;
+    shards[0].share[0] ^= 0x80;
+    shards[1].share[0] ^= 0x80;
+    shards[2].fragments[4] ^= 0x80;
+    shards[3].fragments[4] ^= 0x80;
+
+    let restored = restore_qvqcont7_from_shards(&shards, &RestoreQvqcont7Options::default())?;
+    assert_eq!(restored.qenc_bytes, QENC_BYTES);
+    assert_eq!(restored.priv_key, SECRET_KEY_BYTES);
+    assert_eq!(restored.invalid_share_indices, vec![0, 1]);
+    assert_eq!(restored.corrupted_shard_indices, vec![2, 3]);
+    assert!(restored.missing_shard_indices.is_empty());
+    Ok(())
+}
+
+#[test]
+fn restore_v7_rejects_unregistered_qenc_domain_strings() -> Result<()> {
+    let built = build_fixture_split(vec![0x42; 10_000])?;
+    let mut shards = parse_built_shards(&built)?;
+    let mut metadata = parse_qenc_metadata_bytes(&shards[0].qenc_meta_bytes)?;
+    metadata.domain_strings.kdf = "quantum-vault:kdf:unregistered".to_string();
+    let mutated_metadata = serialize_qenc_metadata(&metadata)?;
+    for shard in &mut shards {
+        shard.qenc_meta_bytes.clone_from(&mutated_metadata);
+    }
+
+    let error = restore_qvqcont7_from_shards(&shards, &RestoreQvqcont7Options::default())
+        .expect_err("restore must enforce the registered crypto profile domains");
+    assert_eq!(error.qv_code(), Some(QvCode::InvalidFormat));
+    assert!(error.to_string().contains("domainStrings"), "{error}");
+    Ok(())
+}
+
+#[test]
+fn split_v7_rejects_rs_codewords_above_255_before_secret_work() {
+    let error = build_qvqcont7_shards(
+        QENC_BYTES,
+        SECRET_KEY_BYTES,
+        Qvqcont7BuildParams { n: 256, k: 2 },
+        &Qvqcont7BuildOptions::default(),
+    )
+    .expect_err("QV-RS-ErasureCodes-v1 has an n <= 255 bound");
+    assert!(error.to_string().contains("must not exceed 255"), "{error}");
 }
 
 fn build_signed_lifecycle_bundle_all_families(

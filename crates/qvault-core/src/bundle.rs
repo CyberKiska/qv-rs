@@ -70,7 +70,10 @@ pub fn build_bundle_payload(entries: &[BundleEntryRef<'_>]) -> Result<Vec<u8>> {
             .ok_or_else(|| err("Bundle size overflow"))
     })?;
 
-    let mut out = vec![0u8; total_size];
+    let mut out = Vec::new();
+    out.try_reserve_exact(total_size)
+        .map_err(|_| err("Unable to allocate bundle payload"))?;
+    out.resize(total_size, 0);
     let mut offset = 0usize;
     out[offset..offset + 4].copy_from_slice(BUNDLE_MAGIC);
     offset += 4;
@@ -111,40 +114,52 @@ pub fn parse_bundle_payload(bytes: &[u8]) -> Result<Vec<ParsedBundleEntry<'_>>> 
         return Err(err(format!("Unsupported bundle version: {version}")));
     }
 
-    if offset + 2 > bytes.len() {
+    let count_end = offset
+        .checked_add(2)
+        .ok_or_else(|| err("Bundle entry-count offset overflow"))?;
+    if count_end > bytes.len() {
         return Err(err("Bundle is truncated before entry count"));
     }
     let count = u16::from_be_bytes([bytes[offset], bytes[offset + 1]]) as usize;
-    offset += 2;
+    offset = count_end;
     if count == 0 {
         return Err(err("Bundle contains no files"));
     }
 
     let mut entries = Vec::with_capacity(count);
     for index in 0..count {
-        if offset + 2 > bytes.len() {
+        let name_length_end = offset
+            .checked_add(2)
+            .ok_or_else(|| err("Bundle name-length offset overflow"))?;
+        if name_length_end > bytes.len() {
             return Err(err("Bundle is truncated at name length"));
         }
         let name_len = u16::from_be_bytes([bytes[offset], bytes[offset + 1]]) as usize;
-        offset += 2;
+        offset = name_length_end;
         if name_len == 0 {
             return Err(err(format!(
                 "Bundle entry {index} has invalid filename length"
             )));
         }
-        if offset + name_len > bytes.len() {
+        let name_end = offset
+            .checked_add(name_len)
+            .ok_or_else(|| err(format!("Bundle entry {index} filename length overflow")))?;
+        if name_end > bytes.len() {
             return Err(err(format!("Bundle entry {index} filename is truncated")));
         }
-        let name = std::str::from_utf8(&bytes[offset..offset + name_len])
+        let name = std::str::from_utf8(&bytes[offset..name_end])
             .map_err(|error| {
                 err(format!(
                     "Bundle entry {index} filename is invalid UTF-8: {error}"
                 ))
             })?
             .to_string();
-        offset += name_len;
+        offset = name_end;
 
-        if offset + 4 > bytes.len() {
+        let size_end = offset
+            .checked_add(4)
+            .ok_or_else(|| err(format!("Bundle entry {index} payload-length overflow")))?;
+        if size_end > bytes.len() {
             return Err(err(format!(
                 "Bundle entry {index} is missing payload length"
             )));
@@ -155,12 +170,15 @@ pub fn parse_bundle_payload(bytes: &[u8]) -> Result<Vec<ParsedBundleEntry<'_>>> 
             bytes[offset + 2],
             bytes[offset + 3],
         ]) as usize;
-        offset += 4;
-        if offset + size > bytes.len() {
+        offset = size_end;
+        let payload_end = offset
+            .checked_add(size)
+            .ok_or_else(|| err(format!("Bundle entry {index} payload length overflow")))?;
+        if payload_end > bytes.len() {
             return Err(err(format!("Bundle entry {index} payload is truncated")));
         }
-        let payload = &bytes[offset..offset + size];
-        offset += size;
+        let payload = &bytes[offset..payload_end];
+        offset = payload_end;
         entries.push(ParsedBundleEntry {
             name,
             bytes: payload,

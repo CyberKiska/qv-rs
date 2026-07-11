@@ -1,4 +1,5 @@
 use anyhow::Result;
+use proptest::prelude::*;
 use serde_json::Value;
 
 use qvault_core::aead::{
@@ -21,6 +22,9 @@ use qvault_core::qenc::metadata::{
     AEAD_ALG_ID_AES_256_GCM, KDF_ALG_ID_KMAC256, KEM_ALG_ID_ML_KEM_1024,
 };
 use qvault_core::{encapsulate, generate_key_pair};
+
+const QENC_CHUNK_SIZE: u64 = 8 * 1024 * 1024;
+const JS_MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
 #[test]
 fn qenc_metadata_fixes_current_algorithm_and_policy_ids() -> Result<()> {
@@ -86,6 +90,117 @@ fn qenc_metadata_rejects_duplicate_and_unknown_fields() -> Result<()> {
         "unknown metadata fields must not be accepted; got {error}"
     );
     Ok(())
+}
+
+#[test]
+fn qenc_metadata_requires_complete_js_compatible_geometry() -> Result<()> {
+    let single = build_qenc_metadata("single-container-aead", 128, QENC_CHUNK_SIZE, 1)?;
+    let per_chunk = build_qenc_metadata("per-chunk-aead", QENC_CHUNK_SIZE + 1, QENC_CHUNK_SIZE, 2)?;
+
+    let mut missing_payload_length = single.clone();
+    missing_payload_length.payload_length = None;
+    let mut missing_chunk_size = single.clone();
+    missing_chunk_size.chunk_size = None;
+    let mut missing_chunk_count = single.clone();
+    missing_chunk_count.chunk_count = None;
+    let mut unsupported_chunk_size = single.clone();
+    unsupported_chunk_size.chunk_size = Some(QENC_CHUNK_SIZE / 2);
+    let mut invalid_single_count = single;
+    invalid_single_count.chunk_count = Some(2);
+    let mut inconsistent_per_chunk_count = per_chunk;
+    inconsistent_per_chunk_count.chunk_count = Some(3);
+
+    for (metadata, expected_message) in [
+        (
+            missing_payload_length,
+            "payloadLength must be a positive integer",
+        ),
+        (missing_chunk_size, "chunkSize must be a positive integer"),
+        (missing_chunk_count, "chunkCount must be a positive integer"),
+        (unsupported_chunk_size, "unsupported chunkSize"),
+        (invalid_single_count, "chunkCount exceeds maxChunkCount"),
+        (
+            inconsistent_per_chunk_count,
+            "chunkCount does not match payloadLength/chunkSize geometry",
+        ),
+    ] {
+        let error = serialize_qenc_metadata(&metadata).unwrap_err();
+        assert!(
+            error.to_string().contains(expected_message),
+            "unexpected geometry error: {error}"
+        );
+    }
+
+    let error = build_qenc_metadata(
+        "single-container-aead",
+        JS_MAX_SAFE_INTEGER + 1,
+        QENC_CHUNK_SIZE,
+        1,
+    )
+    .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("payloadLength must be a positive integer"));
+    Ok(())
+}
+
+proptest! {
+    #[test]
+    fn qenc_geometry_accepts_all_supported_safe_payload_lengths(
+        payload_length in 1u64..=JS_MAX_SAFE_INTEGER,
+        per_chunk in any::<bool>(),
+    ) {
+        let (mode, chunk_count) = if per_chunk {
+            ("per-chunk-aead", payload_length.div_ceil(QENC_CHUNK_SIZE))
+        } else {
+            ("single-container-aead", 1)
+        };
+
+        prop_assert!(build_qenc_metadata(
+            mode,
+            payload_length,
+            QENC_CHUNK_SIZE,
+            chunk_count,
+        ).is_ok());
+    }
+
+    #[test]
+    fn qenc_geometry_rejects_arbitrary_inconsistent_values_without_panicking(
+        payload_length in any::<u64>(),
+        chunk_size in any::<u64>(),
+        chunk_count in any::<u64>(),
+        per_chunk in any::<bool>(),
+    ) {
+        let mut metadata = if per_chunk {
+            build_qenc_metadata(
+                "per-chunk-aead",
+                QENC_CHUNK_SIZE + 1,
+                QENC_CHUNK_SIZE,
+                2,
+            ).unwrap()
+        } else {
+            build_qenc_metadata("single-container-aead", 128, QENC_CHUNK_SIZE, 1).unwrap()
+        };
+        metadata.payload_length = Some(payload_length);
+        metadata.chunk_size = Some(chunk_size);
+        metadata.chunk_count = Some(chunk_count);
+
+        let safe_fields = (1..=JS_MAX_SAFE_INTEGER).contains(&payload_length)
+            && (1..=JS_MAX_SAFE_INTEGER).contains(&chunk_size)
+            && (1..=JS_MAX_SAFE_INTEGER).contains(&chunk_count);
+        let mode_geometry_matches = if per_chunk {
+            chunk_count <= u64::from(u32::MAX)
+                && payload_length > 0
+                && chunk_count == payload_length.div_ceil(QENC_CHUNK_SIZE)
+        } else {
+            chunk_count == 1
+        };
+        let expected_valid = safe_fields
+            && chunk_size == QENC_CHUNK_SIZE
+            && mode_geometry_matches;
+
+        prop_assert_eq!(serialize_qenc_metadata(&metadata).is_ok(), expected_valid);
+    }
 }
 
 #[test]

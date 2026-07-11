@@ -5,15 +5,19 @@ pub(super) fn run_sign(args: SignArgs, ctx: CliContext) -> Result<()> {
     prepare_output_parent_dirs(std::slice::from_ref(&args.out), ctx)?;
     preflight_outputs(std::slice::from_ref(&args.out), args.force, ctx)?;
 
-    let target_bytes = read_bounded_file_checked(
+    let target_bytes = Zeroizing::new(read_bounded_file_checked(
         &args.input_file,
         ctx,
         MAX_SIGNED_TARGET_BYTES,
         "sign target",
-    )?;
+    )?);
     validate_sign_target_bytes(&target_bytes, args.target)?;
 
-    let secret_key_file_bytes = Zeroizing::new(read_file_checked(&args.secret_key, ctx)?);
+    let secret_key_file_bytes = Zeroizing::new(read_small_artifact_checked(
+        &args.secret_key,
+        ctx,
+        "PQ signing secret key",
+    )?);
     let secret_key_file =
         unpack_secret_key_file(secret_key_file_bytes.as_slice()).map_err(|error| {
             coded(
@@ -42,7 +46,7 @@ pub(super) fn run_sign(args: SignArgs, ctx: CliContext) -> Result<()> {
         .into());
     }
 
-    write_file_checked(&args.out, &artifact.qsig_bytes, ctx)?;
+    write_file_checked(&args.out, &artifact.qsig_bytes, args.force, ctx)?;
 
     let signer_fingerprint_hex = to_hex(&artifact.signer_fingerprint_record[1..]);
     let target_digest_hex = sha3_512_hex(&target_bytes);
@@ -87,17 +91,17 @@ pub(super) fn run_sign(args: SignArgs, ctx: CliContext) -> Result<()> {
 }
 
 pub(super) fn run_sig_verify(args: SigVerifyArgs, ctx: CliContext) -> Result<()> {
-    let document_bytes = read_bounded_file_checked(
+    let document_bytes = Zeroizing::new(read_bounded_file_checked(
         &args.input_file,
         ctx,
         MAX_SIGNED_TARGET_BYTES,
         "verification target",
-    )?;
-    let qsig_bytes = read_file_checked(&args.sig, ctx)?;
+    )?);
+    let qsig_bytes = read_small_artifact_checked(&args.sig, ctx, "Detached signature")?;
     let pqpk_bytes = args
         .pqpk
         .as_ref()
-        .map(|path| read_file_checked(path, ctx))
+        .map(|path| read_small_artifact_checked(path, ctx, "PQ signer public key"))
         .transpose()?;
     let pqpk_provided = pqpk_bytes.is_some();
 
@@ -140,7 +144,9 @@ pub(super) fn run_sig_verify(args: SigVerifyArgs, ctx: CliContext) -> Result<()>
         });
         println!("{}", serde_json::to_string_pretty(&report)?);
         if !verification.ok {
-            std::process::exit(map_qv_code_to_exit(QvCode::VerificationFailed));
+            return Err(reported_exit(map_qv_code_to_exit(
+                QvCode::VerificationFailed,
+            )));
         }
         return Ok(());
     }

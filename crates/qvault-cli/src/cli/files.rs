@@ -1,8 +1,10 @@
+use std::collections::HashSet;
 use std::env;
 use std::ffi::OsString;
 use std::fs;
-use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::io::{self, Read, Write};
+use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{bail, Context, Result};
 use qvault_core::bytes::from_hex;
@@ -10,11 +12,50 @@ use qvault_core::error::{coded, QvCode};
 
 use super::{CliContext, DecryptArgs, RestoreArgs};
 
+const PUBLIC_FILE_MODE: u32 = 0o644;
+const SECRET_FILE_MODE: u32 = 0o600;
+pub(crate) const SMALL_ARTIFACT_READ_LIMIT: u64 = 32 * 1024 * 1024;
+static NEXT_ATOMIC_TEMP_ID: AtomicU64 = AtomicU64::new(0);
+
 pub(crate) fn parse_fixed_hex_32(value: &str, field: &str) -> Result<[u8; 32]> {
     let bytes = from_hex(value).map_err(|error| anyhow::anyhow!("invalid {field}: {error}"))?;
     bytes
         .try_into()
         .map_err(|_| anyhow::anyhow!("{field} must decode to exactly 32 bytes"))
+}
+
+fn parse_lower_hex_selector(
+    value: &str,
+    expected_len: usize,
+    field: &str,
+) -> std::result::Result<String, String> {
+    let value = value.trim();
+    if value.len() != expected_len
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(format!(
+            "{field} must be {expected_len} lowercase hex characters"
+        ));
+    }
+    Ok(value.to_string())
+}
+
+pub(crate) fn parse_archive_id_selector(value: &str) -> std::result::Result<String, String> {
+    parse_lower_hex_selector(value, 64, "--archive-id")
+}
+
+pub(crate) fn parse_state_id_selector(value: &str) -> std::result::Result<String, String> {
+    parse_lower_hex_selector(value, 128, "--state-id")
+}
+
+pub(crate) fn parse_cohort_id_selector(value: &str) -> std::result::Result<String, String> {
+    parse_lower_hex_selector(value, 64, "--cohort-id")
+}
+
+pub(crate) fn parse_bundle_digest_selector(value: &str) -> std::result::Result<String, String> {
+    parse_lower_hex_selector(value, 128, "--bundle-digest")
 }
 
 pub(crate) fn split_base_name(input_path: &Path) -> Result<String> {
@@ -73,8 +114,11 @@ pub(crate) fn read_bounded_file_checked(
     label: &str,
 ) -> Result<Vec<u8>> {
     reject_symlink_components(path, ctx.allow_symlink)?;
-    let metadata =
-        fs::metadata(path).with_context(|| format!("failed to stat {}", path.display()))?;
+    let file =
+        fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("failed to stat {}", path.display()))?;
     if !metadata.is_file() {
         bail!("{label} must be a regular file: {}", path.display());
     }
@@ -88,7 +132,13 @@ pub(crate) fn read_bounded_file_checked(
         )
         .into());
     }
-    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let read_limit = max_bytes
+        .checked_add(1)
+        .ok_or_else(|| anyhow::anyhow!("invalid maximum read length"))?;
+    let mut bytes = Vec::new();
+    file.take(read_limit)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("failed to read {}", path.display()))?;
     if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max_bytes {
         return Err(coded(
             QvCode::UnsupportedFormat,
@@ -102,14 +152,28 @@ pub(crate) fn read_bounded_file_checked(
     Ok(bytes)
 }
 
-pub(crate) fn write_file_checked(path: &Path, bytes: &[u8], ctx: CliContext) -> Result<()> {
+pub(crate) fn read_small_artifact_checked(
+    path: &Path,
+    ctx: CliContext,
+    label: &str,
+) -> Result<Vec<u8>> {
+    read_bounded_file_checked(path, ctx, SMALL_ARTIFACT_READ_LIMIT, label)
+}
+
+pub(crate) fn write_file_checked(
+    path: &Path,
+    bytes: &[u8],
+    force: bool,
+    ctx: CliContext,
+) -> Result<()> {
     if let Some(parent) = path.parent().filter(|value| !value.as_os_str().is_empty()) {
         reject_symlink_components(parent, ctx.allow_symlink)?;
     }
     if path.exists() {
         reject_symlink_components(path, ctx.allow_symlink)?;
     }
-    fs::write(path, bytes).with_context(|| format!("failed to write {}", path.display()))
+    write_file_atomic_platform(path, bytes, force, PUBLIC_FILE_MODE)
+        .with_context(|| format!("failed to write {}", path.display()))
 }
 
 pub(crate) fn write_secret_file_checked(
@@ -124,7 +188,7 @@ pub(crate) fn write_secret_file_checked(
     if path.exists() {
         reject_symlink_components(path, ctx.allow_symlink)?;
     }
-    write_secret_file_platform(path, bytes, force)
+    write_file_atomic_platform(path, bytes, force, SECRET_FILE_MODE)
         .with_context(|| format!("failed to write secret file {}", path.display()))
 }
 
@@ -159,100 +223,118 @@ pub(crate) fn prepare_output_parent_dirs(paths: &[PathBuf], ctx: CliContext) -> 
     Ok(())
 }
 
-#[cfg(unix)]
-fn write_secret_file_platform(path: &Path, bytes: &[u8], force: bool) -> Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
-
-    fn create_secret_file(path: &Path) -> io::Result<fs::File> {
-        fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(path)
-    }
-
-    fn write_and_sync_secret_file(
-        path: &Path,
-        mut file: fs::File,
-        bytes: &[u8],
-        cleanup_path: &Path,
-    ) -> Result<()> {
-        let result = (|| -> io::Result<()> {
-            file.write_all(bytes)?;
-            file.sync_all()?;
-            Ok(())
-        })();
-        drop(file);
-        if let Err(error) = result {
-            let _ = fs::remove_file(cleanup_path);
-            return Err(error).with_context(|| format!("failed to write {}", path.display()));
-        }
-        Ok(())
-    }
-
-    if !force {
-        let file = create_secret_file(path)?;
-        return write_and_sync_secret_file(path, file, bytes, path);
-    }
-
-    let (temp_path, file) = create_unique_secret_temp_file(path)?;
-    write_and_sync_secret_file(path, file, bytes, &temp_path)?;
-    if let Err(error) = fs::rename(&temp_path, path) {
-        let _ = fs::remove_file(&temp_path);
-        return Err(error).with_context(|| format!("failed to replace {}", path.display()));
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn create_unique_secret_temp_file(path: &Path) -> Result<(PathBuf, fs::File)> {
-    use std::os::unix::fs::OpenOptionsExt;
-
+fn create_unique_atomic_temp_file(path: &Path, mode: u32) -> Result<(PathBuf, fs::File)> {
     let parent = path.parent().unwrap_or_else(|| Path::new(""));
     let file_name = path
         .file_name()
-        .unwrap_or_else(|| std::ffi::OsStr::new("secret"));
+        .unwrap_or_else(|| std::ffi::OsStr::new("artifact"));
     for attempt in 0..100u32 {
+        let unique_id = NEXT_ATOMIC_TEMP_ID.fetch_add(1, Ordering::Relaxed);
         let mut temp_name = OsString::from(".");
         temp_name.push(file_name);
         temp_name.push(format!(
-            ".qvault-secret-{}-{attempt}.tmp",
-            std::process::id()
+            ".qvault-atomic-{}-{unique_id}-{attempt}.tmp",
+            std::process::id(),
         ));
         let temp_path = parent.join(temp_name);
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temp_path)
-        {
+        match open_atomic_temp_file(&temp_path, mode) {
             Ok(file) => return Ok((temp_path, file)),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(error.into()),
         }
     }
     bail!(
-        "failed to create unique secret temp file for {}",
+        "failed to create unique atomic temp file for {}",
         path.display()
     )
 }
 
-#[cfg(not(unix))]
-fn write_secret_file_platform(path: &Path, bytes: &[u8], force: bool) -> Result<()> {
+fn open_atomic_temp_file(path: &Path, mode: u32) -> io::Result<fs::File> {
     let mut options = fs::OpenOptions::new();
-    options.write(true);
-    if force {
-        options.create(true).truncate(true);
-    } else {
-        options.create_new(true);
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(mode);
     }
-    let mut file = options.open(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
+    #[cfg(not(unix))]
+    let _ = mode;
+    options.open(path)
+}
+
+fn write_file_atomic_platform(path: &Path, bytes: &[u8], force: bool, mode: u32) -> Result<()> {
+    let (temp_path, mut file) = create_unique_atomic_temp_file(path, mode)?;
+    let staged = (|| -> io::Result<()> {
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        Ok(())
+    })();
+    drop(file);
+    if let Err(error) = staged {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error).with_context(|| format!("failed to stage {}", path.display()));
+    }
+
+    let mut destination_created = false;
+    let committed = if force {
+        replace_file(&temp_path, path)
+    } else {
+        match fs::hard_link(&temp_path, path) {
+            Ok(()) => {
+                destination_created = true;
+                fs::remove_file(&temp_path)
+            }
+            Err(error) => Err(error),
+        }
+    };
+    if let Err(error) = committed {
+        if destination_created {
+            let _ = fs::remove_file(path);
+        }
+        let _ = fs::remove_file(&temp_path);
+        return Err(error).with_context(|| {
+            if force {
+                format!("failed to atomically replace {}", path.display())
+            } else {
+                format!(
+                    "refusing to overwrite or failed to commit {}",
+                    path.display()
+                )
+            }
+        });
+    }
+    sync_parent_directory(path)
+        .with_context(|| format!("failed to sync output directory for {}", path.display()))?;
     Ok(())
 }
 
+#[cfg(unix)]
+fn sync_parent_directory(path: &Path) -> io::Result<()> {
+    fs::File::open(path.parent().unwrap_or_else(|| Path::new(".")))?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn replace_file(temp_path: &Path, path: &Path) -> io::Result<()> {
+    fs::rename(temp_path, path)
+}
+
+#[cfg(not(unix))]
+fn replace_file(temp_path: &Path, path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    fs::rename(temp_path, path)
+}
+
 pub(crate) fn preflight_outputs(paths: &[PathBuf], force: bool, ctx: CliContext) -> Result<()> {
+    ensure_distinct_output_paths(paths)?;
     for path in paths {
         if let Some(parent) = path.parent().filter(|value| !value.as_os_str().is_empty()) {
             reject_symlink_components(parent, ctx.allow_symlink)?;
@@ -262,6 +344,38 @@ pub(crate) fn preflight_outputs(paths: &[PathBuf], force: bool, ctx: CliContext)
             if !force {
                 bail!("Refusing to overwrite existing file: {}", path.display());
             }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn ensure_distinct_output_paths(paths: &[PathBuf]) -> Result<()> {
+    let mut normalized = HashSet::with_capacity(paths.len());
+    for path in paths {
+        let absolute = if path.is_absolute() {
+            path.clone()
+        } else {
+            env::current_dir()?.join(path)
+        };
+        let mut normalized_path = PathBuf::new();
+        for component in absolute.components() {
+            match component {
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    normalized_path.pop();
+                }
+                Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                    normalized_path.push(component.as_os_str());
+                }
+            }
+        }
+        let identity = normalized_path
+            .parent()
+            .and_then(|parent| fs::canonicalize(parent).ok())
+            .and_then(|parent| normalized_path.file_name().map(|name| parent.join(name)))
+            .unwrap_or(normalized_path);
+        if !normalized.insert(identity) {
+            bail!("output paths must be distinct: {}", path.display());
         }
     }
     Ok(())
@@ -279,10 +393,20 @@ pub(crate) fn reject_symlink_components(path: &Path, allow_symlink: bool) -> Res
     let mut current = PathBuf::new();
     for component in absolute.components() {
         current.push(component.as_os_str());
-        let Ok(metadata) = fs::symlink_metadata(&current) else {
-            continue;
+        let metadata = match fs::symlink_metadata(&current) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("failed to inspect path component {}", current.display())
+                })
+            }
         };
         if metadata.file_type().is_symlink() {
+            #[cfg(target_os = "macos")]
+            if current == Path::new("/tmp") || current == Path::new("/var") {
+                continue;
+            }
             bail!(
                 "Refusing symlink path component without --allow-symlink: {}",
                 current.display()
@@ -301,9 +425,22 @@ pub(crate) fn validate_safe_name_prefix(prefix: &str) -> Result<()> {
 
 pub(crate) fn validate_optional_filename(filename: Option<&str>) -> Result<()> {
     if let Some(filename) = filename {
-        if filename.is_empty() || filename.contains(['/', '\\', '\0']) {
+        if filename.is_empty() || filename.len() > 255 || filename.contains(['/', '\\', '\0']) {
             bail!("--filename must be a safe basename");
         }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_cohort_cli_params(n: u16, k: u16) -> Result<()> {
+    if k < 2 || k >= n {
+        bail!("cohort parameters must satisfy 2 <= k < n");
+    }
+    if n > 255 {
+        bail!("--n must not exceed 255 for QV-RS-ErasureCodes-v1");
+    }
+    if !(n - k).is_multiple_of(2) {
+        bail!("--n minus --k must be even for QV-RS-ErasureCodes-v1");
     }
     Ok(())
 }
@@ -314,6 +451,7 @@ fn safe_recovered_filename(filename: Option<&str>) -> Result<String> {
         || filename == "."
         || filename == ".."
         || filename.starts_with('.')
+        || filename.len() > 255
         || filename.contains(['/', '\\', '\0'])
         || filename.chars().any(char::is_control)
     {
@@ -387,5 +525,96 @@ mod tests {
 
         fs::remove_dir_all(&dir)?;
         Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_writer_refuses_clobber_and_force_replaces_destination() -> Result<()> {
+        let dir = unique_test_dir("atomic-public");
+        fs::create_dir(&dir)?;
+        let path = dir.join("archive-state.json");
+        let ctx = CliContext {
+            json: false,
+            quiet: true,
+            allow_symlink: false,
+        };
+
+        write_file_checked(&path, b"first", false, ctx)?;
+        assert!(write_file_checked(&path, b"clobber", false, ctx).is_err());
+        assert_eq!(fs::read(&path)?, b"first");
+
+        write_file_checked(&path, b"replacement", true, ctx)?;
+        assert_eq!(fs::read(&path)?, b"replacement");
+        assert!(fs::read_dir(&dir)?.all(|entry| {
+            !entry
+                .expect("directory entry")
+                .file_name()
+                .to_string_lossy()
+                .contains(".qvault-atomic-")
+        }));
+
+        fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn forced_output_replaces_symlink_itself_without_touching_target() -> Result<()> {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let dir = unique_test_dir("atomic-symlink");
+        fs::create_dir(&dir)?;
+        let target = dir.join("target");
+        let output = dir.join("output");
+        fs::write(&target, b"target-must-survive")?;
+        symlink(&target, &output)?;
+        let ctx = CliContext {
+            json: false,
+            quiet: true,
+            allow_symlink: true,
+        };
+
+        write_secret_file_checked(&output, b"new-secret", true, ctx)?;
+        assert!(!fs::symlink_metadata(&output)?.file_type().is_symlink());
+        assert_eq!(fs::read(&output)?, b"new-secret");
+        assert_eq!(fs::read(&target)?, b"target-must-survive");
+        assert_eq!(fs::metadata(&output)?.permissions().mode() & 0o777, 0o600);
+
+        fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn distinct_output_check_normalizes_dot_and_parent_components() {
+        let first = PathBuf::from("outputs/archive.qenc");
+        let alias = PathBuf::from("outputs/./nested/../archive.qenc");
+        assert!(ensure_distinct_output_paths(&[first, alias]).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn distinct_output_check_resolves_parent_symlink_aliases() -> Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let dir = unique_test_dir("distinct-symlink-parent");
+        let real = dir.join("real");
+        let alias = dir.join("alias");
+        fs::create_dir_all(&real)?;
+        symlink(&real, &alias)?;
+        assert!(ensure_distinct_output_paths(&[
+            real.join("same-output"),
+            alias.join("same-output"),
+        ])
+        .is_err());
+        fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn selector_parser_requires_exact_lowercase_hex() {
+        assert!(parse_archive_id_selector(&"ab".repeat(32)).is_ok());
+        assert!(parse_archive_id_selector(&"AB".repeat(32)).is_err());
+        assert!(parse_state_id_selector(&"ab".repeat(63)).is_err());
+        assert!(parse_bundle_digest_selector(&"0g".repeat(64)).is_err());
     }
 }

@@ -1,20 +1,19 @@
 use super::super::*;
 
 pub(super) fn run_verify(args: VerifyArgs, ctx: CliContext) -> Result<()> {
-    let archive_state_bytes = read_file_checked(&args.archive_state, ctx)?;
-    let archive_state = parse_archive_state_descriptor_bytes(&archive_state_bytes)?;
+    let archive_state_bytes =
+        read_small_artifact_checked(&args.archive_state, ctx, "Archive-state descriptor")?;
+    let archive_state = parse_archive_state_descriptor_bytes(&archive_state_bytes)
+        .map_err(|error| coded(QvCode::InvalidFormat, error.to_string()))?;
     let lifecycle_bundle_bytes = match &args.bundle {
-        Some(path) => read_file_checked(path, ctx)?,
+        Some(path) => read_small_artifact_checked(path, ctx, "Lifecycle bundle")?,
         None => bail!("verify requires --bundle with canonical lifecycle bundle bytes"),
     };
     let signatures = load_named_artifacts(&args.signatures, ctx)?;
     let pq_public_keys = load_named_artifacts(&args.pq_public_keys, ctx)?;
     let timestamps = load_named_artifacts(&args.timestamps, ctx)?;
-    let pinned_pq_public_key_file_bytes = select_single_pinned_pqpk(&pq_public_keys)?;
-    let pq_public_key_file_bytes_list = pq_public_keys
-        .iter()
-        .map(|artifact| artifact.bytes.clone())
-        .collect::<Vec<_>>();
+    let pinned_pq_public_key_file_bytes_list = select_distinct_pinned_pqpks(&pq_public_keys);
+    let pq_public_key_file_bytes_list = pinned_pq_public_key_file_bytes_list.clone();
     let attached = attach_lifecycle_bundle_to_shards(
         &[],
         &AttachLifecycleOptions {
@@ -46,7 +45,8 @@ pub(super) fn run_verify(args: VerifyArgs, ctx: CliContext) -> Result<()> {
         &attached.lifecycle_bundle_bytes,
         &VerificationInputs {
             signatures: vec![],
-            pinned_pq_public_key_file_bytes,
+            pinned_pq_public_key_file_bytes: None,
+            pinned_pq_public_key_file_bytes_list,
             timestamps: vec![],
             expected_ed25519_signer: normalize_optional_string(
                 args.expected_ed25519_signer.as_deref(),
@@ -98,7 +98,9 @@ pub(super) fn run_verify(args: VerifyArgs, ctx: CliContext) -> Result<()> {
         }
         println!("{}", serde_json::to_string_pretty(&report)?);
         if !verify_ok {
-            std::process::exit(map_qv_code_to_exit(QvCode::PolicyNotSatisfied));
+            return Err(reported_exit(map_qv_code_to_exit(
+                QvCode::PolicyNotSatisfied,
+            )));
         }
         return Ok(());
     }

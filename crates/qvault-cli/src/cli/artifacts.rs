@@ -1,11 +1,13 @@
 use anyhow::{bail, Result};
 use qvault_core::auth::{AuthPolicyLevel, AuthenticityReport};
+use qvault_core::error::{coded, QvCode};
 use qvault_core::hash::sha3_512_hex;
 use qvault_core::lifecycle::{
     parse_archive_state_descriptor_bytes, parse_cohort_binding_bytes, parse_lifecycle_bundle_bytes,
     parse_source_evidence_bytes, parse_transition_record_bytes,
 };
 use qvault_core::qcont::parse_qvqcont7_shard;
+use qvault_core::qenc::parse_qenc_header;
 use serde_json::Value;
 use std::path::Path;
 
@@ -94,7 +96,8 @@ pub(crate) fn inspect_artifact(path: &Path, bytes: &[u8]) -> Result<Value> {
             "parsedSummary": {}
         }));
     }
-    if let Ok(shard) = parse_qvqcont7_shard(bytes) {
+    let parsed_shard = parse_qvqcont7_shard(bytes);
+    if let Ok(shard) = parsed_shard {
         return Ok(serde_json::json!({
             "command": "inspect",
             "ok": true,
@@ -116,6 +119,44 @@ pub(crate) fn inspect_artifact(path: &Path, bytes: &[u8]) -> Result<Value> {
                 "lifecycleBundleDigestHex": shard.lifecycle_bundle_digest_hex
             }
         }));
+    }
+    if path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("qcont"))
+    {
+        return Err(coded(QvCode::InvalidFormat, "Malformed QVqcont shard").into());
+    }
+
+    let parsed_qenc = parse_qenc_header(bytes);
+    if let Ok(qenc) = parsed_qenc {
+        return Ok(serde_json::json!({
+            "command": "inspect",
+            "ok": true,
+            "cliSchemaVersion": 1,
+            "file": path,
+            "artifactType": "qenc",
+            "artifactVersion": qenc.metadata.fmt,
+            "encoding": "binary",
+            "digestAlg": "SHA3-512",
+            "digestHex": sha3_512_hex(bytes),
+            "canonicalJson": qenc.metadata,
+            "parsedSummary": {
+                "containerId": sha3_512_hex(&qenc.header),
+                "aeadMode": qenc.metadata.aead_mode,
+                "payloadLength": qenc.metadata.payload_length,
+                "chunkSize": qenc.metadata.chunk_size,
+                "chunkCount": qenc.metadata.chunk_count,
+                "ciphertextLength": bytes.len() - qenc.offset,
+            }
+        }));
+    }
+    if path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("qenc"))
+    {
+        return Err(coded(QvCode::InvalidFormat, "Malformed QENC container").into());
     }
     Ok(serde_json::json!({
         "command": "inspect",

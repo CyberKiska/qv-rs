@@ -1265,3 +1265,159 @@ fn aead_errors_emit_oracle_qvcode_and_exit_status() {
     assert_eq!(value["ok"], false);
     assert_eq!(value["qvCode"], "AEAD_FAILED");
 }
+
+#[test]
+fn malformed_qenc_geometry_emits_format_policy_exit_status() {
+    let qenc_path = unique_temp_path("truncated.qenc");
+    let mut qenc = std::fs::read(core_fixture("qenc_interop/single-small/container.qenc"))
+        .expect("read qenc fixture");
+    qenc.pop();
+    std::fs::write(&qenc_path, qenc).expect("write malformed qenc");
+    let output_path = unique_temp_path("must-not-exist.bin");
+
+    let output = Command::new(qvault_cli())
+        .args([
+            "--json",
+            "decrypt",
+            qenc_path.to_str().expect("utf8 temp path"),
+            "--private-key",
+            core_fixture("qenc_interop/single-small/secret.qkey")
+                .to_str()
+                .expect("utf8 fixture path"),
+            "--out",
+            output_path.to_str().expect("utf8 temp path"),
+        ])
+        .output()
+        .expect("run qvault-cli decrypt with malformed geometry");
+
+    assert_eq!(output.status.code(), Some(4), "status: {:?}", output.status);
+    let value: Value = serde_json::from_slice(&output.stdout).expect("error JSON");
+    assert_eq!(value["qvCode"], "FORMAT_POLICY_REJECT");
+    assert!(value["error"]
+        .as_str()
+        .expect("error string")
+        .contains("authenticated geometry"));
+    assert!(!output_path.exists());
+}
+
+#[test]
+fn restore_rejects_identical_secret_and_container_outputs_before_input_io() {
+    let output_path = unique_temp_path("same-restore-output");
+    let missing_shard = unique_temp_path("missing.qcont");
+    let output = Command::new(qvault_cli())
+        .args([
+            "--json",
+            "restore",
+            "--output-qenc",
+            output_path.to_str().expect("utf8 output path"),
+            "--output-secret-key",
+            output_path.to_str().expect("utf8 output path"),
+            missing_shard.to_str().expect("utf8 missing shard path"),
+        ])
+        .output()
+        .expect("run restore with colliding outputs");
+
+    assert_eq!(output.status.code(), Some(2), "status: {:?}", output.status);
+    let value: Value = serde_json::from_slice(&output.stdout).expect("error JSON");
+    assert_eq!(value["qvCode"], "USAGE");
+    assert!(value["error"]
+        .as_str()
+        .expect("error string")
+        .contains("must be distinct"));
+    assert!(!output_path.exists());
+}
+
+#[test]
+fn selector_arguments_require_exact_lowercase_hex() {
+    let output = Command::new(qvault_cli())
+        .args([
+            "--json",
+            "restore",
+            "--archive-id",
+            &"AA".repeat(32),
+            "missing.qcont",
+        ])
+        .output()
+        .expect("run restore with uppercase selector");
+    assert_eq!(output.status.code(), Some(2));
+    let value: Value = serde_json::from_slice(&output.stdout).expect("error JSON");
+    assert_eq!(value["qvCode"], "USAGE");
+    assert!(value["error"]
+        .as_str()
+        .expect("error string")
+        .contains("lowercase hex"));
+}
+
+#[test]
+fn selftest_rejects_filters_that_match_no_checks() {
+    let output = Command::new(qvault_cli())
+        .args(["--json", "selftest", "--filter", "definitely-unknown"])
+        .output()
+        .expect("run filtered selftest");
+    assert_eq!(output.status.code(), Some(2));
+    let value: Value = serde_json::from_slice(&output.stdout).expect("error JSON");
+    assert_eq!(value["ok"], false);
+    assert_eq!(value["qvCode"], "USAGE");
+}
+
+#[cfg(unix)]
+#[test]
+fn decrypted_plaintext_is_written_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (qenc_path, private_key_path) = create_encrypted_payload_fixture("secret-plaintext-mode");
+    let plaintext_path = qenc_path
+        .parent()
+        .expect("fixture parent")
+        .join("restored-plaintext.txt");
+    let output = Command::new(qvault_cli())
+        .args([
+            "--quiet",
+            "decrypt",
+            qenc_path.to_str().expect("utf8 qenc path"),
+            "--private-key",
+            private_key_path.to_str().expect("utf8 private key path"),
+            "--out",
+            plaintext_path.to_str().expect("utf8 plaintext path"),
+        ])
+        .output()
+        .expect("decrypt fixture");
+    assert!(
+        output.status.success(),
+        "status: {:?}, stderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::metadata(&plaintext_path)
+            .expect("plaintext metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn json_error_reporting_is_panic_free_for_non_utf8_paths() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let invalid_path =
+        std::path::PathBuf::from(std::ffi::OsString::from_vec(b"missing-qenc-\xff".to_vec()));
+    let output = Command::new(qvault_cli())
+        .arg("--json")
+        .arg("decrypt")
+        .arg(&invalid_path)
+        .arg("--private-key")
+        .arg(core_fixture("qenc_interop/single-small/secret.qkey"))
+        .arg("--out")
+        .arg(unique_temp_path("non-utf8-output"))
+        .output()
+        .expect("run decrypt with non-UTF8 input path");
+
+    assert!(!output.status.success());
+    let value: Value = serde_json::from_slice(&output.stdout).expect("error JSON");
+    assert_eq!(value["command"], "decrypt");
+    assert_eq!(value["ok"], false);
+}

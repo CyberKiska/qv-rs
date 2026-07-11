@@ -9,7 +9,7 @@ mod errors;
 mod files;
 mod signatures;
 use artifacts::*;
-use errors::{command_name_from_args, json_requested, map_qv_code_to_exit};
+use errors::{command_name_from_args, json_requested, map_qv_code_to_exit, reported_exit};
 pub(crate) use errors::{emit_error, exit_code};
 use files::*;
 use signatures::*;
@@ -45,8 +45,8 @@ use qvault_core::qcont::{
     RestoreQvqcont7Options, RestoreQvqcont7Selection,
 };
 use qvault_core::{
-    current_iso8601_utc_millis, decrypt_qenc, encrypt_qenc, generate_key_pair, parse_qenc_header,
-    EncryptQencOptions,
+    current_iso8601_utc_millis, decrypt_qenc, encrypt_qenc, generate_key_pair,
+    parse_bundle_payload, parse_qenc_header, EncryptQencOptions,
 };
 use serde_json::Value;
 use zeroize::{Zeroize, Zeroizing};
@@ -61,11 +61,7 @@ struct Cli {
     json: bool,
     #[arg(long, global = true, help = "Suppress non-error text output")]
     quiet: bool,
-    #[arg(
-        long,
-        global = true,
-        help = "Permit symlink input paths and path components"
-    )]
+    #[arg(long, global = true, help = "Permit symlink paths and path components")]
     allow_symlink: bool,
     #[arg(
         long = "no-color",
@@ -219,11 +215,11 @@ struct SplitArgs {
     force: bool,
     #[arg(long, help = "PQ signing secret key (.pqsk) for archive approval")]
     archive_approval_key: Option<PathBuf>,
-    #[arg(long, hide = true)]
+    #[arg(long, hide = true, value_parser = parse_archive_id_selector)]
     archive_id: Option<String>,
     #[arg(long, hide = true)]
     archive_id_random: Option<String>,
-    #[arg(long, hide = true)]
+    #[arg(long, hide = true, value_parser = parse_state_id_selector)]
     parent_state_id: Option<String>,
     #[arg(long, hide = true)]
     state_type: Option<String>,
@@ -250,16 +246,29 @@ struct RestoreArgs {
         help = "Canonical lifecycle bundle JSON bytes used as a selection filter"
     )]
     lifecycle_bundle: Option<PathBuf>,
-    #[arg(long, help = "Explicit archiveId selection filter")]
+    #[arg(
+        long,
+        help = "Explicit archiveId selection filter",
+        value_parser = parse_archive_id_selector
+    )]
     archive_id: Option<String>,
-    #[arg(long, help = "Explicit stateId selection filter")]
+    #[arg(
+        long,
+        help = "Explicit stateId selection filter",
+        value_parser = parse_state_id_selector
+    )]
     state_id: Option<String>,
-    #[arg(long, help = "Explicit cohortId selection filter")]
+    #[arg(
+        long,
+        help = "Explicit cohortId selection filter",
+        value_parser = parse_cohort_id_selector
+    )]
     cohort_id: Option<String>,
     #[arg(
         long = "bundle-digest",
         alias = "lifecycle-bundle-digest",
-        help = "Explicit lifecycle bundle digest selection filter"
+        help = "Explicit lifecycle bundle digest selection filter",
+        value_parser = parse_bundle_digest_selector
     )]
     lifecycle_bundle_digest: Option<String>,
     #[arg(
@@ -359,13 +368,13 @@ struct ReshareArgs {
     k: u16,
     #[arg(long)]
     bundle: Option<PathBuf>,
-    #[arg(long)]
+    #[arg(long, value_parser = parse_archive_id_selector)]
     archive_id: Option<String>,
-    #[arg(long)]
+    #[arg(long, value_parser = parse_state_id_selector)]
     state_id: Option<String>,
-    #[arg(long)]
+    #[arg(long, value_parser = parse_cohort_id_selector)]
     cohort_id: Option<String>,
-    #[arg(long = "bundle-digest")]
+    #[arg(long = "bundle-digest", value_parser = parse_bundle_digest_selector)]
     bundle_digest: Option<String>,
     #[arg(long, default_value = "same-state-resharing")]
     reason_code: String,

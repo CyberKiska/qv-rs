@@ -16,7 +16,9 @@ use crate::lifecycle::{
 };
 use crate::manifest::strict_json::parse_json_bytes_strict;
 use crate::mlkem::decapsulate;
-use crate::policy::{get_nonce_contract_for_aead_mode, DEFAULT_CRYPTO_PROFILE};
+use crate::policy::{
+    get_nonce_contract_for_aead_mode, validate_container_policy_metadata, DEFAULT_CRYPTO_PROFILE,
+};
 use crate::qcont::shard_v7::{
     build_qvqcont7_shard, Qvqcont7Shard, LIFECYCLE_ARTIFACT_FAMILY, LIFECYCLE_QCONT_FORMAT_VERSION,
 };
@@ -31,16 +33,45 @@ pub struct Qvqcont7BuildParams {
     pub k: u16,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct Qvqcont7BuildOptions {
     pub archive_id: Option<String>,
     pub archive_id_random_bytes: Option<[u8; 32]>,
     pub preserved_archive_state_bytes: Option<Vec<u8>>,
     pub parent_state_id: Option<String>,
     pub state_type: Option<String>,
+    /// Deterministic interoperability-test hook. Production callers must leave
+    /// this unset and are responsible for clearing any supplied bytes.
     pub sss_random_bytes: Option<Vec<u8>>,
     pub auth_policy_level: Option<AuthPolicyLevel>,
     pub min_valid_signatures: Option<u64>,
+}
+
+impl std::fmt::Debug for Qvqcont7BuildOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Qvqcont7BuildOptions")
+            .field("archive_id", &self.archive_id)
+            .field(
+                "archive_id_random_bytes_present",
+                &self.archive_id_random_bytes.is_some(),
+            )
+            .field(
+                "preserved_archive_state_bytes_len",
+                &self.preserved_archive_state_bytes.as_ref().map(Vec::len),
+            )
+            .field("parent_state_id", &self.parent_state_id)
+            .field("state_type", &self.state_type)
+            .field(
+                "sss_random_bytes",
+                &self
+                    .sss_random_bytes
+                    .as_ref()
+                    .map(|bytes| format!("<redacted:{} bytes>", bytes.len())),
+            )
+            .field("auth_policy_level", &self.auth_policy_level)
+            .field("min_valid_signatures", &self.min_valid_signatures)
+            .finish()
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -108,6 +139,11 @@ pub fn build_qvqcont7_shards(
     if k < 2 || n <= k {
         return Err(err("Invalid cohort parameters: require 2 <= k < n"));
     }
+    if n > RS_MAX_CODEWORD {
+        return Err(err(format!(
+            "Invalid cohort parameters: n must not exceed {RS_MAX_CODEWORD} for QV-RS-ErasureCodes-v1"
+        )));
+    }
     let m = n
         .checked_sub(k)
         .ok_or_else(|| err("Invalid cohort parameters: require 2 <= k < n"))?;
@@ -122,6 +158,7 @@ pub fn build_qvqcont7_shards(
     }
 
     let parsed = parse_qenc_header(qenc_bytes)?;
+    let _nonce_contract = validate_container_policy_metadata(&parsed.metadata, false)?;
     let key_commitment = parsed.stored_key_commitment;
     let ciphertext = &qenc_bytes[parsed.offset..];
     let ds = &parsed.metadata.domain_strings;
@@ -171,7 +208,7 @@ pub fn build_qvqcont7_shards(
     } else {
         1
     };
-    let _nonce_contract = get_nonce_contract_for_aead_mode(&parsed.metadata.aead_mode)?;
+    let _nonce_mode = get_nonce_contract_for_aead_mode(&parsed.metadata.aead_mode)?;
 
     let shares = Zeroizing::new(split_secret(
         priv_key_bytes,

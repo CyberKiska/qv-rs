@@ -18,7 +18,7 @@ pub(super) fn run_keygen(args: KeygenArgs, ctx: CliContext) -> Result<()> {
 
     let (public_key, private_key) = generate_key_pair(None)?;
     let private_key = Zeroizing::new(private_key);
-    write_file_checked(&public_key_path, &public_key, ctx)?;
+    write_file_checked(&public_key_path, &public_key, args.force, ctx)?;
     write_secret_file_checked(&private_key_path, &private_key, args.force, ctx)?;
 
     if ctx.json {
@@ -66,7 +66,7 @@ pub(super) fn run_signer_keygen(args: SignerKeygenArgs, ctx: CliContext) -> Resu
     let signer_fingerprint_hex = to_hex(&sha3_256(&public_key));
     let public_key_digest_hex = sha3_512_hex(&public_key);
 
-    write_file_checked(&public_key_path, &public_key_file, ctx).with_context(|| {
+    write_file_checked(&public_key_path, &public_key_file, args.force, ctx).with_context(|| {
         format!(
             "failed to write public signing key {}; secret signing key was not written",
             public_key_path.display()

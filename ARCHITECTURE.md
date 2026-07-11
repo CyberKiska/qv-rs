@@ -53,7 +53,7 @@ qv-cli/
 - output path and symlink policy
 - JSON and text reporting
 - stable process exit codes
-- best-effort local secret-key file permissions
+- atomic local writes and owner-only modes for secret outputs on Unix
 
 The CLI should stay thin. Wire-format decisions belong in `qvault-core`.
 
@@ -123,11 +123,11 @@ Restore rejects old shard formats and unknown artifact families.
 2. Validate embedded archive-state, cohort-binding, and lifecycle-bundle digests.
 3. Group candidates by `archiveId`, `stateId`, `cohortId`, exact archive-state bytes, and exact cohort-binding bytes.
 4. Require explicit selection or acknowledgement when multiple lifecycle-bundle variants are present.
-5. Verify share commitments and fragment body hashes.
-6. Reconstruct `.qenc` and the ML-KEM secret key.
-7. Verify `.qenc` hash, copied metadata, key commitment, and restored key binding.
-8. Verify archive approval, maintenance, source-evidence, signer pins, and timestamp linkage.
-9. Evaluate archive policy.
+5. Verify archive approval, maintenance, source-evidence, signer pins, and timestamp linkage, then enforce archive policy before materializing secrets.
+6. Select copied QENC header fields only when their exact header hash matches the archive-state `containerId`; derive geometry from validated QENC metadata, never unauthenticated shard metadata.
+7. Verify Shamir-share and fragment-body commitments independently, then reconstruct the ML-KEM secret key and `.qenc` ciphertext.
+8. Verify the QENC key commitment, full `.qenc` hash, header identity, and restored key binding; treat redundant `privateKeyHash` shard metadata as diagnostic only.
+9. Preserve same-state fork and non-selected-input diagnostics for operator audit.
 10. Write outputs only when the restore policy is satisfied or the requested dry-run semantics allow reporting without output.
 
 ## Security Posture

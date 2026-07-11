@@ -1,19 +1,12 @@
 use crate::error::{err, Result};
+use subtle::ConstantTimeEq;
 
 pub fn bytes_equal(left: &[u8], right: &[u8]) -> bool {
     left == right
 }
 
 pub fn timing_safe_equal(left: &[u8], right: &[u8]) -> bool {
-    if left.len() != right.len() {
-        return false;
-    }
-
-    let mut diff = 0u8;
-    for (a, b) in left.iter().zip(right.iter()) {
-        diff |= a ^ b;
-    }
-    diff == 0
+    left.ct_eq(right).into()
 }
 
 pub fn to_hex(bytes: &[u8]) -> String {

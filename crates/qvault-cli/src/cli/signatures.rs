@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use qvault_core::auth::{DisplayMetadata, NamedBinaryArtifact, SignatureCheckResult};
 use qvault_core::error::{coded, QvCode};
 use qvault_core::lifecycle::{
@@ -10,7 +10,7 @@ use serde_json::Value;
 use std::path::PathBuf;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime, UtcOffset};
 
-use super::files::{read_file_checked, validate_optional_filename};
+use super::files::{read_small_artifact_checked, validate_optional_filename};
 use super::{AttachArgs, CliContext, SignArgs, SignTargetArg};
 
 pub(crate) fn load_named_artifacts(
@@ -20,7 +20,7 @@ pub(crate) fn load_named_artifacts(
     paths
         .iter()
         .map(|path| {
-            let bytes = read_file_checked(path, ctx)
+            let bytes = read_small_artifact_checked(path, ctx, "Detached verification artifact")
                 .with_context(|| format!("failed to read {}", path.display()))?;
             Ok(NamedBinaryArtifact {
                 name: path
@@ -61,7 +61,7 @@ pub(crate) fn build_attach_signature_imports(
     }
     let source_evidence_bytes = match args.source_evidence.as_slice() {
         [single] => Some(
-            read_file_checked(single, ctx)
+            read_small_artifact_checked(single, ctx, "Source-evidence artifact")
                 .with_context(|| format!("failed to read source-evidence {}", single.display()))
                 .map_err(|error| signature_import_error(error.to_string()))?,
         ),
@@ -143,14 +143,14 @@ fn parse_sig_import_spec(spec: &str, ctx: CliContext) -> Result<LifecycleSignatu
         }
     };
     let path = PathBuf::from(file);
-    let bytes = read_file_checked(&path, ctx)
+    let bytes = read_small_artifact_checked(&path, ctx, "Signature import")
         .with_context(|| format!("failed to read --sig-import file {}", path.display()))
         .map_err(|error| signature_import_error(error.to_string()))?;
     let source_evidence_bytes = object
         .get("sourceEvidence")
         .and_then(Value::as_str)
         .map(PathBuf::from)
-        .map(|path| read_file_checked(&path, ctx))
+        .map(|path| read_small_artifact_checked(&path, ctx, "Source-evidence artifact"))
         .transpose()
         .map_err(|error| signature_import_error(error.to_string()))?;
     let target_digest_hex = match object.get("targetDigest") {
@@ -186,18 +186,14 @@ fn parse_sig_import_spec(spec: &str, ctx: CliContext) -> Result<LifecycleSignatu
     })
 }
 
-pub(crate) fn select_single_pinned_pqpk(
-    public_keys: &[NamedBinaryArtifact],
-) -> Result<Option<Vec<u8>>> {
-    let Some(first) = public_keys.first() else {
-        return Ok(None);
-    };
-    for key in public_keys.iter().skip(1) {
-        if key.bytes != first.bytes {
-            bail!("restore accepts at most one distinct --pqpk pinned PQ signer key");
+pub(crate) fn select_distinct_pinned_pqpks(public_keys: &[NamedBinaryArtifact]) -> Vec<Vec<u8>> {
+    let mut distinct = Vec::new();
+    for key in public_keys {
+        if !distinct.iter().any(|existing| existing == &key.bytes) {
+            distinct.push(key.bytes.clone());
         }
     }
-    Ok(Some(first.bytes.clone()))
+    distinct
 }
 
 pub(crate) fn normalize_optional_string(value: Option<&str>) -> Option<String> {

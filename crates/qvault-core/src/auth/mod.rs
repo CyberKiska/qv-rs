@@ -46,7 +46,11 @@ pub struct NamedBinaryArtifact {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct VerificationInputs {
     pub signatures: Vec<NamedBinaryArtifact>,
+    /// Legacy single-pin API retained for callers compiled against early 0.3.x.
     pub pinned_pq_public_key_file_bytes: Option<Vec<u8>>,
+    /// Distinct authoritative PQ signer pins. Successor verification attempts
+    /// every key and requires exactly one matching pin for each counted QSIG.
+    pub pinned_pq_public_key_file_bytes_list: Vec<Vec<u8>>,
     pub timestamps: Vec<NamedBinaryArtifact>,
     pub expected_ed25519_signer: Option<String>,
 }

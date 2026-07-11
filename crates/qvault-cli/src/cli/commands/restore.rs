@@ -1,31 +1,44 @@
 use super::super::*;
 
 pub(super) fn run_restore(args: RestoreArgs, ctx: CliContext) -> Result<()> {
+    if !args.dry_run {
+        if let (Some(output_qenc), Some(output_secret_key)) =
+            (&args.output_qenc, &args.output_secret_key)
+        {
+            ensure_distinct_output_paths(&[output_qenc.clone(), output_secret_key.clone()])?;
+        }
+    }
     let shard_paths = restore_shard_paths(&args)?;
     let archive_state_bytes = args
         .archive_state
         .as_ref()
-        .map(|path| read_file_checked(path, ctx))
+        .map(|path| read_small_artifact_checked(path, ctx, "Archive-state descriptor"))
         .transpose()
         .with_context(|| "failed to read --archive-state")?;
     let lifecycle_bundle_bytes = args
         .lifecycle_bundle
         .as_ref()
-        .map(|path| read_file_checked(path, ctx))
+        .map(|path| read_small_artifact_checked(path, ctx, "Lifecycle bundle"))
         .transpose()
         .with_context(|| "failed to read --lifecycle-bundle")?;
     let signatures = load_named_artifacts(&args.signatures, ctx)?;
     let pq_public_keys = load_named_artifacts(&args.pq_public_keys, ctx)?;
     let timestamps = load_named_artifacts(&args.timestamps, ctx)?;
-    let pinned_pq_public_key_file_bytes = select_single_pinned_pqpk(&pq_public_keys)?;
+    let pinned_pq_public_key_file_bytes_list = select_distinct_pinned_pqpks(&pq_public_keys);
 
     let shards = shard_paths
         .iter()
         .map(|path| {
-            let bytes = read_file_checked(path, ctx)
-                .with_context(|| format!("failed to read {}", path.display()))?;
-            parse_qvqcont7_shard(&bytes)
-                .with_context(|| format!("failed to parse shard {}", path.display()))
+            let bytes = Zeroizing::new(
+                read_file_checked(path, ctx)
+                    .with_context(|| format!("failed to read {}", path.display()))?,
+            );
+            parse_qvqcont7_shard(bytes.as_slice()).map_err(|error| {
+                anyhow::Error::from(coded(
+                    QvCode::InvalidFormat,
+                    format!("failed to parse shard {}: {error}", path.display()),
+                ))
+            })
         })
         .collect::<Result<Vec<_>>>()?;
 
@@ -42,7 +55,8 @@ pub(super) fn run_restore(args: RestoreArgs, ctx: CliContext) -> Result<()> {
             },
             verification: VerificationInputs {
                 signatures,
-                pinned_pq_public_key_file_bytes,
+                pinned_pq_public_key_file_bytes: None,
+                pinned_pq_public_key_file_bytes_list,
                 timestamps,
                 expected_ed25519_signer: normalize_optional_string(
                     args.expected_ed25519_signer.as_deref(),
@@ -51,6 +65,21 @@ pub(super) fn run_restore(args: RestoreArgs, ctx: CliContext) -> Result<()> {
             enforce_policy: true,
         },
     )?;
+    let non_selected_input_indices = shards
+        .iter()
+        .enumerate()
+        .filter(|(_, shard)| {
+            shard.state_id != restored.state_id
+                || shard.cohort_id != restored.cohort_id
+                || shard.meta_json.get("archiveId").and_then(Value::as_str)
+                    != Some(restored.archive_id.as_str())
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let non_selected_input_paths = non_selected_input_indices
+        .iter()
+        .map(|index| shard_paths[*index].clone())
+        .collect::<Vec<_>>();
     let restored_priv_key = Zeroizing::new(std::mem::take(&mut restored.priv_key));
 
     let variant_ack_required = restored.mixed_lifecycle_bundle_variants_within_selected_cohort;
@@ -79,13 +108,21 @@ pub(super) fn run_restore(args: RestoreArgs, ctx: CliContext) -> Result<()> {
                 "qencOk": restored.qenc_ok,
                 "qkeyOk": restored.qkey_ok,
                 "rejectedShardIndices": restored.rejected_shard_indices,
+                "invalidShareIndices": restored.invalid_share_indices,
+                "corruptedShardIndices": restored.corrupted_shard_indices,
+                "missingShardIndices": restored.missing_shard_indices,
+                "privateKeyHashMatchesMetadata": restored.private_key_hash_matches_metadata,
+                "nonSelectedInputIndices": non_selected_input_indices,
+                "nonSelectedInputPaths": non_selected_input_paths,
+                "knownSameStateCohortIds": restored.known_same_state_cohort_ids,
+                "sameStateForkDetected": restored.same_state_fork_detected,
                 "authenticity": restored.authenticity,
                 "warnings": restored.warnings,
                 "outputs": Value::Null
             });
             println!("{}", serde_json::to_string_pretty(&report)?);
             if !would_succeed {
-                std::process::exit(1);
+                return Err(reported_exit(1));
             }
         } else if !ctx.quiet {
             if would_succeed {
@@ -98,7 +135,7 @@ pub(super) fn run_restore(args: RestoreArgs, ctx: CliContext) -> Result<()> {
             println!("Cohort ID: {}", restored.cohort_id);
         }
         if !would_succeed && !ctx.json {
-            std::process::exit(1);
+            return Err(reported_exit(1));
         }
         return Ok(());
     }
@@ -128,7 +165,7 @@ pub(super) fn run_restore(args: RestoreArgs, ctx: CliContext) -> Result<()> {
         args.force,
         ctx,
     )?;
-    write_file_checked(&output_qenc, &restored.qenc_bytes, ctx)
+    write_file_checked(&output_qenc, &restored.qenc_bytes, args.force, ctx)
         .with_context(|| format!("failed to write {}", output_qenc.display()))?;
     write_secret_file_checked(&output_secret_key, &restored_priv_key, args.force, ctx)
         .with_context(|| format!("failed to write {}", output_secret_key.display()))?;
@@ -151,6 +188,14 @@ pub(super) fn run_restore(args: RestoreArgs, ctx: CliContext) -> Result<()> {
             "qencOk": restored.qenc_ok,
             "qkeyOk": restored.qkey_ok,
             "rejectedShardIndices": restored.rejected_shard_indices,
+            "invalidShareIndices": restored.invalid_share_indices,
+            "corruptedShardIndices": restored.corrupted_shard_indices,
+            "missingShardIndices": restored.missing_shard_indices,
+            "privateKeyHashMatchesMetadata": restored.private_key_hash_matches_metadata,
+            "nonSelectedInputIndices": non_selected_input_indices,
+            "nonSelectedInputPaths": non_selected_input_paths,
+            "knownSameStateCohortIds": restored.known_same_state_cohort_ids,
+            "sameStateForkDetected": restored.same_state_fork_detected,
             "outputQenc": output_qenc,
             "outputSecretKey": output_secret_key,
             "authenticity": restored.authenticity,

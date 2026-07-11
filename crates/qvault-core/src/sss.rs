@@ -7,7 +7,7 @@ use zeroize::Zeroizing;
 const GENERATOR: u8 = 0xe5;
 const REDUCTION_POLY: u8 = 0x1b;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct RandomSource<'a> {
     preloaded: Option<&'a [u8]>,
     offset: usize,
@@ -218,6 +218,9 @@ pub fn combine_shares<S: AsRef<[u8]>>(shares: &[S]) -> Result<Vec<u8>> {
     for (i, share) in shares.iter().enumerate() {
         let share = share.as_ref();
         let sample = share[share_length - 1];
+        if sample == 0 {
+            return Err(err("share coordinate must be between 1 and 255"));
+        }
         if seen[sample as usize] {
             return Err(err(
                 "shares must contain unique values but a duplicate was found",

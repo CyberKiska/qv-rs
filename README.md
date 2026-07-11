@@ -31,7 +31,7 @@ Implemented:
 
 Not implemented:
 
-- automatic signing during `split`
+- dedicated CLI `qvpack` pack/extract commands (the core payload format is implemented)
 - full OpenTimestamps calendar attestation validation
 - network services, daemon mode, or RPC mode
 
@@ -197,13 +197,14 @@ OpenTimestamps evidence is linked to `SHA-256(detached signature bytes)`. OTS ev
 - Decrypt verifies the inner wrapped-payload file hash.
 - Split verifies that the provided ML-KEM secret key matches the `.qenc` before producing shards.
 - Restore validates embedded archive-state, cohort-binding, lifecycle-bundle, `.qenc` metadata, key commitment, share commitments, fragment body hashes, and policy.
-- Secret-key files written by `keygen`, `signer-keygen`, and `restore` use owner-only permissions on Unix where available.
+- Secret keys, decrypted plaintext, and `.qcont` shards are written with owner-only permissions on Unix where available.
 - `.pqsk` signing keys authorize archive approvals; keep them separate from archive storage and publish/pin only `.pqpk` public keys.
 - Secret zeroization is best-effort. Temporary shared secrets, derived keys, and intermediate buffers are cleared where feasible; returned plaintext and returned secret-key bytes remain caller-controlled memory.
 
 ## Remaining Gaps
 
 - No automated end-to-end JS/Rust fixture regeneration harness is checked in yet.
-- Automatic archive approval signing during `split` is not implemented.
+- `split --archive-approval-key <key.pqsk>` supports same-run archive approval; the separate `sign` + `attach` workflow remains useful for offline approval.
+- Dedicated CLI `qvpack` pack/extract commands are not yet exposed.
 - OTS validation is structural/linkage reporting, not full calendar verification.
 - Full workspace CI should continue expanding malformed and cross-implementation cases before production release.

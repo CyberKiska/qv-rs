@@ -1,8 +1,8 @@
 use super::super::*;
 
 pub(super) fn run_inspect(args: InspectArgs, ctx: CliContext) -> Result<()> {
-    let bytes = read_file_checked(&args.artifact_file, ctx)?;
-    let inspected = inspect_artifact(&args.artifact_file, &bytes)?;
+    let bytes = Zeroizing::new(read_file_checked(&args.artifact_file, ctx)?);
+    let inspected = inspect_artifact(&args.artifact_file, bytes.as_slice())?;
     if ctx.json {
         println!("{}", serde_json::to_string_pretty(&inspected)?);
     } else if !ctx.quiet {
@@ -21,7 +21,8 @@ pub(super) fn run_inspect(args: InspectArgs, ctx: CliContext) -> Result<()> {
 
 pub(super) fn run_canonicalize(args: CanonicalizeArgs, ctx: CliContext) -> Result<()> {
     let bytes = read_file_checked(&args.artifact_file, ctx)?;
-    let canonical = canonicalize_artifact(&bytes)?;
+    let canonical = canonicalize_artifact(&bytes)
+        .map_err(|error| coded(QvCode::InvalidFormat, error.to_string()))?;
     if ctx.json {
         let report = serde_json::json!({
             "command": "canonicalize",

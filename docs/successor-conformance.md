@@ -38,12 +38,13 @@ Rust must preserve these JS/normative contracts:
 - `apparentlyComplete` and `completeProof` are reporting heuristics only
 - CLI errors use JS-aligned `qvCode` strings and exit codes
 
-## Intentional Rust Deviations
+## Trust And Reporting Rules
 
-Rust currently hardens signature policy counting:
+Rust follows the current JS signer-identity policy counting rules:
 
 - Archive approval signatures count toward `any-signature` and `strong-pq-signature` only when the signer is bound through lifecycle-bundle public-key material or an explicit user pin.
 - Self-verifying `.qsig` material may verify structurally and be reported, but it does not satisfy archive policy on its own.
+- Multiple proofs from one verified signer count once; thresholds count distinct stable signer identities.
 
 Rust follows the normative restore-summary label from `format-spec.md` for complete-looking OTS proofs:
 

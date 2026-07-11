@@ -7,7 +7,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::auth::successor_policy::finalize_successor_lifecycle_verification;
 use crate::auth::{
-    classify_detached_archive_approval_bytes, resolve_open_timestamp_target,
+    classify_detached_archive_approval_bytes, resolve_open_timestamp_target, unpack_pqpk,
     verify_qsig_against_bytes, verify_stellar_sig_against_bytes, ArchivePolicyEvaluation,
     AuthPolicy, AuthPolicyLevel, AuthenticityReport, AuthenticityStatus,
     DetachedArchiveApprovalKind, NamedBinaryArtifact, SignatureArtifact, SignatureCheckResult,
@@ -19,14 +19,17 @@ use crate::erasure;
 use crate::error::{coded, err, QvCode, Result};
 use crate::hash::{sha256_hex, sha3_512_hex};
 use crate::kdf::{derive_key_with_kmac, verify_key_commitment};
+use crate::lifecycle::cohort_binding::REED_SOLOMON_CODEC_ID;
 use crate::lifecycle::{
     canonicalize_archive_state_descriptor, canonicalize_cohort_binding,
     canonicalize_source_evidence, canonicalize_transition_record, derive_cohort_id,
     parse_lifecycle_bundle_bytes, CanonicalLifecycleBundle,
 };
 use crate::mlkem::decapsulate;
+use crate::policy::validate_container_policy_metadata;
 use crate::qcont::shard_v7::Qvqcont7Shard;
-use crate::qenc::{build_qenc_header, parse_qenc_header, parse_qenc_metadata_bytes};
+use crate::qenc::metadata::{authenticated_geometry, AuthenticatedGeometry};
+use crate::qenc::{build_qenc_header, parse_qenc_header, parse_qenc_metadata_bytes, QencMetadata};
 use crate::sss::combine_shares;
 
 const RS_MAX_CODEWORD: usize = 255;
@@ -73,6 +76,10 @@ pub struct RestoredQvqcont7 {
     pub recovered_qenc_hash: String,
     pub recovered_priv_hash: String,
     pub rejected_shard_indices: Vec<u16>,
+    pub invalid_share_indices: Vec<u16>,
+    pub corrupted_shard_indices: Vec<u16>,
+    pub missing_shard_indices: Vec<u16>,
+    pub private_key_hash_matches_metadata: bool,
     pub qenc_ok: bool,
     pub qkey_ok: bool,
     pub archive_state_bytes: Vec<u8>,
@@ -83,6 +90,9 @@ pub struct RestoredQvqcont7 {
     pub lifecycle_bundle_digest_hex: String,
     pub authenticity: AuthenticityReport,
     pub warnings: Vec<String>,
+    /// Cohort IDs observed for the selected archive/state before explicit filtering.
+    pub known_same_state_cohort_ids: Vec<String>,
+    pub same_state_fork_detected: bool,
     /// Sorted unique `lifecycleBundleDigestHex` values observed on input shards for the selected cohort.
     pub embedded_lifecycle_bundle_digests_used: Vec<String>,
     /// True when `embedded_lifecycle_bundle_digests_used.len() > 1` (oracle `mixedLifecycleBundleVariantsWithinSelectedCohort`).
@@ -99,6 +109,9 @@ impl std::fmt::Debug for RestoredQvqcont7 {
             .field("qenc_ok", &self.qenc_ok)
             .field("qkey_ok", &self.qkey_ok)
             .field("rejected_shard_indices", &self.rejected_shard_indices)
+            .field("invalid_share_indices", &self.invalid_share_indices)
+            .field("corrupted_shard_indices", &self.corrupted_shard_indices)
+            .field("missing_shard_indices", &self.missing_shard_indices)
             .finish()
     }
 }
@@ -127,9 +140,10 @@ struct SelectedLifecycleBundle {
     bundle: CanonicalLifecycleBundle,
 }
 
-struct ValidShard<'a> {
-    shard: &'a Qvqcont7Shard,
-    chunk_fragments: Vec<Vec<u8>>,
+struct ValidatedQencHeader {
+    metadata: QencMetadata,
+    geometry: AuthenticatedGeometry,
+    header: Vec<u8>,
 }
 
 struct Reconstruction {
@@ -141,6 +155,10 @@ struct Reconstruction {
     recovered_qenc_hash: String,
     recovered_priv_hash: String,
     rejected_shard_indices: Vec<u16>,
+    invalid_share_indices: Vec<u16>,
+    corrupted_shard_indices: Vec<u16>,
+    missing_shard_indices: Vec<u16>,
+    private_key_hash_matches_metadata: bool,
     qkey_ok: bool,
     warnings: Vec<String>,
 }
@@ -158,8 +176,6 @@ pub fn restore_qvqcont7_from_shards(
 
     let candidates = collect_candidate_cohorts(shards)?;
     let (candidate, selected_bundle) = resolve_successor_archive_context(&candidates, options)?;
-    let mut reconstruction = reconstruct_lifecycle_cohort_material(candidate)?;
-    let mut reconstruction_priv_key = Zeroizing::new(std::mem::take(&mut reconstruction.priv_key));
     let authenticity = evaluate_successor_authenticity(
         &selected_bundle.bundle,
         &selected_bundle.bytes,
@@ -172,9 +188,29 @@ pub fn restore_qvqcont7_from_shards(
             authenticity.policy.reason.clone(),
         ));
     }
+    let mut reconstruction = reconstruct_lifecycle_cohort_material(candidate)?;
+    let mut reconstruction_priv_key = Zeroizing::new(std::mem::take(&mut reconstruction.priv_key));
 
     let mut warnings = reconstruction.warnings;
     warnings.extend(authenticity.warnings.iter().cloned());
+
+    let known_same_state_cohort_ids = candidates
+        .iter()
+        .filter(|other| {
+            other.archive_id == candidate.archive_id && other.state_id == candidate.state_id
+        })
+        .map(|other| other.cohort_id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let same_state_fork_detected = known_same_state_cohort_ids.len() > 1;
+    if same_state_fork_detected {
+        warnings.push(format!(
+            "Multiple cohorts were supplied for the selected archive-state ({}); cohort {} was explicitly selected.",
+            known_same_state_cohort_ids.join(", "),
+            candidate.cohort_id
+        ));
+    }
 
     let embedded_lifecycle_bundle_digests_used =
         collect_embedded_lifecycle_bundle_digest_hexes(&candidate.shards);
@@ -199,6 +235,10 @@ pub fn restore_qvqcont7_from_shards(
         recovered_qenc_hash: reconstruction.recovered_qenc_hash,
         recovered_priv_hash: reconstruction.recovered_priv_hash,
         rejected_shard_indices: reconstruction.rejected_shard_indices,
+        invalid_share_indices: reconstruction.invalid_share_indices,
+        corrupted_shard_indices: reconstruction.corrupted_shard_indices,
+        missing_shard_indices: reconstruction.missing_shard_indices,
+        private_key_hash_matches_metadata: reconstruction.private_key_hash_matches_metadata,
         qenc_ok: true,
         qkey_ok: reconstruction.qkey_ok,
         archive_state_bytes: candidate.archive_state_bytes.to_vec(),
@@ -209,6 +249,8 @@ pub fn restore_qvqcont7_from_shards(
         lifecycle_bundle_digest_hex: selected_bundle.digest_hex,
         authenticity,
         warnings,
+        known_same_state_cohort_ids,
+        same_state_fork_detected,
         embedded_lifecycle_bundle_digests_used,
         mixed_lifecycle_bundle_variants_within_selected_cohort,
     })
@@ -304,25 +346,42 @@ fn resolve_successor_archive_context<'a>(
     options: &RestoreQvqcont7Options,
 ) -> Result<(&'a CandidateCohort<'a>, SelectedLifecycleBundle)> {
     let selection = &options.selection;
+    let selected_archive_id = normalize_selection_hex(
+        selection.selected_archive_id.as_deref(),
+        64,
+        "selected archiveId",
+    )?;
+    let selected_state_id = normalize_selection_hex(
+        selection.selected_state_id.as_deref(),
+        128,
+        "selected stateId",
+    )?;
+    let selected_cohort_id = normalize_selection_hex(
+        selection.selected_cohort_id.as_deref(),
+        64,
+        "selected cohortId",
+    )?;
+    let selected_bundle_digest = normalize_selection_hex(
+        selection.selected_lifecycle_bundle_digest_hex.as_deref(),
+        128,
+        "selected lifecycle bundle digest",
+    )?;
     let mut filtered = candidates
         .iter()
         .filter(|candidate| {
-            selection
-                .selected_archive_id
+            selected_archive_id
                 .as_ref()
                 .map(|value| value == &candidate.archive_id)
                 .unwrap_or(true)
         })
         .filter(|candidate| {
-            selection
-                .selected_state_id
+            selected_state_id
                 .as_ref()
                 .map(|value| value == &candidate.state_id)
                 .unwrap_or(true)
         })
         .filter(|candidate| {
-            selection
-                .selected_cohort_id
+            selected_cohort_id
                 .as_ref()
                 .map(|value| value == &candidate.cohort_id)
                 .unwrap_or(true)
@@ -358,6 +417,15 @@ fn resolve_successor_archive_context<'a>(
             ));
         }
         let digest_hex = sha3_512_hex(bundle_bytes);
+        if selected_bundle_digest
+            .as_deref()
+            .is_some_and(|selected| selected != digest_hex)
+        {
+            return Err(coded(
+                QvCode::InvalidSelection,
+                "Provided lifecycle-bundle bytes do not match the selected lifecycle bundle digest",
+            ));
+        }
         return Ok((
             filtered[0],
             SelectedLifecycleBundle {
@@ -375,7 +443,7 @@ fn resolve_successor_archive_context<'a>(
         ));
     }
     if filtered.len() > 1 {
-        if selection.selected_cohort_id.is_none() {
+        if selected_cohort_id.is_none() {
             let same_state = filtered
                 .iter()
                 .map(|candidate| (&candidate.archive_id, &candidate.state_id))
@@ -398,7 +466,7 @@ fn resolve_successor_archive_context<'a>(
     }
 
     let candidate = filtered[0];
-    let digest = if let Some(selected_digest) = &selection.selected_lifecycle_bundle_digest_hex {
+    let digest = if let Some(selected_digest) = &selected_bundle_digest {
         if !candidate.lifecycle_bundles.contains_key(selected_digest) {
             return Err(coded(
                 QvCode::InvalidSelection,
@@ -441,16 +509,35 @@ fn resolve_successor_archive_context<'a>(
     ))
 }
 
+fn normalize_selection_hex(
+    value: Option<&str>,
+    expected_len: usize,
+    field: &str,
+) -> Result<Option<String>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let normalized = value.trim().to_ascii_lowercase();
+    if normalized.len() != expected_len || !normalized.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(coded(
+            QvCode::InvalidSelection,
+            format!("Invalid {field}: expected {expected_len} hexadecimal characters"),
+        ));
+    }
+    Ok(Some(normalized))
+}
+
 fn reconstruct_lifecycle_cohort_material<'a>(
     candidate: &'a CandidateCohort<'a>,
 ) -> Result<Reconstruction> {
-    let base = *candidate.shards.first().ok_or_else(|| {
+    let artifact_base = *candidate.shards.first().ok_or_else(|| {
         coded(
             QvCode::NotEnoughShards,
             "Selected cohort contains no shards",
         )
     })?;
-    let cohort_value = &base.cohort_binding.cohort_binding.value;
+    let cohort_value = &artifact_base.cohort_binding.cohort_binding.value;
     let sharding = object_field(cohort_value, "sharding", "cohortBinding.sharding")?;
     let shamir = object_field(sharding, "shamir", "cohortBinding.sharding.shamir")?;
     let rs = object_field(
@@ -458,20 +545,30 @@ fn reconstruct_lifecycle_cohort_material<'a>(
         "reedSolomon",
         "cohortBinding.sharding.reedSolomon",
     )?;
-    let n = integer_field(rs, "n", "cohortBinding.sharding.reedSolomon.n")? as usize;
-    let k = integer_field(rs, "k", "cohortBinding.sharding.reedSolomon.k")? as usize;
-    let m = integer_field(rs, "parity", "cohortBinding.sharding.reedSolomon.parity")? as usize;
-    let t = integer_field(
+    let codec_id = string_field(rs, "codecId", "cohortBinding.sharding.reedSolomon.codecId")?;
+    let n = checked_usize_field(rs, "n", "cohortBinding.sharding.reedSolomon.n")?;
+    let k = checked_usize_field(rs, "k", "cohortBinding.sharding.reedSolomon.k")?;
+    let m = checked_usize_field(rs, "parity", "cohortBinding.sharding.reedSolomon.parity")?;
+    let t = checked_usize_field(
         shamir,
         "threshold",
         "cohortBinding.sharding.shamir.threshold",
-    )? as usize;
-    let share_count = integer_field(
+    )?;
+    let share_count = checked_usize_field(
         shamir,
         "shareCount",
         "cohortBinding.sharding.shamir.shareCount",
-    )? as usize;
-    if n != share_count || m != n.saturating_sub(k) || !m.is_multiple_of(2) || t != k + (m / 2) {
+    )?;
+    if codec_id != REED_SOLOMON_CODEC_ID
+        || n > RS_MAX_CODEWORD
+        || k < 2
+        || n <= k
+        || n != share_count
+        || m != n.saturating_sub(k)
+        || !m.is_multiple_of(2)
+        || t != k + (m / 2)
+        || t > n
+    {
         return Err(coded(
             QvCode::InvalidFormat,
             "Invalid lifecycle cohort sharding tuple",
@@ -484,35 +581,63 @@ fn reconstruct_lifecycle_cohort_material<'a>(
         ));
     }
     let allowed_failures = m / 2;
-    let qenc_meta = parse_qenc_metadata_bytes(&base.qenc_meta_bytes)?;
-    validate_qenc_metadata_against_archive_state(
-        &qenc_meta,
-        &base.archive_state.archive_state.value,
-    )?;
+    let archive_state = &artifact_base.archive_state.archive_state.value;
+    let archive_qenc = object_field(archive_state, "qenc", "archiveState.qenc")?;
+    let expected_container_id =
+        string_field(archive_qenc, "containerId", "archiveState.qenc.containerId")?;
+    let expected_qenc_hash = string_field(archive_qenc, "qencHash", "archiveState.qenc.qencHash")?;
 
-    let chunk_count =
-        integer_field(&base.meta_json, "chunkCount", "shard.metadata.chunkCount")? as usize;
-    let chunk_size =
-        integer_field(&base.meta_json, "chunkSize", "shard.metadata.chunkSize")? as u64;
-    let payload_length = integer_field(
-        &base.meta_json,
-        "payloadLength",
-        "shard.metadata.payloadLength",
-    )? as u64;
-    let ciphertext_length = integer_field(
-        &base.meta_json,
-        "ciphertextLength",
-        "shard.metadata.ciphertextLength",
-    )? as usize;
-    let rs_encode_base = integer_field(
-        &base.meta_json,
-        "rsEncodeBase",
-        "shard.metadata.rsEncodeBase",
-    )
-    .unwrap_or(RS_MAX_CODEWORD as u64) as usize;
-    if rs_encode_base == 0 {
-        return Err(coded(QvCode::InvalidFormat, "Invalid rsEncodeBase"));
+    // The QCONT header is outside the shard-body commitment. Select only a
+    // copied QENC header whose exact bytes satisfy the committed containerId,
+    // then derive allocation geometry from its validated QENC metadata.
+    let mut first_header_error = None;
+    let mut header_source = None;
+    let mut warnings = Vec::new();
+    for shard in &candidate.shards {
+        match validate_committed_qenc_header(shard, archive_state, &expected_container_id) {
+            Ok(validated) => {
+                if header_source.is_none() {
+                    header_source = Some((*shard, validated));
+                }
+            }
+            Err(error) => {
+                if first_header_error.is_none() {
+                    first_header_error = Some(error.to_string());
+                }
+                warnings.push(format!(
+                    "Shard {} carries QENC header fields that do not match the committed archive-state containerId; those header fields were ignored.",
+                    shard.shard_index
+                ));
+            }
+        }
     }
+    let (base, validated_header) = header_source.ok_or_else(|| {
+        coded(
+            QvCode::InvalidFormat,
+            format!(
+                "No shard carries a supported QENC header matching archive-state containerId{}",
+                first_header_error
+                    .as_deref()
+                    .map(|message| format!(": {message}"))
+                    .unwrap_or_default()
+            ),
+        )
+    })?;
+    let qenc_meta = validated_header.metadata;
+    let geometry = validated_header.geometry;
+    let chunk_count = usize::try_from(geometry.chunk_count).map_err(|_| {
+        coded(
+            QvCode::InvalidFormat,
+            "QENC chunkCount exceeds platform limits",
+        )
+    })?;
+    let ciphertext_length = usize::try_from(geometry.ciphertext_length).map_err(|_| {
+        coded(
+            QvCode::InvalidFormat,
+            "QENC ciphertext length exceeds platform limits",
+        )
+    })?;
+    let rs_encode_base = RS_MAX_CODEWORD;
 
     let expected_share_commitments = string_array_field(
         cohort_value,
@@ -531,10 +656,11 @@ fn reconstruct_lifecycle_cohort_material<'a>(
         ));
     }
 
-    let mut valid_by_index = Vec::<Option<ValidShard<'a>>>::with_capacity(n);
-    valid_by_index.resize_with(n, || None);
+    let mut valid_share_by_index = vec![None; n];
+    let mut valid_fragments_by_index = (0..n).map(|_| None).collect::<Vec<_>>();
     let mut seen_indices = HashSet::new();
-    let mut rejected = Vec::<u16>::new();
+    let mut invalid_share_indices = Vec::<u16>::new();
+    let mut corrupted_shard_indices = Vec::<u16>::new();
 
     for shard in &candidate.shards {
         if usize::from(shard.shard_index) >= n || !seen_indices.insert(shard.shard_index) {
@@ -543,38 +669,57 @@ fn reconstruct_lifecycle_cohort_material<'a>(
                 "Duplicate or out-of-range shard index",
             ));
         }
-        match validate_shard_against_base(
-            candidate,
-            base,
-            shard,
-            &expected_share_commitments,
-            &expected_body_hashes,
-            chunk_count,
-        ) {
-            Ok(chunk_fragments) => {
-                valid_by_index[usize::from(shard.shard_index)] = Some(ValidShard {
-                    shard,
-                    chunk_fragments,
-                });
-            }
-            Err(_) => rejected.push(shard.shard_index),
+        let index = usize::from(shard.shard_index);
+        if redundant_shard_metadata_mismatches(shard, n, k, m, t, &geometry, &expected_container_id)
+        {
+            warnings.push(format!(
+                "Shard {} has inconsistent unauthenticated redundant metadata; committed archive-state/QENC geometry was used instead.",
+                shard.shard_index
+            ));
+        }
+
+        if expected_share_commitments[index] == sha3_512_hex(&shard.share) {
+            valid_share_by_index[index] = Some(*shard);
+        } else {
+            invalid_share_indices.push(shard.shard_index);
+        }
+
+        if expected_body_hashes[index] != sha3_512_hex(&shard.fragments) {
+            corrupted_shard_indices.push(shard.shard_index);
+            continue;
+        }
+        match parse_fragment_stream(&shard.fragments, chunk_count) {
+            Ok(fragments) => valid_fragments_by_index[index] = Some(fragments),
+            Err(_) => corrupted_shard_indices.push(shard.shard_index),
         }
     }
-    rejected.sort_unstable();
+    invalid_share_indices.sort_unstable();
+    corrupted_shard_indices.sort_unstable();
+    let missing_shard_indices = (0..n)
+        .filter(|index| {
+            let index = *index as u16;
+            !seen_indices.contains(&index)
+        })
+        .map(|index| index as u16)
+        .collect::<Vec<_>>();
 
-    let valid_count = valid_by_index
+    let valid_share_count = valid_share_by_index
         .iter()
         .filter(|entry| entry.is_some())
         .count();
-    if valid_count < t {
+    if valid_share_count < t {
         return Err(coded(
             QvCode::NotEnoughShards,
             format!(
-                "Not enough valid shards for threshold reconstruction: need {t}, got {valid_count}"
+                "Not enough valid shares for Shamir reconstruction: need {t}, got {valid_share_count}"
             ),
         ));
     }
-    let total_bad = n.saturating_sub(valid_count);
+    let valid_fragment_count = valid_fragments_by_index
+        .iter()
+        .filter(|entry| entry.is_some())
+        .count();
+    let total_bad = n.saturating_sub(valid_fragment_count);
     if total_bad > allowed_failures {
         return Err(coded(
             QvCode::NotEnoughShards,
@@ -585,11 +730,11 @@ fn reconstruct_lifecycle_cohort_material<'a>(
     }
 
     let shares = Zeroizing::new(
-        valid_by_index
+        valid_share_by_index
             .iter()
             .flatten()
             .take(t)
-            .map(|entry| entry.shard.share.clone())
+            .map(|shard| shard.share.clone())
             .collect::<Vec<_>>(),
     );
     let priv_key = combine_shares(shares.as_slice()).map_err(|error| {
@@ -602,30 +747,45 @@ fn reconstruct_lifecycle_cohort_material<'a>(
     drop(shares);
 
     let is_per_chunk = qenc_meta.aead_mode == "per-chunk-aead";
-    let mut cipher_chunks = Vec::new();
+    let mut ciphertext = Vec::new();
+    ciphertext
+        .try_reserve_exact(ciphertext_length)
+        .map_err(|_| {
+            coded(
+                QvCode::InvalidFormat,
+                "Unable to allocate QENC ciphertext geometry",
+            )
+        })?;
     for chunk_index in 0..chunk_count {
         let this_len = encrypted_chunk_len(
             is_per_chunk,
             chunk_index,
-            chunk_size,
-            payload_length,
+            geometry.chunk_size,
+            geometry.payload_length,
             ciphertext_length,
         )?;
         let expected_frag_len = expected_fragment_len(this_len, n, k, rs_encode_base)?;
-        let mut encoded = Vec::with_capacity(n);
-        for entry in &valid_by_index {
-            let fragment = entry
-                .as_ref()
-                .and_then(|entry| entry.chunk_fragments.get(chunk_index))
-                .cloned()
-                .unwrap_or_else(|| vec![0u8; expected_frag_len]);
+        for fragments in valid_fragments_by_index.iter().flatten() {
+            let fragment = fragments.get(chunk_index).ok_or_else(|| {
+                coded(
+                    QvCode::IntegrityMismatch,
+                    "Shard fragment stream has an invalid chunk count",
+                )
+            })?;
             if fragment.len() != expected_frag_len {
                 return Err(coded(
                     QvCode::IntegrityMismatch,
                     "Shard fragment length does not match RS layout",
                 ));
             }
-            encoded.push(fragment);
+        }
+        let mut encoded = Vec::with_capacity(n);
+        for fragments in &valid_fragments_by_index {
+            if let Some(fragments) = fragments {
+                encoded.push(fragments[chunk_index].clone());
+            } else {
+                encoded.push(try_zeroed_vec(expected_frag_len)?);
+            }
         }
         let recombined =
             erasure::recombine(&encoded, this_len, k, allowed_failures, rs_encode_base).map_err(
@@ -636,16 +796,12 @@ fn reconstruct_lifecycle_cohort_material<'a>(
                     )
                 },
             )?;
-        cipher_chunks.push(recombined);
+        ciphertext.extend_from_slice(&recombined);
         if !is_per_chunk {
             break;
         }
     }
 
-    let mut ciphertext = Vec::with_capacity(ciphertext_length);
-    for chunk in cipher_chunks {
-        ciphertext.extend_from_slice(&chunk);
-    }
     if ciphertext.len() != ciphertext_length {
         return Err(coded(
             QvCode::RestoredIntegrityFailed,
@@ -681,26 +837,35 @@ fn reconstruct_lifecycle_cohort_material<'a>(
         &base.qenc_meta_bytes,
         &base.key_commitment,
     )?;
-    let mut qenc_bytes = Vec::with_capacity(header.len() + ciphertext.len());
+    if header != validated_header.header {
+        return Err(coded(
+            QvCode::RestoredIntegrityFailed,
+            "Rebuilt QENC header changed after committed-header validation",
+        ));
+    }
+    let qenc_capacity = header
+        .len()
+        .checked_add(ciphertext.len())
+        .ok_or_else(|| coded(QvCode::InvalidFormat, "QENC output length overflow"))?;
+    let mut qenc_bytes = Vec::new();
+    qenc_bytes.try_reserve_exact(qenc_capacity).map_err(|_| {
+        coded(
+            QvCode::InvalidFormat,
+            "Unable to allocate reconstructed QENC",
+        )
+    })?;
     qenc_bytes.extend_from_slice(&header);
     qenc_bytes.extend_from_slice(&ciphertext);
     let parsed_recovered = parse_qenc_header(&qenc_bytes)?;
 
     let recovered_qenc_hash = sha3_512_hex(&qenc_bytes);
-    let archive_qenc = object_field(
-        &base.archive_state.archive_state.value,
-        "qenc",
-        "archiveState.qenc",
-    )?;
-    let expected_qenc_hash = string_field(archive_qenc, "qencHash", "archiveState.qenc.qencHash")?;
     if recovered_qenc_hash != expected_qenc_hash {
         return Err(coded(
             QvCode::RestoredIntegrityFailed,
             "Reconstructed .qenc hash does not match archive-state descriptor",
         ));
     }
-    let container_id = string_field(archive_qenc, "containerId", "archiveState.qenc.containerId")?;
-    if sha3_512_hex(&parsed_recovered.header) != container_id {
+    if sha3_512_hex(&parsed_recovered.header) != expected_container_id {
         return Err(coded(
             QvCode::RestoredIntegrityFailed,
             "Reconstructed .qenc header hash does not match archive-state containerId",
@@ -708,73 +873,124 @@ fn reconstruct_lifecycle_cohort_material<'a>(
     }
 
     let recovered_priv_hash = sha3_512_hex(priv_key.as_slice());
-    let private_key_hash = base
+    let private_key_hash = artifact_base
         .meta_json
         .get("privateKeyHash")
         .and_then(Value::as_str)
         .map(str::to_string);
-    let qkey_ok = private_key_hash
-        .as_deref()
-        .map(|expected| expected == recovered_priv_hash)
-        .unwrap_or(true);
-    if !qkey_ok {
-        return Err(coded(
-            QvCode::RestoredIntegrityFailed,
-            "Recovered secret key hash does not match shard metadata",
-        ));
+    let private_key_hash_matches_metadata = candidate.shards.iter().all(|shard| {
+        shard
+            .meta_json
+            .get("privateKeyHash")
+            .and_then(Value::as_str)
+            .map(|expected| expected == recovered_priv_hash)
+            .unwrap_or(true)
+    });
+    if !private_key_hash_matches_metadata {
+        warnings.push(
+            "Recovered private key hash does not match unauthenticated shard metadata; the cryptographic QENC key commitment was valid.".to_string(),
+        );
     }
+
+    let mut rejected_shard_indices = invalid_share_indices.clone();
+    rejected_shard_indices.extend(corrupted_shard_indices.iter().copied());
+    rejected_shard_indices.sort_unstable();
+    rejected_shard_indices.dedup();
 
     Ok(Reconstruction {
         qenc_bytes,
         priv_key: std::mem::take(&mut *priv_key),
-        container_id,
+        container_id: expected_container_id,
         container_hash: expected_qenc_hash,
         private_key_hash,
         recovered_qenc_hash,
         recovered_priv_hash,
-        rejected_shard_indices: rejected,
-        qkey_ok,
-        warnings: Vec::new(),
+        rejected_shard_indices,
+        invalid_share_indices,
+        corrupted_shard_indices,
+        missing_shard_indices,
+        private_key_hash_matches_metadata,
+        qkey_ok: true,
+        warnings,
     })
 }
 
-fn validate_shard_against_base<'a>(
-    candidate: &CandidateCohort<'a>,
-    base: &Qvqcont7Shard,
-    shard: &'a Qvqcont7Shard,
-    expected_share_commitments: &[String],
-    expected_body_hashes: &[String],
-    chunk_count: usize,
-) -> Result<Vec<Vec<u8>>> {
-    if shard.archive_state_bytes != candidate.archive_state_bytes
-        || shard.cohort_binding_bytes != candidate.cohort_binding_bytes
-        || shard.archive_state_digest_hex != candidate.archive_state_digest_hex
-        || shard.cohort_binding_digest_hex != candidate.cohort_binding_digest_hex
-        || shard.state_id != candidate.state_id
-        || shard.cohort_id != candidate.cohort_id
-        || shard.encapsulated_key != base.encapsulated_key
-        || shard.container_nonce != base.container_nonce
-        || shard.kdf_salt != base.kdf_salt
-        || shard.qenc_meta_bytes != base.qenc_meta_bytes
-        || shard.key_commitment != base.key_commitment
-    {
-        return Err(err("Shard header fields do not match selected cohort"));
+fn validate_committed_qenc_header(
+    shard: &Qvqcont7Shard,
+    archive_state: &Value,
+    expected_container_id: &str,
+) -> Result<ValidatedQencHeader> {
+    let metadata = parse_qenc_metadata_bytes(&shard.qenc_meta_bytes)?;
+    validate_container_policy_metadata(&metadata, false)?;
+    validate_qenc_metadata_against_archive_state(&metadata, archive_state)?;
+    let geometry = authenticated_geometry(&metadata)?;
+    let header = build_qenc_header(
+        &shard.encapsulated_key,
+        &shard.container_nonce,
+        &shard.kdf_salt,
+        &shard.qenc_meta_bytes,
+        &shard.key_commitment,
+    )?;
+    if sha3_512_hex(&header) != expected_container_id {
+        return Err(coded(
+            QvCode::IntegrityMismatch,
+            "QENC header does not match archive-state containerId",
+        ));
     }
-    let index = usize::from(shard.shard_index);
-    if expected_share_commitments[index] != sha3_512_hex(&shard.share) {
-        return Err(err("Shard share commitment mismatch"));
-    }
-    if expected_body_hashes[index] != sha3_512_hex(&shard.fragments) {
-        return Err(err("Shard body hash mismatch"));
-    }
-    parse_fragment_stream(&shard.fragments, chunk_count)
+    Ok(ValidatedQencHeader {
+        metadata,
+        geometry,
+        header,
+    })
+}
+
+fn redundant_shard_metadata_mismatches(
+    shard: &Qvqcont7Shard,
+    n: usize,
+    k: usize,
+    m: usize,
+    t: usize,
+    geometry: &AuthenticatedGeometry,
+    container_id: &str,
+) -> bool {
+    let expected_numbers = [
+        ("n", n as u64),
+        ("k", k as u64),
+        ("m", m as u64),
+        ("t", t as u64),
+        ("chunkCount", geometry.chunk_count),
+        ("chunkSize", geometry.chunk_size),
+        ("payloadLength", geometry.payload_length),
+        ("ciphertextLength", geometry.ciphertext_length),
+        ("rsEncodeBase", RS_MAX_CODEWORD as u64),
+    ];
+    expected_numbers.iter().any(|(field, expected)| {
+        shard.meta_json.get(*field).and_then(Value::as_u64) != Some(*expected)
+    }) || shard.meta_json.get("containerId").and_then(Value::as_str) != Some(container_id)
+}
+
+fn try_zeroed_vec(len: usize) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(len).map_err(|_| {
+        coded(
+            QvCode::InvalidFormat,
+            "Unable to allocate RS erasure fragment",
+        )
+    })?;
+    bytes.resize(len, 0);
+    Ok(bytes)
 }
 
 fn parse_fragment_stream(bytes: &[u8], chunk_count: usize) -> Result<Vec<Vec<u8>>> {
     let mut offset = 0usize;
-    let mut out = Vec::with_capacity(chunk_count);
+    // Do not reserve from authenticated-but-unbounded chunkCount before the
+    // supplied fragment stream proves that many records actually exist.
+    let mut out = Vec::new();
     for _ in 0..chunk_count {
-        if offset + 4 > bytes.len() {
+        let length_end = offset
+            .checked_add(4)
+            .ok_or_else(|| err("Fragment stream offset overflow"))?;
+        if length_end > bytes.len() {
             return Err(err("Fragment stream underflow"));
         }
         let len = u32::from_be_bytes([
@@ -783,7 +999,7 @@ fn parse_fragment_stream(bytes: &[u8], chunk_count: usize) -> Result<Vec<Vec<u8>
             bytes[offset + 2],
             bytes[offset + 3],
         ]) as usize;
-        offset += 4;
+        offset = length_end;
         let end = offset
             .checked_add(len)
             .ok_or_else(|| err("Fragment length overflow"))?;
@@ -809,7 +1025,9 @@ fn encrypted_chunk_len(
     if !is_per_chunk {
         return Ok(ciphertext_length);
     }
-    let chunk_start = (chunk_index as u64)
+    let chunk_index = u64::try_from(chunk_index)
+        .map_err(|_| coded(QvCode::InvalidFormat, "QENC chunk index exceeds uint64"))?;
+    let chunk_start = chunk_index
         .checked_mul(chunk_size)
         .ok_or_else(|| coded(QvCode::InvalidFormat, "QENC per-chunk framing overflow"))?;
     let remaining = payload_length.checked_sub(chunk_start).ok_or_else(|| {
@@ -838,13 +1056,24 @@ fn expected_fragment_len(
     k: usize,
     max_codeword: usize,
 ) -> Result<usize> {
-    let encode_size = (max_codeword / n) * n;
-    if encode_size == 0 {
+    if n == 0 || k == 0 || n > max_codeword {
         return Err(coded(QvCode::InvalidFormat, "RS parameters too large"));
     }
-    let input_size = (encode_size * k) / n;
+    let encode_size = (max_codeword / n)
+        .checked_mul(n)
+        .ok_or_else(|| coded(QvCode::InvalidFormat, "RS layout overflow"))?;
+    let input_size = encode_size
+        .checked_mul(k)
+        .ok_or_else(|| coded(QvCode::InvalidFormat, "RS layout overflow"))?
+        / n;
+    if input_size == 0 {
+        return Err(coded(QvCode::InvalidFormat, "RS input layout is empty"));
+    }
     let symbol_size = input_size / k;
-    Ok(cipher_len.div_ceil(input_size) * symbol_size)
+    cipher_len
+        .div_ceil(input_size)
+        .checked_mul(symbol_size)
+        .ok_or_else(|| coded(QvCode::InvalidFormat, "RS fragment length overflow"))
 }
 
 fn validate_qenc_metadata_against_archive_state(
@@ -1071,6 +1300,108 @@ struct LifecycleSignatureTargets {
     source_evidence: HashMap<String, LifecycleSignatureTarget>,
 }
 
+fn verify_successor_qsig_with_pins(
+    message_bytes: &[u8],
+    qsig_bytes: &[u8],
+    bundled_pqpk: Option<&[u8]>,
+    verification_inputs: &VerificationInputs,
+) -> Result<SignatureCheckResult> {
+    let mut pins = Vec::<&[u8]>::new();
+    let mut normalization_warnings = Vec::new();
+    let supplied = verification_inputs
+        .pinned_pq_public_key_file_bytes
+        .iter()
+        .map(Vec::as_slice)
+        .chain(
+            verification_inputs
+                .pinned_pq_public_key_file_bytes_list
+                .iter()
+                .map(Vec::as_slice),
+        );
+    for (index, pin) in supplied.enumerate() {
+        if pins.contains(&pin) {
+            continue;
+        }
+        if let Err(error) = unpack_pqpk(pin) {
+            normalization_warnings.push(format!(
+                "Pinned PQ signer key {} could not be parsed as .pqpk and was ignored: {error}",
+                index + 1
+            ));
+            continue;
+        }
+        pins.push(pin);
+    }
+
+    if pins.is_empty() {
+        let mut result = verify_qsig_against_bytes(message_bytes, qsig_bytes, bundled_pqpk, None)?;
+        extend_unique_warnings(&mut result.warnings, normalization_warnings);
+        return Ok(result);
+    }
+
+    let mut baseline = None;
+    let mut matches = Vec::new();
+    let mut retained_warnings = normalization_warnings;
+    for pin in pins {
+        let result = verify_qsig_against_bytes(message_bytes, qsig_bytes, bundled_pqpk, Some(pin))?;
+        if baseline.is_none() {
+            baseline = Some(result.clone());
+        }
+        extend_unique_warnings(
+            &mut retained_warnings,
+            result
+                .warnings
+                .iter()
+                .filter(|warning| !is_candidate_pin_mismatch_warning(warning))
+                .cloned(),
+        );
+        if result.ok && result.user_pinned {
+            matches.push(result);
+        }
+    }
+
+    if matches.len() == 1 {
+        let mut result = matches
+            .pop()
+            .ok_or_else(|| err("Pinned PQ signer match disappeared unexpectedly"))?;
+        extend_unique_warnings(&mut result.warnings, retained_warnings);
+        return Ok(result);
+    }
+
+    let mut result = baseline.ok_or_else(|| err("No normalized PQ signer pin was evaluated"))?;
+    result.ok = false;
+    result.self_signed = false;
+    result.bundle_pinned = false;
+    result.user_pinned = false;
+    result.signer_pinned = false;
+    result.counted_for_policy = false;
+    result.error = Some(if matches.len() > 1 {
+        "Multiple provided .pqpk files match this detached PQ signature; keep only one exact PQ pin per signer"
+            .to_string()
+    } else if bundled_pqpk.is_some() {
+        "Provided PQ signer keys did not match the bundled signer key".to_string()
+    } else {
+        "Provided PQ signer keys did not match this verified signature".to_string()
+    });
+    result
+        .warnings
+        .retain(|warning| !is_candidate_pin_mismatch_warning(warning));
+    extend_unique_warnings(&mut result.warnings, retained_warnings);
+    Ok(result)
+}
+
+fn is_candidate_pin_mismatch_warning(warning: &str) -> bool {
+    warning.starts_with("Pinned PQ signer key did not match")
+        || warning.starts_with("Pinned PQ signer key suite does not match")
+}
+
+fn extend_unique_warnings(target: &mut Vec<String>, warnings: impl IntoIterator<Item = String>) {
+    for warning in warnings {
+        if !target.contains(&warning) {
+            target.push(warning);
+        }
+    }
+}
+
 fn verify_bundle_lifecycle_signature(
     signature: &Value,
     index: usize,
@@ -1106,13 +1437,11 @@ fn verify_bundle_lifecycle_signature(
                 })?)
             })
             .transpose()?;
-        verify_qsig_against_bytes(
+        verify_successor_qsig_with_pins(
             &target.bytes,
             &sig_bytes,
             bundled_pqpk.as_deref(),
-            verification_inputs
-                .pinned_pq_public_key_file_bytes
-                .as_deref(),
+            verification_inputs,
         )?
     } else if format == "stellar-sig" {
         let bundled_signer = public_key_ref
@@ -1715,13 +2044,11 @@ fn verify_external_archive_approval_signature(
             );
             return Ok(unsupported);
         }
-        Ok(DetachedArchiveApprovalKind::Qsig) => verify_qsig_against_bytes(
+        Ok(DetachedArchiveApprovalKind::Qsig) => verify_successor_qsig_with_pins(
             archive_state_bytes,
             &artifact.bytes,
             None,
-            verification_inputs
-                .pinned_pq_public_key_file_bytes
-                .as_deref(),
+            verification_inputs,
         )?,
         Ok(DetachedArchiveApprovalKind::StellarJson) => verify_stellar_sig_against_bytes(
             archive_state_bytes,
@@ -1933,6 +2260,7 @@ fn signature_status(
         bundle_pinned: counts.archive_approval_bundle_pinned_valid_total > 0,
         user_pinned: counts.archive_approval_user_pinned_valid_total > 0,
         user_pin_provided: inputs.pinned_pq_public_key_file_bytes.is_some()
+            || !inputs.pinned_pq_public_key_file_bytes_list.is_empty()
             || inputs.expected_ed25519_signer.is_some(),
         transition_record_present: transition_report.present,
         transition_chain_valid: transition_report.chain_valid,
@@ -2037,6 +2365,15 @@ fn integer_field(value: &Value, key: &str, field: &str) -> Result<u64> {
         .ok_or_else(|| err(format!("Invalid {field}")))
 }
 
+fn checked_usize_field(value: &Value, key: &str, field: &str) -> Result<usize> {
+    usize::try_from(integer_field(value, key, field)?).map_err(|_| {
+        coded(
+            QvCode::InvalidFormat,
+            format!("Invalid {field}: exceeds platform limits"),
+        )
+    })
+}
+
 fn string_array_field(value: &Value, key: &str, field: &str) -> Result<Vec<String>> {
     array_field(value, key, field)?
         .iter()
@@ -2051,6 +2388,10 @@ fn string_array_field(value: &Value, key: &str, field: &str) -> Result<Vec<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::{
+        create_detached_qsig, generate_signing_keypair, pack_public_key_file, DetachedSignOptions,
+        PqSignatureSuite,
+    };
 
     #[test]
     fn ots_completion_label_marks_complete_proofs_as_heuristic() {
@@ -2075,5 +2416,60 @@ mod tests {
             evidence.link_label,
             "OTS evidence linked to detached signature bytes"
         );
+    }
+
+    #[test]
+    fn successor_qsig_verification_selects_one_matching_pin_from_many() {
+        let message = b"multiple authoritative signer pins";
+        let unrelated = generate_signing_keypair(PqSignatureSuite::MlDsa44).unwrap();
+        let signer = generate_signing_keypair(PqSignatureSuite::MlDsa44).unwrap();
+        let artifact = create_detached_qsig(DetachedSignOptions::new(
+            PqSignatureSuite::MlDsa44,
+            signer.secret_key_bytes(),
+            message,
+        ))
+        .unwrap();
+        let unrelated_pin =
+            pack_public_key_file(PqSignatureSuite::MlDsa44, unrelated.public_key_bytes()).unwrap();
+        let signer_pin =
+            pack_public_key_file(PqSignatureSuite::MlDsa44, signer.public_key_bytes()).unwrap();
+
+        let inputs = VerificationInputs {
+            pinned_pq_public_key_file_bytes_list: vec![unrelated_pin.clone(), signer_pin.clone()],
+            ..VerificationInputs::default()
+        };
+        let verified =
+            verify_successor_qsig_with_pins(message, &artifact.qsig_bytes, None, &inputs).unwrap();
+        assert!(verified.ok);
+        assert!(verified.user_pinned);
+
+        let mismatch = verify_successor_qsig_with_pins(
+            message,
+            &artifact.qsig_bytes,
+            None,
+            &VerificationInputs {
+                pinned_pq_public_key_file_bytes_list: vec![unrelated_pin],
+                ..VerificationInputs::default()
+            },
+        )
+        .unwrap();
+        assert!(!mismatch.ok);
+        assert!(mismatch
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("did not match this verified signature")));
+
+        let duplicate = verify_successor_qsig_with_pins(
+            message,
+            &artifact.qsig_bytes,
+            None,
+            &VerificationInputs {
+                pinned_pq_public_key_file_bytes_list: vec![signer_pin.clone(), signer_pin],
+                ..VerificationInputs::default()
+            },
+        )
+        .unwrap();
+        assert!(duplicate.ok);
+        assert!(duplicate.user_pinned);
     }
 }

@@ -1,6 +1,6 @@
 //! Successor lifecycle signature verification counting (oracle: `restore.js` `buildLifecycleVerificationCounts`).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::auth::signature_identity::compute_detached_signature_identity_digest_hex;
 use crate::auth::{SignatureCheckResult, SignatureVerificationCounts};
@@ -23,12 +23,39 @@ fn self_signed_policy_warning(result: &SignatureCheckResult) -> String {
 }
 
 fn attach_proof_identity(result: &mut SignatureCheckResult) {
+    result.proof_identity_digest_alg = None;
+    result.proof_identity_digest_hex = None;
     let Some(bytes) = result.signature_bytes.as_ref() else {
         return;
     };
     if let Some(hex) = compute_detached_signature_identity_digest_hex(&result.format, bytes) {
         result.proof_identity_digest_alg = Some("SHA3-512".to_string());
         result.proof_identity_digest_hex = Some(hex);
+    }
+}
+
+fn verified_signer_identity(result: &SignatureCheckResult) -> Option<String> {
+    match result.format.as_str() {
+        "qsig" => {
+            let fingerprint = result
+                .signer_fingerprint_hex
+                .as_deref()?
+                .trim()
+                .to_ascii_lowercase();
+            if fingerprint.len() != 64 || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit())
+            {
+                return None;
+            }
+            Some(format!("pq-sha3-256:{fingerprint}"))
+        }
+        "stellar-sig" => {
+            let signer = result.signer.as_deref()?.trim().to_ascii_uppercase();
+            if signer.is_empty() {
+                return None;
+            }
+            Some(format!("stellar-ed25519:{signer}"))
+        }
+        _ => None,
     }
 }
 
@@ -57,6 +84,7 @@ pub(crate) fn finalize_successor_lifecycle_verification(
         bundle_pinned: bool,
         user_pinned: bool,
         names: Vec<String>,
+        proof_identities: BTreeSet<String>,
         first_policy_index: usize,
     }
 
@@ -77,7 +105,23 @@ pub(crate) fn finalize_successor_lifecycle_verification(
         } else {
             result.family.as_str()
         };
-        let key = format!("{family}:{}:{}", result.format, digest);
+        let Some(signer_identity) = verified_signer_identity(result) else {
+            let display = if result.name.is_empty() {
+                result.artifact_id.as_str()
+            } else {
+                result.name.as_str()
+            };
+            let display = if display.is_empty() {
+                "unnamed signature"
+            } else {
+                display
+            };
+            warnings.push(format!(
+                "Verified detached {family} signature was not counted because no stable verified signer identity was available: {display}"
+            ));
+            continue;
+        };
+        let key = format!("{family}:{signer_identity}");
         let display = if result.name.is_empty() {
             result.artifact_id.clone()
         } else {
@@ -88,6 +132,7 @@ pub(crate) fn finalize_successor_lifecycle_verification(
             entry.signer_pinned |= result.signer_pinned;
             entry.bundle_pinned |= result.bundle_pinned;
             entry.user_pinned |= result.user_pinned;
+            entry.proof_identities.insert(digest.to_string());
             entry.names.push(if display.is_empty() {
                 key.clone()
             } else {
@@ -104,6 +149,7 @@ pub(crate) fn finalize_successor_lifecycle_verification(
                 bundle_pinned: result.bundle_pinned,
                 user_pinned: result.user_pinned,
                 names: vec![if display.is_empty() { key } else { display }],
+                proof_identities: BTreeSet::from([digest.to_string()]),
                 first_policy_index: index,
             },
         );
@@ -119,8 +165,13 @@ pub(crate) fn finalize_successor_lifecycle_verification(
         if entry.names.len() <= 1 {
             continue;
         }
+        let detail = if entry.proof_identities.len() == 1 {
+            "Duplicate detached signature proof"
+        } else {
+            "Additional detached signature from the same verified signer"
+        };
         warnings.push(format!(
-            "Duplicate detached {} signature ignored for policy/state counting: {}",
+            "{detail} ignored for {} policy/state counting: {}",
             entry.family,
             entry.names.join(", ")
         ));
@@ -194,7 +245,10 @@ pub(crate) fn finalize_successor_lifecycle_verification(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::verify_qsig_against_bytes;
+    use crate::auth::{
+        create_detached_qsig, generate_signing_keypair, pack_public_key_file,
+        verify_qsig_against_bytes, DetachedSignOptions, PqSignatureSuite,
+    };
     use base64::engine::general_purpose::STANDARD as B64;
     use base64::Engine;
     use serde_json::Value;
@@ -292,5 +346,94 @@ mod tests {
                 .any(|warning| warning.starts_with("Duplicate detached")),
             "{warnings:?}"
         );
+    }
+
+    #[test]
+    fn one_signer_with_distinct_signature_proofs_counts_once() {
+        let message = b"same archive state, randomized approvals";
+        let keypair = generate_signing_keypair(PqSignatureSuite::MlDsa44).unwrap();
+        let first_artifact = create_detached_qsig(DetachedSignOptions::new(
+            PqSignatureSuite::MlDsa44,
+            keypair.secret_key_bytes(),
+            message,
+        ))
+        .unwrap();
+        let second_artifact = create_detached_qsig(DetachedSignOptions::new(
+            PqSignatureSuite::MlDsa44,
+            keypair.secret_key_bytes(),
+            message,
+        ))
+        .unwrap();
+        let pqpk =
+            pack_public_key_file(PqSignatureSuite::MlDsa44, keypair.public_key_bytes()).unwrap();
+
+        let mut first =
+            verify_qsig_against_bytes(message, &first_artifact.qsig_bytes, None, Some(&pqpk))
+                .unwrap();
+        first.name = "first.qsig".to_string();
+        let mut second =
+            verify_qsig_against_bytes(message, &second_artifact.qsig_bytes, None, Some(&pqpk))
+                .unwrap();
+        second.name = "second.qsig".to_string();
+
+        let mut results = vec![first, second];
+        let mut warnings = Vec::new();
+        let counts = finalize_successor_lifecycle_verification(&mut results, &mut warnings);
+        assert_ne!(
+            results[0].proof_identity_digest_hex,
+            results[1].proof_identity_digest_hex
+        );
+        assert_eq!(counts.valid_archive_approval, 1);
+        assert!(results[0].counted_for_policy);
+        assert!(!results[1].counted_for_policy);
+        assert!(warnings.iter().any(|warning| warning
+            .starts_with("Additional detached signature from the same verified signer")));
+    }
+
+    #[test]
+    fn two_distinct_verified_signer_identities_count_twice() {
+        let message = b"archive state approved by two signers";
+        let first_keypair = generate_signing_keypair(PqSignatureSuite::MlDsa44).unwrap();
+        let second_keypair = generate_signing_keypair(PqSignatureSuite::MlDsa44).unwrap();
+        let first_artifact = create_detached_qsig(DetachedSignOptions::new(
+            PqSignatureSuite::MlDsa44,
+            first_keypair.secret_key_bytes(),
+            message,
+        ))
+        .unwrap();
+        let second_artifact = create_detached_qsig(DetachedSignOptions::new(
+            PqSignatureSuite::MlDsa44,
+            second_keypair.secret_key_bytes(),
+            message,
+        ))
+        .unwrap();
+        let first_pqpk =
+            pack_public_key_file(PqSignatureSuite::MlDsa44, first_keypair.public_key_bytes())
+                .unwrap();
+        let second_pqpk =
+            pack_public_key_file(PqSignatureSuite::MlDsa44, second_keypair.public_key_bytes())
+                .unwrap();
+
+        let mut first =
+            verify_qsig_against_bytes(message, &first_artifact.qsig_bytes, None, Some(&first_pqpk))
+                .unwrap();
+        first.name = "first-signer.qsig".to_string();
+        let mut second = verify_qsig_against_bytes(
+            message,
+            &second_artifact.qsig_bytes,
+            None,
+            Some(&second_pqpk),
+        )
+        .unwrap();
+        second.name = "second-signer.qsig".to_string();
+
+        let mut results = vec![first, second];
+        let mut warnings = Vec::new();
+        let counts = finalize_successor_lifecycle_verification(&mut results, &mut warnings);
+        assert_eq!(counts.valid_archive_approval, 2);
+        assert!(results.iter().all(|result| result.counted_for_policy));
+        assert!(warnings
+            .iter()
+            .all(|warning| !warning.contains("policy/state counting")));
     }
 }

@@ -1,6 +1,7 @@
 use super::super::*;
 
 pub(super) fn run_reshare(args: ReshareArgs, ctx: CliContext) -> Result<()> {
+    validate_cohort_cli_params(args.n, args.k)?;
     if !args.maintenance_pq_public_keys.is_empty() && args.maintenance_signatures.is_empty() {
         bail!("--maintenance-pqpk requires at least one --maintenance-sig");
     }
@@ -23,16 +24,22 @@ pub(super) fn run_reshare(args: ReshareArgs, ctx: CliContext) -> Result<()> {
         .shards
         .iter()
         .map(|path| {
-            let bytes = read_file_checked(path, ctx)
-                .with_context(|| format!("failed to read {}", path.display()))?;
-            parse_qvqcont7_shard(&bytes)
-                .with_context(|| format!("failed to parse shard {}", path.display()))
+            let bytes = Zeroizing::new(
+                read_file_checked(path, ctx)
+                    .with_context(|| format!("failed to read {}", path.display()))?,
+            );
+            parse_qvqcont7_shard(bytes.as_slice()).map_err(|error| {
+                anyhow::Error::from(coded(
+                    QvCode::InvalidFormat,
+                    format!("failed to parse shard {}: {error}", path.display()),
+                ))
+            })
         })
         .collect::<Result<Vec<_>>>()?;
     let lifecycle_bundle_bytes = args
         .bundle
         .as_ref()
-        .map(|path| read_file_checked(path, ctx))
+        .map(|path| read_small_artifact_checked(path, ctx, "Lifecycle bundle"))
         .transpose()
         .with_context(|| "failed to read --bundle")?;
     let reshared = reshare_same_state(
@@ -98,20 +105,32 @@ pub(super) fn run_reshare(args: ReshareArgs, ctx: CliContext) -> Result<()> {
     ];
     output_paths.extend(shard_paths.iter().cloned());
     preflight_outputs(&output_paths, args.force, ctx)?;
-    write_file_checked(&archive_state_path, &reshared.archive_state_bytes, ctx)?;
-    write_file_checked(&cohort_binding_path, &reshared.cohort_binding_bytes, ctx)?;
+    write_file_checked(
+        &archive_state_path,
+        &reshared.archive_state_bytes,
+        args.force,
+        ctx,
+    )?;
+    write_file_checked(
+        &cohort_binding_path,
+        &reshared.cohort_binding_bytes,
+        args.force,
+        ctx,
+    )?;
     write_file_checked(
         &transition_record_path,
         &reshared.transition_record_bytes,
+        args.force,
         ctx,
     )?;
     write_file_checked(
         &lifecycle_bundle_path,
         &reshared.lifecycle_bundle_bytes,
+        args.force,
         ctx,
     )?;
     for (shard, path) in reshared.shards.iter().zip(shard_paths.iter()) {
-        write_file_checked(path, &shard.bytes, ctx)?;
+        write_secret_file_checked(path, &shard.bytes, args.force, ctx)?;
     }
 
     if ctx.json {
@@ -142,9 +161,10 @@ pub(super) fn run_reshare(args: ReshareArgs, ctx: CliContext) -> Result<()> {
                 })
             }).collect::<Vec<_>>(),
             "verificationReport": {
-                "invalidShareIndices": [],
-                "corruptedShardIndices": reshared.verification_report.rejected_shard_indices,
-                "missingShardIndices": [],
+                "invalidShareIndices": reshared.verification_report.invalid_share_indices,
+                "corruptedShardIndices": reshared.verification_report.corrupted_shard_indices,
+                "missingShardIndices": reshared.verification_report.missing_shard_indices,
+                "rejectedShardIndices": reshared.verification_report.rejected_shard_indices,
                 "privateKeyHashMatchesMetadata": reshared.verification_report.private_key_hash_matches_metadata
             },
             "maintenanceSignatureCountAdded": reshared.maintenance_signature_count_added,

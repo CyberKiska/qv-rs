@@ -1,6 +1,7 @@
 use super::super::*;
 
 pub(super) fn run_split(args: SplitArgs, ctx: CliContext) -> Result<()> {
+    validate_cohort_cli_params(args.n, args.k)?;
     validate_deterministic_flags(&args)?;
     if args.archive_id.is_some() && args.archive_id_random.is_some() {
         bail!("split accepts --archive-id or --archive-id-random, not both");
@@ -9,7 +10,7 @@ pub(super) fn run_split(args: SplitArgs, ctx: CliContext) -> Result<()> {
     let qenc_bytes = read_file_checked(&args.input_qenc, ctx)
         .with_context(|| format!("failed to read {}", args.input_qenc.display()))?;
     let private_key = Zeroizing::new(
-        read_file_checked(&args.private_key, ctx)
+        read_small_artifact_checked(&args.private_key, ctx, "ML-KEM private key")
             .with_context(|| format!("failed to read {}", args.private_key.display()))?,
     );
     validate_secret_key(&private_key)?;
@@ -117,11 +118,26 @@ pub(super) fn run_split(args: SplitArgs, ctx: CliContext) -> Result<()> {
         .with_context(|| format!("failed to create {}", out_dir.display()))?;
     preflight_outputs(&output_paths, args.force, ctx)?;
 
-    write_file_checked(&archive_state_path, &built.archive_state_bytes, ctx)?;
-    write_file_checked(&cohort_binding_path, &built.cohort_binding_bytes, ctx)?;
-    write_file_checked(&lifecycle_bundle_path, &lifecycle_bundle_bytes, ctx)?;
+    write_file_checked(
+        &archive_state_path,
+        &built.archive_state_bytes,
+        args.force,
+        ctx,
+    )?;
+    write_file_checked(
+        &cohort_binding_path,
+        &built.cohort_binding_bytes,
+        args.force,
+        ctx,
+    )?;
+    write_file_checked(
+        &lifecycle_bundle_path,
+        &lifecycle_bundle_bytes,
+        args.force,
+        ctx,
+    )?;
     for (shard, path) in split_shards.iter().zip(shard_paths.iter()) {
-        write_file_checked(path, &shard.bytes, ctx)?;
+        write_secret_file_checked(path, &shard.bytes, args.force, ctx)?;
     }
 
     if ctx.json {
@@ -197,7 +213,11 @@ fn create_split_archive_approval(
     archive_state_bytes: &[u8],
     ctx: CliContext,
 ) -> Result<SplitArchiveApproval> {
-    let secret_key_file_bytes = Zeroizing::new(read_file_checked(secret_key_path, ctx)?);
+    let secret_key_file_bytes = Zeroizing::new(read_small_artifact_checked(
+        secret_key_path,
+        ctx,
+        "PQ signing secret key",
+    )?);
     let secret_key_file =
         unpack_secret_key_file(secret_key_file_bytes.as_slice()).map_err(|error| {
             coded(

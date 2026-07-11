@@ -14,7 +14,7 @@ pub(super) fn run_encrypt(args: EncryptArgs, ctx: CliContext) -> Result<()> {
         read_file_checked(&args.input_file, ctx)
             .with_context(|| format!("failed to read {}", args.input_file.display()))?,
     );
-    let public_key = read_file_checked(&args.public_key, ctx)
+    let public_key = read_small_artifact_checked(&args.public_key, ctx, "ML-KEM public key")
         .with_context(|| format!("failed to read {}", args.public_key.display()))?;
     validate_public_key(&public_key)?;
     if source_evidence_paths.is_none() {
@@ -53,7 +53,7 @@ pub(super) fn run_encrypt(args: EncryptArgs, ctx: CliContext) -> Result<()> {
     if let Some(source_evidence) = source_evidence.as_ref() {
         write_encrypt_outputs(&args.out, &qenc_bytes, source_evidence, args.force, ctx)?;
     } else {
-        write_file_checked(&args.out, &qenc_bytes, ctx)?;
+        write_file_checked(&args.out, &qenc_bytes, args.force, ctx)?;
     }
 
     if ctx.json {
@@ -75,7 +75,7 @@ pub(super) fn run_encrypt(args: EncryptArgs, ctx: CliContext) -> Result<()> {
             "inputLength": plaintext.len(),
             "containerHashAlg": "SHA3-512",
             "containerHashHex": sha3_512_hex(&qenc_bytes),
-            "containerId": Value::Null,
+            "containerId": sha3_512_hex(&header.header),
             "fileHashHex": sha3_512_hex(&plaintext),
             "originalFilename": original_filename,
             "payloadKind": "file",
@@ -157,15 +157,6 @@ fn encrypt_output_paths(
     paths
 }
 
-fn ensure_distinct_output_paths(paths: &[PathBuf]) -> Result<()> {
-    for (index, path) in paths.iter().enumerate() {
-        if paths[..index].iter().any(|existing| existing == path) {
-            bail!("encrypt output paths must be distinct: {}", path.display());
-        }
-    }
-    Ok(())
-}
-
 fn create_encrypt_source_evidence(
     paths: EncryptSourceEvidencePaths,
     secret_key_path: &Path,
@@ -186,7 +177,11 @@ fn create_encrypt_source_evidence(
         })?;
     let source_evidence_bytes = canonical.bytes;
 
-    let secret_key_file_bytes = Zeroizing::new(read_file_checked(secret_key_path, ctx)?);
+    let secret_key_file_bytes = Zeroizing::new(read_small_artifact_checked(
+        secret_key_path,
+        ctx,
+        "PQ signing secret key",
+    )?);
     let secret_key_file =
         unpack_secret_key_file(secret_key_file_bytes.as_slice()).map_err(|error| {
             coded(
@@ -267,7 +262,7 @@ fn write_encrypt_outputs(
     ];
     let mut written = Vec::new();
     for (path, bytes) in outputs {
-        match write_file_checked(path, bytes, ctx) {
+        match write_file_checked(path, bytes, force, ctx) {
             Ok(()) => written.push(path.to_path_buf()),
             Err(error) => {
                 let mut may_have_written = written;
@@ -332,16 +327,40 @@ pub(super) fn run_decrypt(args: DecryptArgs, ctx: CliContext) -> Result<()> {
     let qenc_bytes = read_file_checked(&args.input_qenc, ctx)
         .with_context(|| format!("failed to read {}", args.input_qenc.display()))?;
     let private_key = Zeroizing::new(
-        read_file_checked(&args.private_key, ctx)
+        read_small_artifact_checked(&args.private_key, ctx, "ML-KEM private key")
             .with_context(|| format!("failed to read {}", args.private_key.display()))?,
     );
     validate_secret_key(&private_key)?;
-    let header = parse_qenc_header(&qenc_bytes)?;
-    let mut decrypted = decrypt_qenc(&qenc_bytes, &private_key)?;
+    let header = parse_qenc_header(&qenc_bytes)
+        .map_err(|error| coded(QvCode::InvalidFormat, error.to_string()))?;
+    let mut decrypted = decrypt_qenc(&qenc_bytes, &private_key).map_err(|error| {
+        if error.qv_code().is_some() {
+            error
+        } else {
+            coded(QvCode::InvalidFormat, error.to_string())
+        }
+    })?;
     let file_bytes = Zeroizing::new(std::mem::take(&mut decrypted.file_bytes));
+    let is_qvpack = file_bytes.starts_with(b"QVB1");
+    let qvpack_entries = if is_qvpack {
+        parse_bundle_payload(&file_bytes)
+            .map_err(|error| coded(QvCode::InvalidFormat, error.to_string()))?
+            .into_iter()
+            .map(|entry| {
+                serde_json::json!({
+                    "name": entry.name,
+                    "size": entry.bytes.len(),
+                    "fileHashHex": sha3_512_hex(entry.bytes),
+                    "outputPath": Value::Null,
+                })
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     let output_path = decrypt_output_path(&args, &decrypted.private_metadata.original_filename)?;
     preflight_outputs(std::slice::from_ref(&output_path), args.force, ctx)?;
-    write_file_checked(&output_path, &file_bytes, ctx)?;
+    write_secret_file_checked(&output_path, &file_bytes, args.force, ctx)?;
 
     if ctx.json {
         let report = serde_json::json!({
@@ -362,11 +381,11 @@ pub(super) fn run_decrypt(args: DecryptArgs, ctx: CliContext) -> Result<()> {
             "fileHashHex": decrypted.private_metadata.file_hash,
             "containerHashAlg": "SHA3-512",
             "containerHashHex": sha3_512_hex(&qenc_bytes),
-            "containerId": Value::Null,
-            "payloadKind": if file_bytes.starts_with(b"QVB1") { "qvpack" } else { "file" },
-            "fileCount": 1,
+            "containerId": sha3_512_hex(&header.header),
+            "payloadKind": if is_qvpack { "qvpack" } else { "file" },
+            "fileCount": if is_qvpack { qvpack_entries.len() } else { 1 },
             "qvpackExtracted": false,
-            "qvpackEntries": []
+            "qvpackEntries": qvpack_entries
         });
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else if !ctx.quiet {

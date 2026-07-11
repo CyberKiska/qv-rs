@@ -1,9 +1,9 @@
 use super::super::*;
 
 pub(super) fn run_selftest(args: SelftestArgs, ctx: CliContext) -> Result<()> {
-    let filter = args.filter.unwrap_or_default();
+    let filter = args.filter.unwrap_or_default().trim().to_ascii_lowercase();
     let include_crypto =
-        filter.is_empty() || "crypto".contains(&filter) || filter.contains("crypto");
+        filter.is_empty() || filter == "crypto" || "ml-kem-keygen".contains(&filter);
     let mut checks = Vec::new();
     if include_crypto {
         let (public_key, private_key) = generate_key_pair(None)?;
@@ -11,6 +11,9 @@ pub(super) fn run_selftest(args: SelftestArgs, ctx: CliContext) -> Result<()> {
         validate_public_key(&public_key)?;
         validate_secret_key(&private_key)?;
         checks.push(serde_json::json!({ "name": "ml-kem-keygen", "ok": true }));
+    }
+    if checks.is_empty() {
+        bail!("selftest --filter must match at least one check: {filter}");
     }
     if ctx.json {
         println!(
