@@ -17,6 +17,9 @@ pub const LIFECYCLE_ARTIFACT_FAMILY: &str = "successor-lifecycle-v1";
 const DIGEST_LEN: usize = 64;
 const KEY_COMMITMENT_LEN: usize = 32;
 pub const MAX_META_LEN: usize = 65_535;
+/// Oracle `MAX_QENC_METADATA_BYTES`: the embedded `.qenc` metadata cap the JS
+/// cohort reader enforces (`lifecycle-cohort-shared.js`).
+pub const MAX_QENC_META_LEN: usize = 4096;
 pub const MAX_ARTIFACT_LEN: usize = 16 * 1024 * 1024;
 pub const LIFECYCLE_QCONT_MIN_HEADER_BYTES: usize =
     4 + 2 + 4 + DIGEST_LEN + 4 + DIGEST_LEN + 4 + DIGEST_LEN + 4 + 12 + 16 + 2 + 1 + 2 + 2;
@@ -137,7 +140,7 @@ pub fn parse_qvqcont7_shard(bytes: &[u8]) -> Result<Qvqcont7Shard> {
     kdf_salt.copy_from_slice(read_bytes(bytes, &mut offset, 16, "kdf salt")?);
 
     let qenc_meta_len = read_u16(bytes, &mut offset, "qenc metadata length")? as usize;
-    if qenc_meta_len == 0 || qenc_meta_len > MAX_META_LEN {
+    if qenc_meta_len == 0 || qenc_meta_len > MAX_QENC_META_LEN {
         return Err(err("Invalid qenc metadata length"));
     }
     let qenc_meta_bytes = read_bytes(bytes, &mut offset, qenc_meta_len, "qenc metadata")?.to_vec();
@@ -174,7 +177,10 @@ pub fn parse_qvqcont7_shard(bytes: &[u8]) -> Result<Qvqcont7Shard> {
     if share_len == 0 {
         return Err(err("Invalid Shamir share length"));
     }
-    let share = read_bytes(bytes, &mut offset, share_len, "Shamir share")?.to_vec();
+    // Hold the raw Shamir share in a Zeroizing buffer so the ~14 validation
+    // error returns before struct construction do not leak it in cleared memory.
+    let mut share =
+        Zeroizing::new(read_bytes(bytes, &mut offset, share_len, "Shamir share")?.to_vec());
     if offset >= bytes.len() {
         return Err(err("Shard fragment payload is empty"));
     }
@@ -260,7 +266,7 @@ pub fn parse_qvqcont7_shard(bytes: &[u8]) -> Result<Qvqcont7Shard> {
         qenc_meta_json,
         key_commitment,
         shard_index,
-        share,
+        share: std::mem::take(&mut *share),
         fragments,
     })
 }
@@ -287,7 +293,7 @@ pub fn build_qvqcont7_shard(shard: &Qvqcont7Shard) -> Result<Vec<u8>> {
         u32::MAX as usize,
         "encapsulated key",
     )?;
-    validate_component_len(&shard.qenc_meta_bytes, MAX_META_LEN, "qenc metadata")?;
+    validate_component_len(&shard.qenc_meta_bytes, MAX_QENC_META_LEN, "qenc metadata")?;
     validate_component_len(&shard.share, u16::MAX as usize, "Shamir share")?;
     if shard.fragments.is_empty() {
         return Err(err("Shard fragment payload is empty"));

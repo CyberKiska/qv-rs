@@ -91,11 +91,15 @@ impl<'a> Reader<'a> {
     }
 
     fn take(&mut self, len: usize, field: &str) -> Result<&'a [u8]> {
-        if self.offset + len > self.bytes.len() {
+        let end = self
+            .offset
+            .checked_add(len)
+            .ok_or_else(|| err(format!("Truncated {field}")))?;
+        if end > self.bytes.len() {
             return Err(err(format!("Truncated {field}")));
         }
-        let out = &self.bytes[self.offset..self.offset + len];
-        self.offset += len;
+        let out = &self.bytes[self.offset..end];
+        self.offset = end;
         Ok(out)
     }
 

@@ -278,15 +278,14 @@ pub fn normalize_detached_signature_entry(
             )?),
         ),
     ];
-    if source.contains_key("publicKeyRef") {
-        pairs.push((
-            "publicKeyRef",
-            Value::String(string(
-                source.get("publicKeyRef"),
-                &format!("{field}.publicKeyRef"),
-            )?),
-        ));
-    }
+    // Oracle `artifacts.js` normalizes with `ensureOptionalString`: the member is
+    // always present in the canonical entry and serializes as `null` when no
+    // signer key is pinned (the common "unpinned evidence" attach path).
+    let public_key_ref = match source.get("publicKeyRef") {
+        None | Some(Value::Null) => Value::Null,
+        Some(value) => Value::String(string(Some(value), &format!("{field}.publicKeyRef"))?),
+    };
+    pairs.push(("publicKeyRef", public_key_ref));
     Ok(DetachedSignatureEntry {
         value: object_from_pairs(pairs),
     })
@@ -451,4 +450,60 @@ fn assert_unique_ids(entries: &[Value], field: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::manifest::jcs::canonicalize_json;
+    use serde_json::json;
+
+    fn unpinned_signature_entry(public_key_ref: Option<Value>) -> Value {
+        let mut entry = json!({
+            "id": "sig-0011223344556677",
+            "signatureFamily": "archive-approval",
+            "format": "qsig",
+            "suite": "mldsa-87",
+            "targetType": "archive-state",
+            "targetRef": format!("state:{}", "ab".repeat(64)),
+            "targetDigest": { "alg": "SHA3-512", "value": "ab".repeat(64) },
+            "signatureEncoding": "base64",
+            "signature": "AAECAw==",
+        });
+        if let (Value::Object(map), Some(reference)) = (&mut entry, public_key_ref) {
+            map.insert("publicKeyRef".to_string(), reference);
+        }
+        entry
+    }
+
+    #[test]
+    fn unpinned_entry_canonicalizes_with_null_public_key_ref() {
+        // Oracle parity: JS `normalizeDetachedSignatureEntry` always emits the
+        // member; JCS serializes it as `"publicKeyRef":null`.
+        let entry = unpinned_signature_entry(None);
+        let normalized = normalize_detached_signature_entry(&entry, 0, "archiveApprovalSignatures")
+            .expect("normalize entry without publicKeyRef");
+        let canonical = canonicalize_json(&normalized.value).expect("canonicalize");
+        assert!(
+            canonical.contains("\"publicKeyRef\":null"),
+            "canonical entry must carry the null member: {canonical}"
+        );
+    }
+
+    #[test]
+    fn explicit_null_public_key_ref_is_accepted_as_unpinned() {
+        let entry = unpinned_signature_entry(Some(Value::Null));
+        let normalized = normalize_detached_signature_entry(&entry, 0, "archiveApprovalSignatures")
+            .expect("JS-produced bundles carry publicKeyRef:null and must parse");
+        assert_eq!(normalized.value.get("publicKeyRef"), Some(&Value::Null));
+    }
+
+    #[test]
+    fn empty_string_public_key_ref_is_rejected() {
+        let entry = unpinned_signature_entry(Some(json!("")));
+        assert!(
+            normalize_detached_signature_entry(&entry, 0, "archiveApprovalSignatures").is_err(),
+            "empty-string publicKeyRef must fail closed like the oracle"
+        );
+    }
 }

@@ -33,6 +33,9 @@ use crate::qenc::{build_qenc_header, parse_qenc_header, parse_qenc_metadata_byte
 use crate::sss::combine_shares;
 
 const RS_MAX_CODEWORD: usize = 255;
+/// Oracle `MAX_RECONSTRUCTED_CIPHERTEXT_BYTES`: a fixed reconstruction ceiling
+/// (1 GiB + 1 MiB) enforced independently of allocator behavior.
+const MAX_RECONSTRUCTED_CIPHERTEXT_BYTES: u64 = (1024 * 1024 * 1024) + (1024 * 1024);
 type MaintenanceSignatureEvidence = (BTreeSet<String>, BTreeSet<String>, BTreeSet<String>);
 type SignatureDigestEvidence = (BTreeSet<String>, BTreeSet<String>);
 
@@ -631,6 +634,15 @@ fn reconstruct_lifecycle_cohort_material<'a>(
             "QENC chunkCount exceeds platform limits",
         )
     })?;
+    if geometry.ciphertext_length > MAX_RECONSTRUCTED_CIPHERTEXT_BYTES {
+        return Err(coded(
+            QvCode::InvalidFormat,
+            format!(
+                "Authenticated QENC ciphertext length {} exceeds reconstruction limit {MAX_RECONSTRUCTED_CIPHERTEXT_BYTES}",
+                geometry.ciphertext_length
+            ),
+        ));
+    }
     let ciphertext_length = usize::try_from(geometry.ciphertext_length).map_err(|_| {
         coded(
             QvCode::InvalidFormat,
@@ -1426,6 +1438,26 @@ fn verify_bundle_lifecycle_signature(
             ))
         })?;
     let public_key_ref = signature.get("publicKeyRef").and_then(Value::as_str);
+    // Oracle `validateBundledPublicKeyCompatibility`: a bundled publicKeyRef must
+    // declare the same suite as the signature it anchors, closing key-substitution
+    // ambiguity where a distinct key of another suite also verifies the bytes.
+    if let Some(key_ref) = public_key_ref {
+        let referenced = public_keys.get(key_ref).ok_or_else(|| {
+            err(format!(
+                "Unknown {} publicKeyRef: {key_ref}",
+                descriptor.family
+            ))
+        })?;
+        let signature_suite =
+            string_field(signature, "suite", &format!("{}.suite", descriptor.field))?;
+        let key_suite = string_field(referenced, "suite", "publicKeys.suite")?;
+        if key_suite != signature_suite {
+            return Err(err(format!(
+                "{} publicKeyRef suite mismatch",
+                descriptor.field
+            )));
+        }
+    }
     let mut result = if format == "qsig" {
         let bundled_pqpk = public_key_ref
             .map(|key_ref| {

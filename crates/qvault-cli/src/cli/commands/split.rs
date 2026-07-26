@@ -6,6 +6,10 @@ pub(super) fn run_split(args: SplitArgs, ctx: CliContext) -> Result<()> {
     if args.archive_id.is_some() && args.archive_id_random.is_some() {
         bail!("split accepts --archive-id or --archive-id-random, not both");
     }
+    // Fail closed like the oracle rather than silently clamping 0 up to 1.
+    if args.min_valid_signatures < 1 {
+        bail!("--min-valid-signatures must be a positive integer");
+    }
 
     let qenc_bytes = read_file_checked(&args.input_qenc, ctx)
         .with_context(|| format!("failed to read {}", args.input_qenc.display()))?;
@@ -32,7 +36,7 @@ pub(super) fn run_split(args: SplitArgs, ctx: CliContext) -> Result<()> {
             parent_state_id: args.parent_state_id.clone(),
             state_type: args.state_type.clone(),
             auth_policy_level: Some(args.auth_policy_level.into()),
-            min_valid_signatures: Some(args.min_valid_signatures.max(1)),
+            min_valid_signatures: Some(args.min_valid_signatures),
             ..Qvqcont7BuildOptions::default()
         },
     )?;
@@ -163,7 +167,7 @@ pub(super) fn run_split(args: SplitArgs, ctx: CliContext) -> Result<()> {
             "shamir": { "n": args.n, "t": u64::from(args.k) + (u64::from(args.n - args.k) / 2) },
             "authPolicy": {
                 "level": AuthPolicyLevel::from(args.auth_policy_level).as_str(),
-                "minValidSignatures": args.min_valid_signatures.max(1)
+                "minValidSignatures": args.min_valid_signatures
             },
             "archiveStateBytesPath": archive_state_path,
             "archiveStateDigestHex": built.archive_state_digest_hex,

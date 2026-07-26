@@ -960,9 +960,12 @@ fn signature_entry(
         "signature".to_string(),
         Value::String(BASE64_STANDARD.encode(signature_bytes)),
     );
-    if let Some(public_key_ref) = public_key_ref {
-        object.insert("publicKeyRef".to_string(), Value::String(public_key_ref));
-    }
+    // Always emit the member; JS canonical bundles carry `"publicKeyRef":null`
+    // when no `.pqpk` pin matched the imported signature.
+    object.insert(
+        "publicKeyRef".to_string(),
+        public_key_ref.map(Value::String).unwrap_or(Value::Null),
+    );
     Value::Object(object)
 }
 

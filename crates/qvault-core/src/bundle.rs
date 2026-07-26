@@ -5,6 +5,31 @@ use crate::error::{err, Result};
 const BUNDLE_MAGIC: &[u8; 4] = b"QVB1";
 const BUNDLE_VERSION: u8 = 1;
 
+/// Oracle `qvpack.js` `QVPACK_RESOURCE_PROFILE`: normative caps enforced by
+/// both the reader and the writer (format-spec "resource profile" MUSTs).
+pub const MAX_QVPACK_ENTRY_COUNT: usize = 4096;
+pub const MAX_QVPACK_ENTRY_NAME_BYTES: usize = 255;
+pub const MAX_QVPACK_ENTRY_PAYLOAD_BYTES: usize = crate::qenc::crypto::MAX_FILE_SIZE;
+pub const MAX_QVPACK_AGGREGATE_PAYLOAD_BYTES: usize = crate::qenc::crypto::MAX_FILE_SIZE;
+pub const MAX_QVPACK_ENCODED_BYTES: usize = crate::qenc::crypto::MAX_FILE_SIZE;
+
+fn assert_entry_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        return Err(err("QVPACK entry name must be a non-empty string"));
+    }
+    if name.bytes().any(|byte| matches!(byte, b'/' | b'\\' | 0)) {
+        return Err(err(
+            "QVPACK entry name must not contain path separators or NUL",
+        ));
+    }
+    if name.len() > MAX_QVPACK_ENTRY_NAME_BYTES {
+        return Err(err(format!(
+            "QVPACK entry filename exceeds resource limit ({MAX_QVPACK_ENTRY_NAME_BYTES} UTF-8 bytes)"
+        )));
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct BundleEntryRef<'a> {
     pub name: &'a str,
@@ -39,8 +64,10 @@ pub fn build_bundle_payload(entries: &[BundleEntryRef<'_>]) -> Result<Vec<u8>> {
     if entries.is_empty() {
         return Err(err("Bundle must contain at least one file"));
     }
-    if entries.len() > usize::from(u16::MAX) {
-        return Err(err("Bundle contains too many files"));
+    if entries.len() > MAX_QVPACK_ENTRY_COUNT {
+        return Err(err(format!(
+            "QVPACK entry count exceeds resource limit ({MAX_QVPACK_ENTRY_COUNT})"
+        )));
     }
 
     let total_size = 4usize
@@ -48,26 +75,38 @@ pub fn build_bundle_payload(entries: &[BundleEntryRef<'_>]) -> Result<Vec<u8>> {
         .and_then(|value| value.checked_add(2))
         .ok_or_else(|| err("Bundle size overflow"))?;
 
+    let mut seen_names = std::collections::HashSet::new();
+    let mut aggregate_payload = 0usize;
     let total_size = entries.iter().try_fold(total_size, |acc, entry| {
+        assert_entry_name(entry.name)?;
+        if !seen_names.insert(entry.name) {
+            return Err(err("QVPACK contains a duplicate entry filename"));
+        }
         let name_bytes = entry.name.as_bytes();
-        if name_bytes.is_empty() || name_bytes.len() > usize::from(u16::MAX) {
+        if entry.bytes.len() > MAX_QVPACK_ENTRY_PAYLOAD_BYTES {
             return Err(err(format!(
-                "Invalid filename length for bundle entry: \"{}\"",
-                entry.name
+                "QVPACK entry payload exceeds resource limit ({MAX_QVPACK_ENTRY_PAYLOAD_BYTES} bytes)"
             )));
         }
-        if entry.bytes.len() > u32::MAX as usize {
-            return Err(err(format!(
-                "File is too large for bundle format: \"{}\"",
-                entry.name
-            )));
-        }
+        aggregate_payload = aggregate_payload
+            .checked_add(entry.bytes.len())
+            .filter(|total| *total <= MAX_QVPACK_AGGREGATE_PAYLOAD_BYTES)
+            .ok_or_else(|| {
+                err(format!(
+                    "QVPACK aggregate payload exceeds resource limit ({MAX_QVPACK_AGGREGATE_PAYLOAD_BYTES} bytes)"
+                ))
+            })?;
 
         acc.checked_add(2)
             .and_then(|value| value.checked_add(name_bytes.len()))
             .and_then(|value| value.checked_add(4))
             .and_then(|value| value.checked_add(entry.bytes.len()))
-            .ok_or_else(|| err("Bundle size overflow"))
+            .filter(|total| *total <= MAX_QVPACK_ENCODED_BYTES)
+            .ok_or_else(|| {
+                err(format!(
+                    "QVPACK encoded payload exceeds resource limit ({MAX_QVPACK_ENCODED_BYTES} bytes)"
+                ))
+            })
     })?;
 
     let mut out = Vec::new();
@@ -106,6 +145,11 @@ pub fn parse_bundle_payload(bytes: &[u8]) -> Result<Vec<ParsedBundleEntry<'_>>> 
     if !is_bundle_payload(bytes) {
         return Err(err("Not a valid bundle payload"));
     }
+    if bytes.len() > MAX_QVPACK_ENCODED_BYTES {
+        return Err(err(format!(
+            "QVPACK encoded payload exceeds resource limit ({MAX_QVPACK_ENCODED_BYTES} bytes)"
+        )));
+    }
 
     let mut offset = 4usize;
     let version = bytes[offset];
@@ -125,8 +169,14 @@ pub fn parse_bundle_payload(bytes: &[u8]) -> Result<Vec<ParsedBundleEntry<'_>>> 
     if count == 0 {
         return Err(err("Bundle contains no files"));
     }
+    if count > MAX_QVPACK_ENTRY_COUNT {
+        return Err(err(format!(
+            "QVPACK entry count exceeds resource limit ({MAX_QVPACK_ENTRY_COUNT})"
+        )));
+    }
 
     let mut entries = Vec::with_capacity(count);
+    let mut seen_names = std::collections::HashSet::new();
     for index in 0..count {
         let name_length_end = offset
             .checked_add(2)
@@ -139,6 +189,11 @@ pub fn parse_bundle_payload(bytes: &[u8]) -> Result<Vec<ParsedBundleEntry<'_>>> 
         if name_len == 0 {
             return Err(err(format!(
                 "Bundle entry {index} has invalid filename length"
+            )));
+        }
+        if name_len > MAX_QVPACK_ENTRY_NAME_BYTES {
+            return Err(err(format!(
+                "QVPACK entry filename exceeds resource limit ({MAX_QVPACK_ENTRY_NAME_BYTES} UTF-8 bytes)"
             )));
         }
         let name_end = offset
@@ -154,6 +209,10 @@ pub fn parse_bundle_payload(bytes: &[u8]) -> Result<Vec<ParsedBundleEntry<'_>>> 
                 ))
             })?
             .to_string();
+        assert_entry_name(&name)?;
+        if !seen_names.insert(name.clone()) {
+            return Err(err("QVPACK contains a duplicate entry filename"));
+        }
         offset = name_end;
 
         let size_end = offset
@@ -250,6 +309,56 @@ mod tests {
 
         let error = parse_bundle_payload(&bundle).expect_err("bundle should fail");
         assert_eq!(error.to_string(), "Bundle has trailing bytes");
+    }
+
+    #[test]
+    fn build_rejects_path_separators_and_nul() {
+        for bad in ["../evil", "dir/child", "back\\slash", "nul\0byte"] {
+            let error = build_bundle_payload(&[BundleEntryRef {
+                name: bad,
+                bytes: b"x",
+            }])
+            .expect_err("unsafe name must fail");
+            assert!(
+                error.to_string().contains("path separators or NUL"),
+                "{bad}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_rejects_duplicate_names() {
+        let error = build_bundle_payload(&[
+            BundleEntryRef {
+                name: "dup",
+                bytes: b"a",
+            },
+            BundleEntryRef {
+                name: "dup",
+                bytes: b"b",
+            },
+        ])
+        .expect_err("duplicate name must fail");
+        assert!(error.to_string().contains("duplicate entry filename"));
+    }
+
+    #[test]
+    fn parse_rejects_path_traversal_entry_name() {
+        // Hand-craft a QVB1 bundle whose single entry is named "../evil".
+        let name = b"../evil";
+        let mut bundle = Vec::new();
+        bundle.extend_from_slice(b"QVB1");
+        bundle.push(1);
+        bundle.extend_from_slice(&1u16.to_be_bytes());
+        bundle.extend_from_slice(&(name.len() as u16).to_be_bytes());
+        bundle.extend_from_slice(name);
+        bundle.extend_from_slice(&1u32.to_be_bytes());
+        bundle.push(0x42);
+        let error = parse_bundle_payload(&bundle).expect_err("traversal name must fail");
+        assert!(
+            error.to_string().contains("path separators or NUL"),
+            "{error}"
+        );
     }
 
     #[test]

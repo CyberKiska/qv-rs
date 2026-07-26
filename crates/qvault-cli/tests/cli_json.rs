@@ -1086,6 +1086,31 @@ fn split_archive_approval_key_embeds_qsig_and_satisfies_verify_restore() {
             .expect("lifecycle digest")
     );
 
+    // Without an external signer pin the bundle-embedded key is not a trust
+    // anchor: cryptographically verified, but archive policy must NOT be
+    // satisfied (oracle parity; see F2 fix in successor_policy.rs).
+    let verify_unpinned = Command::new(qvault_cli())
+        .args([
+            "--json",
+            "verify",
+            archive_state_path
+                .to_str()
+                .expect("utf8 archive state path"),
+            "--bundle",
+            lifecycle_bundle_path
+                .to_str()
+                .expect("utf8 lifecycle bundle path"),
+        ])
+        .output()
+        .expect("run unpinned verify for signed split");
+    let verify_unpinned_json: Value =
+        serde_json::from_slice(&verify_unpinned.stdout).expect("unpinned verify JSON");
+    assert_eq!(
+        verify_unpinned_json["policy"]["satisfied"], false,
+        "bundle-embedded key alone must not satisfy archive policy"
+    );
+
+    // Supplying the signer public key as an external pin authorizes policy.
     let verify = Command::new(qvault_cli())
         .args([
             "--json",
@@ -1097,6 +1122,10 @@ fn split_archive_approval_key_embeds_qsig_and_satisfies_verify_restore() {
             lifecycle_bundle_path
                 .to_str()
                 .expect("utf8 lifecycle bundle path"),
+            "--pqpk",
+            signer_public_key_path
+                .to_str()
+                .expect("utf8 signer public key path"),
             "--required-policy-level",
             "strong-pq-signature",
         ])
@@ -1120,6 +1149,11 @@ fn split_archive_approval_key_embeds_qsig_and_satisfies_verify_restore() {
         lifecycle_bundle_path
             .to_str()
             .expect("utf8 lifecycle bundle path")
+            .to_string(),
+        "--pqpk".to_string(),
+        signer_public_key_path
+            .to_str()
+            .expect("utf8 signer public key path")
             .to_string(),
         "--dry-run".to_string(),
     ];

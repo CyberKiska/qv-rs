@@ -1,6 +1,7 @@
 use crate::bytes::bytes_equal;
 use crate::error::{err, Result};
 use crate::kdf::KDF_SALT_SIZE;
+use crate::mlkem::ML_KEM_1024_ENCAPSULATED_KEY_SIZE;
 use crate::qenc::metadata::{authenticated_geometry, parse_qenc_metadata_bytes, QencMetadata};
 
 pub const MAGIC: &[u8; 4] = b"QVv1";
@@ -26,9 +27,10 @@ pub fn build_qenc_header(
     meta_bytes: &[u8],
     key_commitment: &[u8; 32],
 ) -> Result<Vec<u8>> {
-    if encapsulated_key.is_empty() || encapsulated_key.len() > u32::MAX as usize {
+    // Oracle pins keyLen to the ML-KEM-1024 profile size at both write and parse.
+    if encapsulated_key.len() != ML_KEM_1024_ENCAPSULATED_KEY_SIZE {
         return Err(err(format!(
-            "Invalid encapsulated key length: {}",
+            "Invalid encapsulatedKey length: expected {ML_KEM_1024_ENCAPSULATED_KEY_SIZE}, got {}",
             encapsulated_key.len()
         )));
     }
@@ -78,12 +80,9 @@ pub fn parse_qenc_header(container_bytes: &[u8]) -> Result<QencHeader> {
     offset += MAGIC.len();
 
     let key_len = read_u32(container_bytes, &mut offset, "encapsulated key length")? as usize;
-    if key_len == 0 {
-        return Err(err(format!("Invalid encapsulated key length {key_len}.")));
-    }
-    if key_len > container_bytes.len() {
+    if key_len != ML_KEM_1024_ENCAPSULATED_KEY_SIZE {
         return Err(err(format!(
-            "Invalid encapsulated key length {key_len}: exceeds container size."
+            "Invalid encapsulated key length {key_len}. Expected {ML_KEM_1024_ENCAPSULATED_KEY_SIZE} for the ML-KEM-1024 profile."
         )));
     }
     let key_end = offset

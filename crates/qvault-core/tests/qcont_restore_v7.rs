@@ -104,10 +104,29 @@ fn restore_and_verify_report_all_successor_signature_families() -> Result<()> {
     let built = build_fixture_split(vec![0x42; 10_000])?;
     let signed_bundle = build_signed_lifecycle_bundle_all_families(&built)?;
 
-    let verified = verify_successor_lifecycle_authenticity(
+    // Without an externally supplied pin the approval stays cryptographically
+    // verified but must not count toward policy (oracle: bundle-carried keys
+    // are not trust anchors).
+    let unpinned = verify_successor_lifecycle_authenticity(
         &built.archive_state_bytes,
         &signed_bundle,
         &Default::default(),
+    )?;
+    assert_eq!(unpinned.verification.counts.valid_archive_approval, 0);
+    assert_eq!(unpinned.verification.counts.valid_total, 3);
+    assert!(!unpinned.status.archive_approval_signature_verified);
+    assert!(unpinned.warnings.iter().any(|warning| warning
+        .contains("no externally supplied signer pin matched; ignored for archive policy")));
+
+    let signer_pin = signer_pin_pqpk()?;
+    let pinned_inputs = qvault_core::auth::VerificationInputs {
+        pinned_pq_public_key_file_bytes_list: vec![signer_pin],
+        ..Default::default()
+    };
+    let verified = verify_successor_lifecycle_authenticity(
+        &built.archive_state_bytes,
+        &signed_bundle,
+        &pinned_inputs,
     )?;
     assert_eq!(verified.verification.counts.valid_archive_approval, 1);
     assert_eq!(verified.verification.counts.valid_maintenance, 1);
@@ -129,6 +148,7 @@ fn restore_and_verify_report_all_successor_signature_families() -> Result<()> {
                 lifecycle_bundle_bytes: Some(signed_bundle),
                 ..RestoreQvqcont7Selection::default()
             },
+            verification: pinned_inputs,
             ..RestoreQvqcont7Options::default()
         },
     )?;
@@ -416,6 +436,15 @@ fn build_signed_lifecycle_bundle_all_families(
 struct QsigFixture {
     qsig: Vec<u8>,
     public_key: Vec<u8>,
+}
+
+fn signer_pin_pqpk() -> Result<Vec<u8>> {
+    let (public_key, _) = fips204::ml_dsa_87::KG::keygen_from_seed(&[0x87; 32]);
+    qvault_core::auth::pack_public_key_file(
+        qvault_core::auth::PqSignatureSuite::MlDsa87,
+        &public_key.into_bytes(),
+    )
+    .map_err(|error| anyhow!(error))
 }
 
 fn build_qsig_fixture(message: &[u8]) -> Result<QsigFixture> {

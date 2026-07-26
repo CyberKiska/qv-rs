@@ -37,3 +37,6 @@ lto = "thin"
 codegen-units = 1
 strip = true
 panic = "abort"
+# Defense-in-depth: trap any unchecked arithmetic overflow on untrusted lengths
+# rather than silently wrapping. Parsers already use checked_* on hostile input.
+overflow-checks = true

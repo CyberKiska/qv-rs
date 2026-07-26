@@ -182,7 +182,9 @@ fn validate_stellar_v2_input_descriptor(
     }
     if let Some(size_val) = input.get("size") {
         if let Some(n) = size_val.as_u64() {
-            if n as usize != message_bytes.len() {
+            // Compare in u64 so a declared size above usize::MAX (32-bit targets)
+            // cannot truncate into a spurious match.
+            if n != message_bytes.len() as u64 {
                 return Err(crate::error::err(format!(
                     "Input size mismatch: signature expects {n}, got {}",
                     message_bytes.len()

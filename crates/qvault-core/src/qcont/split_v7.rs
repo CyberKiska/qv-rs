@@ -268,7 +268,17 @@ pub fn build_qvqcont7_shards(
     let auth_policy_level = options
         .auth_policy_level
         .unwrap_or(AuthPolicyLevel::StrongPqSignature);
-    let min_valid_signatures = options.min_valid_signatures.unwrap_or(1).max(1);
+    // Oracle `normalizeAuthPolicy`: absent defaults to 1; an explicit value
+    // below 1 fails closed rather than being silently clamped.
+    let min_valid_signatures = match options.min_valid_signatures {
+        None => 1,
+        Some(0) => {
+            return Err(err(
+                "authPolicy.minValidSignatures must be a positive integer",
+            ))
+        }
+        Some(value) => value,
+    };
     let crypto_profile_id = parsed
         .metadata
         .crypto_profile_id
