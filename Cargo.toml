@@ -8,27 +8,27 @@ license = "GPL-3.0-only"
 version = "0.3.0"
 
 [workspace.dependencies]
-aes = { version = "0.9.1", default-features = false, features = ["zeroize"] }
+aes = { version = "0.9.2", default-features = false, features = ["zeroize"] }
 aes-gcm = { version = "0.11.0", default-features = false, features = ["aes", "alloc", "zeroize"] }
-anyhow = "1.0.102"
-base64 = "0.22.1"
-clap = { version = "4.6.1", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
+anyhow = "1.0.104"
+base64 = "0.23.1"
+clap = { version = "4.6.6", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
 crc32fast = "1.5.0"
-ed25519-dalek = { version = "2.2.0", default-features = false, features = ["fast", "std", "zeroize"] }
+ed25519-dalek = { version = "3.0.0", default-features = false, features = ["fast", "zeroize"] }
 fips203 = { version = "0.4.3", default-features = false, features = ["ml-kem-1024"] }
 fips204 = { version = "0.4.6", default-features = false, features = ["ml-dsa-44", "ml-dsa-65", "ml-dsa-87"] }
 fips205 = { version = "0.4.1", default-features = false, features = ["slh_dsa_shake_128s", "slh_dsa_shake_192s", "slh_dsa_shake_256s", "slh_dsa_shake_256f"] }
-getrandom = "0.4.2"
+getrandom = "0.4.3"
 ghash = { version = "0.6.0", default-features = false, features = ["zeroize"] }
 hex = "0.4.3"
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.150"
-sha2 = "0.10.9"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = "0.11.0"
 subtle = { version = "2.6.1", default-features = false }
-thiserror = "2.0.18"
-time = { version = "0.3.47", default-features = false, features = ["std", "parsing"] }
+thiserror = "2.0.20"
+time = { version = "0.3.55", default-features = false, features = ["std", "parsing"] }
 tiny-keccak = { version = "2.0.2", features = ["sha3", "kmac"] }
-zeroize = { version = "1.8.2", features = ["zeroize_derive"] }
+zeroize = { version = "1.9.0", features = ["zeroize_derive"] }
 proptest = { version = "=1.11.0", default-features = false, features = ["std"] }
 
 [profile.release]
