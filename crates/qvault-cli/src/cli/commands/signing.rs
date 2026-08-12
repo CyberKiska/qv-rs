@@ -78,7 +78,8 @@ pub(super) fn run_sign(args: SignArgs, ctx: CliContext) -> Result<()> {
             "signerFingerprintHex": signer_fingerprint_hex,
             "publicKeyDigestAlg": "SHA3-512",
             "publicKeyDigestHex": public_key_digest_hex,
-            "displayMetadata": display_metadata_json
+            "displayMetadata": display_metadata_json,
+            "randomness": randomness_report(&["pq-signature-hedging"], false)
         });
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else if !ctx.quiet {

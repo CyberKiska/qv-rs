@@ -33,7 +33,8 @@ pub(super) fn run_keygen(args: KeygenArgs, ctx: CliContext) -> Result<()> {
             "privateKeyDigestHex": sha3_512_hex(&private_key),
             "publicKeyLength": ML_KEM_1024_PUBLIC_KEY_SIZE,
             "privateKeyLength": ML_KEM_1024_SECRET_KEY_SIZE,
-            "seed": { "source": "secure-random" }
+            "seed": { "source": "secure-random" },
+            "randomness": randomness_report(&["ml-kem-keygen"], false)
         });
         if args.print_public {
             report["publicKeyBase64"] = Value::String(BASE64_STANDARD.encode(&public_key));
@@ -103,7 +104,8 @@ pub(super) fn run_signer_keygen(args: SignerKeygenArgs, ctx: CliContext) -> Resu
             "publicKeyDigestAlg": "SHA3-512",
             "publicKeyDigestHex": public_key_digest_hex,
             "publicKeyLength": suite.public_key_len(),
-            "publicKeyFileLength": public_key_file.len()
+            "publicKeyFileLength": public_key_file.len(),
+            "randomness": randomness_report(&["pq-signature-keygen"], false)
         });
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else if !ctx.quiet {

@@ -218,6 +218,19 @@ fn signer_keygen_json_writes_pq_keys_without_secret_leakage() {
     assert_eq!(value["cliSchemaVersion"], 1);
     assert_eq!(value["suite"], "mldsa-44");
     assert_eq!(value["strongPq"], false);
+    assert_eq!(value["randomness"]["source"], "operating-system-csprng");
+    assert_eq!(value["randomness"]["provider"], "getrandom");
+    assert_eq!(value["randomness"]["deterministic"], false);
+    assert_eq!(value["randomness"]["deterministicInputsUsed"], false);
+    assert_eq!(
+        value["randomness"]["testVectorFeatureEnabled"],
+        cfg!(feature = "deterministic-test-vectors")
+    );
+    assert_eq!(value["randomness"]["failureMode"], "fail-closed");
+    assert_eq!(
+        value["randomness"]["purposes"],
+        serde_json::json!(["pq-signature-keygen"])
+    );
     assert_eq!(
         value["publicKeyPath"],
         public_key_path.to_str().expect("utf8 public path")

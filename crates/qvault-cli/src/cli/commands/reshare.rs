@@ -162,7 +162,11 @@ pub(super) fn run_reshare(args: ReshareArgs, ctx: CliContext) -> Result<()> {
                 "sourceEvidenceCreated": false,
                 "compromiseRepairClaimed": false
             },
-            "zeroization": { "attempted": true, "privateKeyBytesCleared": true, "shareCopiesCleared": true }
+            "zeroization": { "attempted": true, "privateKeyBytesCleared": true, "shareCopiesCleared": true },
+            "randomness": randomness_report(&[
+                "shamir-coefficients",
+                "shamir-coordinate-order"
+            ], false)
         });
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else if !ctx.quiet {

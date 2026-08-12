@@ -62,6 +62,14 @@ pub(super) fn run_encrypt(args: EncryptArgs, ctx: CliContext) -> Result<()> {
     }
 
     if ctx.json {
+        let mut randomness_purposes = vec![
+            "ml-kem-encapsulation",
+            "aes-gcm-container-nonce",
+            "kmac-kdf-salt",
+        ];
+        if source_evidence.is_some() {
+            randomness_purposes.push("source-evidence-signature-hedging");
+        }
         let mut report = serde_json::json!({
             "command": "encrypt",
             "ok": true,
@@ -84,7 +92,8 @@ pub(super) fn run_encrypt(args: EncryptArgs, ctx: CliContext) -> Result<()> {
             "fileHashHex": sha3_512_hex(&plaintext),
             "originalFilename": original_filename,
             "payloadKind": "file",
-            "fileCount": 1
+            "fileCount": 1,
+            "randomness": randomness_report(&randomness_purposes, false)
         });
         if let Some(source_evidence) = source_evidence.as_ref() {
             let report_object = report

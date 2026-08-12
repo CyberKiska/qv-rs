@@ -157,6 +157,21 @@ pub(super) fn run_split(args: SplitArgs, ctx: CliContext) -> Result<()> {
     }
 
     if ctx.json {
+        #[cfg(feature = "deterministic-test-vectors")]
+        let deterministic_inputs_used = args.archive_id.is_some()
+            || args.archive_id_random.is_some()
+            || args.parent_state_id.is_some()
+            || args.state_type.is_some();
+        #[cfg(not(feature = "deterministic-test-vectors"))]
+        let deterministic_inputs_used = false;
+        let mut randomness_purposes = vec![
+            "archive-id",
+            "shamir-coefficients",
+            "shamir-coordinate-order",
+        ];
+        if archive_approval.is_some() {
+            randomness_purposes.push("archive-approval-signature-hedging");
+        }
         let archive_approval_json = archive_approval
             .as_ref()
             .map(split_archive_approval_json)
@@ -201,7 +216,8 @@ pub(super) fn run_split(args: SplitArgs, ctx: CliContext) -> Result<()> {
             "containerHashAlg": "SHA3-512",
             "containerHashHex": built.container_hash_hex,
             "containerId": built.container_id,
-            "privateKeyHashHex": built.private_key_hash_hex
+            "privateKeyHashHex": built.private_key_hash_hex,
+            "randomness": randomness_report(&randomness_purposes, deterministic_inputs_used)
         });
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else if !ctx.quiet {

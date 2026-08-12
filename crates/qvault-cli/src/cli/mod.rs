@@ -57,6 +57,22 @@ const DEFAULT_MAX_SHARD_INPUT_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_CONFIGURABLE_SHARD_INPUT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_GENERIC_ARTIFACT_INPUT_BYTES: u64 = MAX_QVQCONT7_SHARD_BYTES as u64;
 
+fn randomness_report(purposes: &[&str], deterministic_inputs_used: bool) -> Value {
+    serde_json::json!({
+        "source": if deterministic_inputs_used {
+            "test-vector-inputs-and-operating-system-csprng"
+        } else {
+            "operating-system-csprng"
+        },
+        "provider": "getrandom",
+        "deterministic": deterministic_inputs_used,
+        "deterministicInputsUsed": deterministic_inputs_used,
+        "testVectorFeatureEnabled": cfg!(feature = "deterministic-test-vectors"),
+        "failureMode": "fail-closed",
+        "purposes": purposes
+    })
+}
+
 #[derive(Parser)]
 #[command(name = "qvault-cli")]
 #[command(about = "Quantum Vault successor migration CLI")]
