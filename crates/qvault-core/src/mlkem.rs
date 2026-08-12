@@ -12,16 +12,15 @@ pub const ML_KEM_1024_SHARED_SECRET_SIZE: usize = 32;
 
 pub fn generate_key_pair() -> Result<(Vec<u8>, Vec<u8>)> {
     let seed = secret_random_array::<64>()?;
-    generate_key_pair_inner(*seed)
+    generate_key_pair_inner(seed)
 }
 
 #[cfg(feature = "deterministic-test-vectors")]
 pub fn generate_key_pair_deterministic(seed: [u8; 64]) -> Result<(Vec<u8>, Vec<u8>)> {
-    generate_key_pair_inner(seed)
+    generate_key_pair_inner(Zeroizing::new(seed))
 }
 
-fn generate_key_pair_inner(seed: [u8; 64]) -> Result<(Vec<u8>, Vec<u8>)> {
-    let seed = Zeroizing::new(seed);
+fn generate_key_pair_inner(seed: Zeroizing<[u8; 64]>) -> Result<(Vec<u8>, Vec<u8>)> {
     let mut d = Zeroizing::new([0u8; 32]);
     let mut z = Zeroizing::new([0u8; 32]);
     d.copy_from_slice(&seed[..32]);
@@ -38,16 +37,15 @@ fn generate_key_pair_inner(seed: [u8; 64]) -> Result<(Vec<u8>, Vec<u8>)> {
 
 pub fn encapsulate(public_key: &[u8]) -> Result<(Vec<u8>, [u8; 32])> {
     let seed = secret_random_array::<32>()?;
-    encapsulate_inner(public_key, *seed)
+    encapsulate_inner(public_key, seed)
 }
 
 #[cfg(feature = "deterministic-test-vectors")]
 pub fn encapsulate_deterministic(public_key: &[u8], seed: [u8; 32]) -> Result<(Vec<u8>, [u8; 32])> {
-    encapsulate_inner(public_key, seed)
+    encapsulate_inner(public_key, Zeroizing::new(seed))
 }
 
-fn encapsulate_inner(public_key: &[u8], seed: [u8; 32]) -> Result<(Vec<u8>, [u8; 32])> {
-    let seed = Zeroizing::new(seed);
+fn encapsulate_inner(public_key: &[u8], seed: Zeroizing<[u8; 32]>) -> Result<(Vec<u8>, [u8; 32])> {
     validate_public_key(public_key)?;
     let encaps_key = ml_kem_1024::EncapsKey::try_from_bytes(
         public_key
