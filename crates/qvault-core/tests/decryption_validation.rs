@@ -149,13 +149,11 @@ fn build_test_wrapped_container(
     payload: &[u8],
     private_metadata: &WrappedPayloadPrivateMetadata,
 ) -> Result<(Vec<u8>, Vec<u8>)> {
-    let keygen_seed = [0x55u8; 64];
-    let encapsulation_seed = [0x77u8; 32];
     let container_nonce = [0x13u8; 12];
     let kdf_salt = [0x24u8; 16];
 
-    let (public_key, secret_key) = generate_key_pair(Some(keygen_seed))?;
-    let (encapsulated_key, shared_secret) = encapsulate(&public_key, Some(encapsulation_seed))?;
+    let (public_key, secret_key) = generate_key_pair()?;
+    let (encapsulated_key, shared_secret) = encapsulate(&public_key)?;
     let wrapped_payload = wrap_wrapped_payload(private_metadata, payload)?;
     let metadata = build_qenc_metadata(
         "single-container-aead",

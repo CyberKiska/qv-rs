@@ -122,8 +122,8 @@ jobs:
       - name: Clippy (warnings denied) and test workspace
         run: |
           set -euo pipefail
-          cargo clippy --workspace --all-targets --locked -- -D warnings
-          cargo test --workspace --all-targets --locked
+          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+          cargo test --workspace --all-targets --all-features --locked
 
       - name: Check 32-bit integer-width portability
         run: cargo check --workspace --all-targets --locked --target i686-unknown-linux-gnu

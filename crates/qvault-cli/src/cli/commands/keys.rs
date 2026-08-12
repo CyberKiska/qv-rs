@@ -16,7 +16,7 @@ pub(super) fn run_keygen(args: KeygenArgs, ctx: CliContext) -> Result<()> {
         ctx,
     )?;
 
-    let (public_key, private_key) = generate_key_pair(None)?;
+    let (public_key, private_key) = generate_key_pair()?;
     let private_key = Zeroizing::new(private_key);
     write_file_checked(&public_key_path, &public_key, args.force, ctx)?;
     write_secret_file_checked(&private_key_path, &private_key, args.force, ctx)?;

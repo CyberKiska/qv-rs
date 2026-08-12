@@ -5,8 +5,7 @@ use qvault_core::{
 
 #[test]
 fn encrypt_and_decrypt_multi_file_bundle_round_trip() {
-    let (public_key, secret_key) =
-        generate_key_pair(Some([0x11; 64])).expect("deterministic key pair");
+    let (public_key, secret_key) = generate_key_pair().expect("key pair");
     let bundle_name = "bundle-2026-03-07T09-08-07.qvpack".to_string();
     let bundle_payload = build_bundle_payload(&[
         BundleEntryRef {
@@ -26,9 +25,6 @@ fn encrypt_and_decrypt_multi_file_bundle_round_trip() {
         &EncryptQencOptions {
             original_filename: Some(bundle_name.clone()),
             timestamp: Some("2026-03-07T09:08:07.000Z".to_string()),
-            encapsulation_seed: Some([0x22; 32]),
-            container_nonce: Some([0x33; 12]),
-            kdf_salt: Some([0x44; 16]),
         },
     )
     .expect("encrypt bundle");

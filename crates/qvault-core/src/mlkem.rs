@@ -10,7 +10,16 @@ pub const ML_KEM_1024_SECRET_KEY_SIZE: usize = 3168;
 pub const ML_KEM_1024_ENCAPSULATED_KEY_SIZE: usize = 1568;
 pub const ML_KEM_1024_SHARED_SECRET_SIZE: usize = 32;
 
-pub fn generate_key_pair(custom_seed: Option<[u8; 64]>) -> Result<(Vec<u8>, Vec<u8>)> {
+pub fn generate_key_pair() -> Result<(Vec<u8>, Vec<u8>)> {
+    generate_key_pair_inner(None)
+}
+
+#[cfg(feature = "deterministic-test-vectors")]
+pub fn generate_key_pair_deterministic(seed: [u8; 64]) -> Result<(Vec<u8>, Vec<u8>)> {
+    generate_key_pair_inner(Some(seed))
+}
+
+fn generate_key_pair_inner(custom_seed: Option<[u8; 64]>) -> Result<(Vec<u8>, Vec<u8>)> {
     let (encaps_key, decaps_key) = match custom_seed {
         Some(mut seed) => {
             let mut d = Zeroizing::new([0u8; 32]);
@@ -36,7 +45,16 @@ pub fn generate_key_pair(custom_seed: Option<[u8; 64]>) -> Result<(Vec<u8>, Vec<
     Ok((public_key, secret_key))
 }
 
-pub fn encapsulate(public_key: &[u8], seed: Option<[u8; 32]>) -> Result<(Vec<u8>, [u8; 32])> {
+pub fn encapsulate(public_key: &[u8]) -> Result<(Vec<u8>, [u8; 32])> {
+    encapsulate_inner(public_key, None)
+}
+
+#[cfg(feature = "deterministic-test-vectors")]
+pub fn encapsulate_deterministic(public_key: &[u8], seed: [u8; 32]) -> Result<(Vec<u8>, [u8; 32])> {
+    encapsulate_inner(public_key, Some(seed))
+}
+
+fn encapsulate_inner(public_key: &[u8], seed: Option<[u8; 32]>) -> Result<(Vec<u8>, [u8; 32])> {
     validate_public_key(public_key)?;
     let encaps_key = ml_kem_1024::EncapsKey::try_from_bytes(
         public_key

@@ -4,9 +4,11 @@ use crate::aead::{
 };
 use crate::error::{coded, err, QvCode, Result};
 use crate::hash::sha3_512_hex;
-use crate::kdf::{
-    compute_key_commitment, derive_key_with_kmac, verify_key_commitment, KDF_SALT_SIZE,
-};
+#[cfg(feature = "deterministic-test-vectors")]
+use crate::kdf::KDF_SALT_SIZE;
+use crate::kdf::{compute_key_commitment, derive_key_with_kmac, verify_key_commitment};
+#[cfg(feature = "deterministic-test-vectors")]
+use crate::mlkem::encapsulate_deterministic;
 use crate::mlkem::{decapsulate, encapsulate};
 use crate::policy::validate_container_policy_metadata;
 use crate::qenc::header::{build_qenc_header, parse_qenc_header};
@@ -19,7 +21,7 @@ use crate::qenc::payload::{
 use crate::qenc::QencHeader;
 use crate::rng::fill_random;
 use time::OffsetDateTime;
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 pub const CHUNK_SIZE: usize = 8 * 1024 * 1024;
 pub const MAX_FILE_SIZE: usize = 1024 * 1024 * 1024;
@@ -54,21 +56,65 @@ impl Drop for DecryptedQenc {
 pub struct EncryptQencOptions {
     pub original_filename: Option<String>,
     pub timestamp: Option<String>,
-    /// Deterministic interoperability-test hook. Production callers must leave
-    /// this unset; reusing it with the nonce/salt tuple repeats AEAD key material.
-    pub encapsulation_seed: Option<[u8; 32]>,
-    /// Deterministic interoperability-test hook. Production callers must leave
-    /// this unset so each container receives a fresh 96-bit nonce.
-    pub container_nonce: Option<[u8; 12]>,
-    /// Deterministic interoperability-test hook. Production callers should
-    /// leave this unset and use the operating-system RNG.
-    pub kdf_salt: Option<[u8; KDF_SALT_SIZE]>,
+}
+
+/// Exact randomness for pinned interoperability vectors.
+///
+/// Enabling this type in a production build permits catastrophic AES-GCM nonce
+/// and key reuse. It is therefore available only through the non-default
+/// `deterministic-test-vectors` feature.
+#[cfg(feature = "deterministic-test-vectors")]
+#[derive(Zeroize, ZeroizeOnDrop)]
+pub struct DeterministicQencTestVectorOptions {
+    pub original_filename: Option<String>,
+    pub timestamp: Option<String>,
+    pub encapsulation_seed: [u8; 32],
+    pub container_nonce: [u8; 12],
+    pub kdf_salt: [u8; KDF_SALT_SIZE],
 }
 
 pub fn encrypt_qenc(
     file_bytes: &[u8],
     public_key: &[u8],
     options: &EncryptQencOptions,
+) -> Result<Vec<u8>> {
+    encrypt_qenc_inner(file_bytes, public_key, options, None)
+}
+
+#[cfg(feature = "deterministic-test-vectors")]
+pub fn encrypt_qenc_deterministic(
+    file_bytes: &[u8],
+    public_key: &[u8],
+    options: &DeterministicQencTestVectorOptions,
+) -> Result<Vec<u8>> {
+    let ordinary_options = EncryptQencOptions {
+        original_filename: options.original_filename.clone(),
+        timestamp: options.timestamp.clone(),
+    };
+    let randomness = DeterministicQencRandomness {
+        encapsulation_seed: options.encapsulation_seed,
+        container_nonce: options.container_nonce,
+        kdf_salt: options.kdf_salt,
+    };
+    encrypt_qenc_inner(file_bytes, public_key, &ordinary_options, Some(&randomness))
+}
+
+#[cfg(feature = "deterministic-test-vectors")]
+#[derive(Zeroize, ZeroizeOnDrop)]
+struct DeterministicQencRandomness {
+    encapsulation_seed: [u8; 32],
+    container_nonce: [u8; 12],
+    kdf_salt: [u8; KDF_SALT_SIZE],
+}
+
+fn encrypt_qenc_inner(
+    file_bytes: &[u8],
+    public_key: &[u8],
+    options: &EncryptQencOptions,
+    #[cfg(feature = "deterministic-test-vectors")] deterministic: Option<
+        &DeterministicQencRandomness,
+    >,
+    #[cfg(not(feature = "deterministic-test-vectors"))] _deterministic: Option<&()>,
 ) -> Result<Vec<u8>> {
     if file_bytes.is_empty() {
         return Err(err("fileBytes must be a non-empty Uint8Array"));
@@ -80,16 +126,28 @@ pub fn encrypt_qenc(
         )));
     }
 
-    let (encapsulated_key, shared_secret) = encapsulate(public_key, options.encapsulation_seed)?;
+    #[cfg(feature = "deterministic-test-vectors")]
+    let (encapsulated_key, shared_secret) = match deterministic {
+        Some(randomness) => encapsulate_deterministic(public_key, randomness.encapsulation_seed)?,
+        None => encapsulate(public_key)?,
+    };
+    #[cfg(not(feature = "deterministic-test-vectors"))]
+    let (encapsulated_key, shared_secret) = encapsulate(public_key)?;
     let shared_secret = Zeroizing::new(shared_secret);
-    let container_nonce = match options.container_nonce {
-        Some(container_nonce) => container_nonce,
+    #[cfg(feature = "deterministic-test-vectors")]
+    let container_nonce = match deterministic {
+        Some(randomness) => randomness.container_nonce,
         None => random_array()?,
     };
-    let kdf_salt = match options.kdf_salt {
-        Some(kdf_salt) => kdf_salt,
+    #[cfg(not(feature = "deterministic-test-vectors"))]
+    let container_nonce = random_array()?;
+    #[cfg(feature = "deterministic-test-vectors")]
+    let kdf_salt = match deterministic {
+        Some(randomness) => randomness.kdf_salt,
         None => random_array()?,
     };
+    #[cfg(not(feature = "deterministic-test-vectors"))]
+    let kdf_salt = random_array()?;
 
     let private_metadata = WrappedPayloadPrivateMetadata {
         original_filename: options.original_filename.clone(),

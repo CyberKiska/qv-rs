@@ -4,6 +4,12 @@ edition.workspace = true
 license.workspace = true
 version.workspace = true
 
+[features]
+default = []
+# Exact seeds and nonce/salt tuples are required only to reproduce pinned
+# interoperability vectors. Release builds must not enable this feature.
+deterministic-test-vectors = []
+
 [dependencies]
 # Feature anchors: AesGcm owns AES/GHASH state whose Drop zeroization is
 # implemented by these transitive crates only when their features are enabled.

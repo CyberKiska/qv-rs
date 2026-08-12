@@ -320,18 +320,16 @@ fn per_chunk_iv_counter_is_unique_big_endian_and_bounded() -> Result<()> {
 
 #[test]
 fn ml_kem_1024_lengths_are_bound_to_the_format() -> Result<()> {
-    let seed = [0x5au8; 64];
-    let encapsulation_seed = [0x33u8; 32];
-    let (public_key, secret_key) = generate_key_pair(Some(seed))?;
+    let (public_key, secret_key) = generate_key_pair()?;
     assert_eq!(public_key.len(), ML_KEM_1024_PUBLIC_KEY_SIZE);
     assert_eq!(secret_key.len(), ML_KEM_1024_SECRET_KEY_SIZE);
 
-    let (ciphertext, shared_secret) = encapsulate(&public_key, Some(encapsulation_seed))?;
+    let (ciphertext, shared_secret) = encapsulate(&public_key)?;
     assert_eq!(ciphertext.len(), ML_KEM_1024_ENCAPSULATED_KEY_SIZE);
     assert_eq!(shared_secret.len(), ML_KEM_1024_SHARED_SECRET_SIZE);
 
     let truncated_key = &public_key[..ML_KEM_1024_PUBLIC_KEY_SIZE - 1];
-    let error = encapsulate(truncated_key, Some(encapsulation_seed)).unwrap_err();
+    let error = encapsulate(truncated_key).unwrap_err();
     assert!(error
         .to_string()
         .contains("Invalid ML-KEM-1024 public key length"));

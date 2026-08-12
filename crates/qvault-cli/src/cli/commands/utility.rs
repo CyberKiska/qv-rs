@@ -57,12 +57,11 @@ pub(super) fn run_selftest(args: SelftestArgs, ctx: CliContext) -> Result<()> {
 
     let ml_kem_name = "ml-kem-keygen-encaps-decaps";
     if selftest_selected(&filter, ml_kem_name) {
-        let (public_key, private_key) = generate_key_pair(Some([0x11; 64]))?;
+        let (public_key, private_key) = generate_key_pair()?;
         let private_key = Zeroizing::new(private_key);
         validate_public_key(&public_key)?;
         validate_secret_key(&private_key)?;
-        let (ciphertext, encapsulated_secret) =
-            qvault_core::mlkem::encapsulate(&public_key, Some([0x22; 32]))?;
+        let (ciphertext, encapsulated_secret) = qvault_core::mlkem::encapsulate(&public_key)?;
         let encapsulated_secret = Zeroizing::new(encapsulated_secret);
         let decapsulated_secret =
             Zeroizing::new(qvault_core::mlkem::decapsulate(&ciphertext, &private_key)?);

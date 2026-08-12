@@ -1,3 +1,5 @@
+#![cfg(feature = "deterministic-test-vectors")]
+
 use anyhow::Result;
 use serde_json::Value;
 
@@ -6,12 +8,15 @@ mod common;
 use common::fixtures::{fixture_path, read_fixture_bytes};
 use qvault_core::aead::{derive_chunk_iv_from_k, PerChunkIvParams};
 use qvault_core::bytes::from_hex;
-use qvault_core::generate_key_pair;
+use qvault_core::generate_key_pair_deterministic;
 use qvault_core::hash::sha3_512_hex;
 use qvault_core::kdf::derive_key_with_kmac;
 use qvault_core::qenc::metadata::parse_qenc_metadata_bytes;
 use qvault_core::qenc::CHUNK_SIZE;
-use qvault_core::{decapsulate, decrypt_qenc, encrypt_qenc, parse_qenc_header, EncryptQencOptions};
+use qvault_core::{
+    decapsulate, decrypt_qenc, encrypt_qenc_deterministic, parse_qenc_header,
+    DeterministicQencTestVectorOptions,
+};
 
 fn read_fixture_json(path: impl AsRef<std::path::Path>) -> Result<Value> {
     let bytes = read_fixture_bytes(path)?;
@@ -112,7 +117,7 @@ fn per_chunk_encrypt_decrypt_roundtrip_with_oracle_seeds() -> Result<()> {
 
     let seed_hex = expectations["input"]["keygenSeedHex"].as_str().unwrap();
     let seed: [u8; 64] = from_hex(seed_hex)?.try_into().unwrap();
-    let (public_key, secret_key) = generate_key_pair(Some(seed))?;
+    let (public_key, secret_key) = generate_key_pair_deterministic(seed)?;
 
     let payload_len = expectations["payloadLength"]
         .as_u64()
@@ -133,10 +138,10 @@ fn per_chunk_encrypt_decrypt_roundtrip_with_oracle_seeds() -> Result<()> {
         .try_into()
         .map_err(|_| anyhow::anyhow!("encapsulationSeedHex length"))?;
 
-    let encrypted = encrypt_qenc(
+    let encrypted = encrypt_qenc_deterministic(
         &payload,
         &public_key,
-        &EncryptQencOptions {
+        &DeterministicQencTestVectorOptions {
             original_filename: Some(
                 expectations["input"]["originalFilename"]
                     .as_str()
@@ -144,9 +149,9 @@ fn per_chunk_encrypt_decrypt_roundtrip_with_oracle_seeds() -> Result<()> {
                     .to_string(),
             ),
             timestamp: Some(expectations["timestamp"].as_str().unwrap().to_string()),
-            encapsulation_seed: Some(encapsulation_seed),
-            container_nonce: Some(container_nonce),
-            kdf_salt: Some(kdf_salt),
+            encapsulation_seed,
+            container_nonce,
+            kdf_salt,
         },
     )?;
 
@@ -166,7 +171,7 @@ fn assert_seeded_keygen_matches_fixture(name: &str) -> Result<()> {
     let seed_hex = expectations["input"]["keygenSeedHex"].as_str().unwrap();
     let seed: [u8; 64] = from_hex(seed_hex)?.try_into().unwrap();
 
-    let (public_key, secret_key) = generate_key_pair(Some(seed))?;
+    let (public_key, secret_key) = generate_key_pair_deterministic(seed)?;
     assert_eq!(
         public_key,
         read_fixture_bytes(fixture_dir.join("public.qkey"))?
@@ -228,10 +233,10 @@ fn assert_rust_encrypt_matches_fixture(name: &str) -> Result<()> {
     .try_into()
     .unwrap();
 
-    let rust_qenc = encrypt_qenc(
+    let rust_qenc = encrypt_qenc_deterministic(
         &payload,
         &public_key,
-        &EncryptQencOptions {
+        &DeterministicQencTestVectorOptions {
             original_filename: Some(
                 expectations["input"]["originalFilename"]
                     .as_str()
@@ -239,9 +244,9 @@ fn assert_rust_encrypt_matches_fixture(name: &str) -> Result<()> {
                     .to_string(),
             ),
             timestamp: Some(expectations["timestamp"].as_str().unwrap().to_string()),
-            encapsulation_seed: Some(encapsulation_seed),
-            container_nonce: Some(container_nonce),
-            kdf_salt: Some(kdf_salt),
+            encapsulation_seed,
+            container_nonce,
+            kdf_salt,
         },
     )?;
 
