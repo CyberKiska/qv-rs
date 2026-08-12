@@ -17,6 +17,8 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   CARGO_DENY_VERSION: 0.20.2
+  QV_ORACLE_REPOSITORY: CyberKiska/quantum-vault
+  QV_ORACLE_REVISION: 485a51388d0d26ee6cae9cd4785753a12eee9d32
   # SHA-256 of EmbarkStudios/cargo-deny asset `cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl.tar.gz` (update when bumping CARGO_DENY_VERSION).
   CARGO_DENY_LINUX_MUSL_SHA256: 9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
 
@@ -126,6 +128,50 @@ jobs:
       - name: Check 32-bit integer-width portability
         run: cargo check --workspace --all-targets --locked --target i686-unknown-linux-gnu
 
+  oracle-parity:
+    name: Pinned JavaScript oracle parity
+    runs-on: ubuntu-latest
+    needs: test
+    env:
+      RUST_VERSION: ${{ needs.test.outputs.rust_version }}
+    steps:
+      - name: Checkout Rust implementation
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: qv-cli
+
+      - name: Checkout pinned JavaScript oracle
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.QV_ORACLE_REPOSITORY }}
+          ref: ${{ env.QV_ORACLE_REVISION }}
+          path: quantum-vault
+          persist-credentials: false
+
+      - name: Verify exact oracle revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual="$(git -C quantum-vault rev-parse HEAD)"
+          test "${actual}" = "${QV_ORACLE_REVISION}"
+
+      - name: Install Rust
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.3 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+          rustup toolchain install "${RUST_VERSION}" --profile minimal --no-self-update
+          rustup default "${RUST_VERSION}"
+
+      - name: Compare mirrored corpus bytes with pinned oracle
+        working-directory: qv-cli
+        env:
+          QV_ORACLE_ROOT: ${{ github.workspace }}/quantum-vault
+        run: cargo test -p qvault-core --locked --test corpus_oracle_parity corpus_bytes_match_oracle_when_qv_oracle_root_set -- --ignored --exact
+
   fuzz:
     name: Parser fuzz smoke
     runs-on: ubuntu-latest
@@ -196,7 +242,7 @@ jobs:
   build-release-linux-windows:
     name: Release binaries (Linux + Windows, ubuntu-latest)
     runs-on: ubuntu-latest
-    needs: [test, fuzz]
+    needs: [test, oracle-parity, fuzz]
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     env:
       RUST_VERSION: ${{ needs.test.outputs.rust_version }}
@@ -273,7 +319,7 @@ jobs:
   build-release-macos:
     name: Release binaries (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
-    needs: [test, fuzz]
+    needs: [test, oracle-parity, fuzz]
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     env:
       RUST_VERSION: ${{ needs.test.outputs.rust_version }}
