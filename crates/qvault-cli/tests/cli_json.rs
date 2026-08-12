@@ -835,15 +835,53 @@ fn encrypt_source_evidence_key_writes_signed_canonical_artifacts_and_attaches() 
     );
     assert_eq!(
         verify_json["verification"]["counts"]["validSourceEvidence"],
-        1
+        0
     );
     assert_eq!(verify_json["status"]["sourceEvidencePresent"], true);
     assert_eq!(
         verify_json["status"]["sourceEvidenceSignatureVerified"],
-        true
+        false
     );
     assert_eq!(
         verify_json["sourceEvidenceReport"]["verifiedSourceEvidenceSignatureCount"],
+        0
+    );
+
+    let pinned_verify = Command::new(qvault_cli())
+        .args([
+            "--json",
+            "verify",
+            split_dir
+                .join("source.pdf.archive-state.json")
+                .to_str()
+                .expect("utf8 archive state path"),
+            "--bundle",
+            attached_bundle_path
+                .to_str()
+                .expect("utf8 attached bundle path"),
+            "--pqpk",
+            source_evidence_pqpk_path
+                .to_str()
+                .expect("utf8 source-evidence pqpk path"),
+        ])
+        .output()
+        .expect("run verify attached source evidence with external pin");
+    assert!(
+        !pinned_verify.status.success(),
+        "source-evidence signatures must not satisfy strong archive approval policy"
+    );
+    let pinned_verify_json: Value =
+        serde_json::from_slice(&pinned_verify.stdout).expect("pinned verify JSON");
+    assert_eq!(
+        pinned_verify_json["verification"]["counts"]["validSourceEvidence"],
+        1
+    );
+    assert_eq!(
+        pinned_verify_json["status"]["sourceEvidenceSignatureVerified"],
+        true
+    );
+    assert_eq!(
+        pinned_verify_json["sourceEvidenceReport"]["verifiedSourceEvidenceSignatureCount"],
         1
     );
 }

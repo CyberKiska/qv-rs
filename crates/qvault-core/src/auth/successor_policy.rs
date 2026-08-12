@@ -18,7 +18,7 @@ fn self_signed_policy_warning(result: &SignatureCheckResult) -> String {
         name
     };
     format!(
-        "{label}: detached PQ signature verified only with the embedded signer key and was ignored for trust/policy because no bundled or user-pinned signer key verified."
+        "{label}: detached PQ signature verified only with an embedded signer key and was ignored for trust/policy because no externally supplied signer pin verified."
     )
 }
 
@@ -159,14 +159,12 @@ pub(crate) fn finalize_successor_lifecycle_verification(
     }
 
     for entry in by_key.values() {
-        if entry.family != "archive-approval" {
-            continue;
-        }
         match entry.first_authorized_index {
             Some(index) => results[index].counted_for_policy = true,
             None => warnings.push(format!(
-                "{}: signature verified cryptographically but no externally supplied signer pin matched; ignored for archive policy.",
-                entry.names.first().map(String::as_str).unwrap_or("unnamed signature")
+                "{}: {} signature verified cryptographically but no externally supplied signer pin matched; ignored for trusted lifecycle reporting and policy/state counting.",
+                entry.names.first().map(String::as_str).unwrap_or("unnamed signature"),
+                entry.family,
             )),
         }
     }
@@ -210,10 +208,10 @@ pub(crate) fn finalize_successor_lifecycle_verification(
         valid_source_evidence: 0,
     };
 
-    // Oracle `buildLifecycleVerificationCounts`: the policy-bearing counters
-    // (`validArchiveApproval*`) include only externally pinned entries, and the
-    // deprecated pinned/bundle/user aliases fail closed — `bundlePinnedValidTotal`
-    // stays 0 because bundle-carried keys never authorize policy.
+    // Trust-bearing family counters include only externally pinned entries. Raw
+    // cryptographic validity remains visible through `validTotal`,
+    // `validStrongPq`, and each result's `ok`; bundle-carried keys never turn a
+    // cryptographic check into trusted lifecycle evidence.
     for entry in by_key.values() {
         counts.valid_total += 1;
         if entry.strong_pq {
@@ -235,8 +233,8 @@ pub(crate) fn finalize_successor_lifecycle_verification(
                     counts.valid_archive_approval_strong_pq += 1;
                 }
             }
-            "maintenance" => counts.valid_maintenance += 1,
-            "source-evidence" => counts.valid_source_evidence += 1,
+            "maintenance" if entry.externally_pinned => counts.valid_maintenance += 1,
+            "source-evidence" if entry.externally_pinned => counts.valid_source_evidence += 1,
             _ => {}
         }
     }
@@ -351,7 +349,53 @@ mod tests {
         assert!(!results[0].counted_for_policy);
         assert!(
             warnings.iter().any(|warning| warning
-                .contains("no externally supplied signer pin matched; ignored for archive policy")),
+                .contains("ignored for trusted lifecycle reporting and policy/state counting")),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn bundle_carried_keys_never_authorize_non_policy_lifecycle_evidence() {
+        let fixture: Value = serde_json::from_slice(include_bytes!(
+            "../../tests/data/corpus/qsig/mldsa-44.valid.json"
+        ))
+        .unwrap();
+        let pqpk_fixture: Value = serde_json::from_slice(include_bytes!(
+            "../../tests/data/corpus/pqpk/mldsa-44.valid.json"
+        ))
+        .unwrap();
+        let qsig = B64.decode(fixture["bytes"].as_str().unwrap()).unwrap();
+        let pqpk = B64.decode(pqpk_fixture["bytes"].as_str().unwrap()).unwrap();
+        let message = B64
+            .decode(fixture["runtime"]["messageBytes"].as_str().unwrap())
+            .unwrap();
+
+        let mut maintenance =
+            verify_qsig_against_bytes(&message, &qsig, Some(&pqpk), None).unwrap();
+        maintenance.family = "maintenance".to_string();
+        maintenance.name = "maintenance.qsig".to_string();
+        let mut source_evidence = maintenance.clone();
+        source_evidence.family = "source-evidence".to_string();
+        source_evidence.name = "source-evidence.qsig".to_string();
+
+        let mut results = vec![maintenance, source_evidence];
+        let mut warnings = Vec::new();
+        let counts = finalize_successor_lifecycle_verification(&mut results, &mut warnings);
+
+        assert_eq!(
+            counts.valid_total, 2,
+            "both proofs are cryptographically valid"
+        );
+        assert_eq!(counts.valid_maintenance, 0);
+        assert_eq!(counts.valid_source_evidence, 0);
+        assert!(results.iter().all(|result| result.ok));
+        assert!(results.iter().all(|result| !result.counted_for_policy));
+        assert_eq!(
+            warnings
+                .iter()
+                .filter(|warning| warning.contains("ignored for trusted lifecycle reporting"))
+                .count(),
+            2,
             "{warnings:?}"
         );
     }

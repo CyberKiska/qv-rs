@@ -1766,7 +1766,7 @@ fn build_successor_transition_report(
         };
         if !signature_id.is_empty() {
             entry.0.insert(signature_id.clone());
-            if result.ok {
+            if result.counted_for_policy {
                 entry.1.insert(signature_id);
             }
         }
@@ -1878,7 +1878,7 @@ fn build_successor_source_evidence_report(
         };
         if !signature_id.is_empty() {
             entry.0.insert(signature_id.clone());
-            if result.ok {
+            if result.counted_for_policy {
                 entry.1.insert(signature_id);
             }
         }

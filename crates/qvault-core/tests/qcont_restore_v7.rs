@@ -113,10 +113,39 @@ fn restore_and_verify_report_all_successor_signature_families() -> Result<()> {
         &Default::default(),
     )?;
     assert_eq!(unpinned.verification.counts.valid_archive_approval, 0);
+    assert_eq!(unpinned.verification.counts.valid_maintenance, 0);
+    assert_eq!(unpinned.verification.counts.valid_source_evidence, 0);
     assert_eq!(unpinned.verification.counts.valid_total, 3);
     assert!(!unpinned.status.archive_approval_signature_verified);
-    assert!(unpinned.warnings.iter().any(|warning| warning
-        .contains("no externally supplied signer pin matched; ignored for archive policy")));
+    assert!(!unpinned.status.maintenance_signature_verified);
+    assert!(!unpinned.status.source_evidence_signature_verified);
+    assert_eq!(
+        unpinned
+            .transition_report
+            .records
+            .first()
+            .expect("transition report")
+            .verified_maintenance_signature_count,
+        0
+    );
+    assert_eq!(
+        unpinned
+            .source_evidence_report
+            .records
+            .first()
+            .expect("source-evidence report")
+            .verified_source_evidence_signature_count,
+        0
+    );
+    assert_eq!(
+        unpinned
+            .warnings
+            .iter()
+            .filter(|warning| warning
+                .contains("ignored for trusted lifecycle reporting and policy/state counting"))
+            .count(),
+        3
+    );
 
     let signer_pin = signer_pin_pqpk()?;
     let pinned_inputs = qvault_core::auth::VerificationInputs {
