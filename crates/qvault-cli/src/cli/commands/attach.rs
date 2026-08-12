@@ -13,22 +13,7 @@ pub(super) fn run_attach(args: AttachArgs, ctx: CliContext) -> Result<()> {
         .map(|path| read_small_artifact_checked(path, ctx, "Lifecycle bundle"))
         .transpose()
         .with_context(|| "failed to read --bundle")?;
-    let shards = args
-        .shards
-        .iter()
-        .map(|path| {
-            let bytes = Zeroizing::new(
-                read_file_checked(path, ctx)
-                    .with_context(|| format!("failed to read {}", path.display()))?,
-            );
-            parse_qvqcont7_shard(bytes.as_slice()).map_err(|error| {
-                anyhow::Error::from(coded(
-                    QvCode::InvalidFormat,
-                    format!("failed to parse shard {}: {error}", path.display()),
-                ))
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let shards = read_qcont_shards_checked(&args.shards, ctx)?;
     let source_evidence = args
         .source_evidence
         .iter()

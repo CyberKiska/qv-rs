@@ -9,6 +9,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use anyhow::{bail, Context, Result};
 use qvault_core::bytes::from_hex;
 use qvault_core::error::{coded, QvCode};
+use qvault_core::qcont::{parse_qvqcont7_shard, Qvqcont7Shard, MAX_QVQCONT7_SHARD_BYTES};
+use zeroize::Zeroizing;
 
 use super::{CliContext, DecryptArgs, RestoreArgs};
 
@@ -102,11 +104,6 @@ pub(crate) fn append_file_name_suffix(path: &Path, suffix: &str) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(file_name))
 }
 
-pub(crate) fn read_file_checked(path: &Path, ctx: CliContext) -> Result<Vec<u8>> {
-    reject_symlink_components(path, ctx.allow_symlink)?;
-    fs::read(path).with_context(|| format!("failed to read {}", path.display()))
-}
-
 pub(crate) fn read_bounded_file_checked(
     path: &Path,
     ctx: CliContext,
@@ -158,6 +155,87 @@ pub(crate) fn read_small_artifact_checked(
     label: &str,
 ) -> Result<Vec<u8>> {
     read_bounded_file_checked(path, ctx, SMALL_ARTIFACT_READ_LIMIT, label)
+}
+
+fn preflight_bounded_file_set_checked(
+    paths: &[PathBuf],
+    ctx: CliContext,
+    per_file_max_bytes: u64,
+    aggregate_max_bytes: u64,
+    label: &str,
+) -> Result<()> {
+    let mut aggregate_bytes = 0u64;
+    for path in paths {
+        reject_symlink_components(path, ctx.allow_symlink)?;
+        let file =
+            fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+        let metadata = file
+            .metadata()
+            .with_context(|| format!("failed to stat {}", path.display()))?;
+        if !metadata.is_file() {
+            bail!("{label} must be a regular file: {}", path.display());
+        }
+        if metadata.len() > per_file_max_bytes {
+            return Err(coded(
+                QvCode::UnsupportedFormat,
+                format!(
+                    "{label} exceeds per-file limit of {per_file_max_bytes} bytes: {}",
+                    path.display()
+                ),
+            )
+            .into());
+        }
+        aggregate_bytes = aggregate_bytes
+            .checked_add(metadata.len())
+            .filter(|total| *total <= aggregate_max_bytes)
+            .ok_or_else(|| {
+                coded(
+                    QvCode::UnsupportedFormat,
+                    format!(
+                        "{label} input set exceeds aggregate limit of {aggregate_max_bytes} bytes"
+                    ),
+                )
+            })?;
+    }
+    Ok(())
+}
+
+pub(crate) fn read_qcont_shards_checked(
+    paths: &[PathBuf],
+    ctx: CliContext,
+) -> Result<Vec<Qvqcont7Shard>> {
+    let per_file_max = MAX_QVQCONT7_SHARD_BYTES as u64;
+    preflight_bounded_file_set_checked(
+        paths,
+        ctx,
+        per_file_max,
+        ctx.max_shard_input_bytes,
+        "QVqcont shard",
+    )?;
+
+    let mut remaining = ctx.max_shard_input_bytes;
+    let mut shards = Vec::new();
+    shards
+        .try_reserve_exact(paths.len())
+        .map_err(|_| anyhow::anyhow!("unable to allocate shard input list"))?;
+    for path in paths {
+        let read_limit = per_file_max.min(remaining);
+        let bytes = Zeroizing::new(
+            read_bounded_file_checked(path, ctx, read_limit, "QVqcont shard")
+                .with_context(|| format!("failed to read {}", path.display()))?,
+        );
+        remaining = remaining
+            .checked_sub(bytes.len() as u64)
+            .ok_or_else(|| anyhow::anyhow!("QVqcont aggregate input budget exhausted"))?;
+        let shard = parse_qvqcont7_shard(bytes.as_slice()).map_err(|error| {
+            anyhow::Error::from(coded(
+                QvCode::InvalidFormat,
+                format!("failed to parse shard {}: {error}", path.display()),
+            ))
+        })?;
+        shards.push(shard);
+    }
+    Ok(shards)
 }
 
 pub(crate) fn write_file_checked(
@@ -488,6 +566,7 @@ pub(crate) fn restore_shard_paths(args: &RestoreArgs) -> Result<Vec<PathBuf>> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::DEFAULT_MAX_SHARD_INPUT_BYTES;
     use super::*;
 
     #[cfg(unix)]
@@ -512,6 +591,7 @@ mod tests {
             json: false,
             quiet: true,
             allow_symlink: false,
+            max_shard_input_bytes: DEFAULT_MAX_SHARD_INPUT_BYTES,
         };
 
         write_secret_file_checked(&path, b"first-secret", false, ctx)?;
@@ -537,6 +617,7 @@ mod tests {
             json: false,
             quiet: true,
             allow_symlink: false,
+            max_shard_input_bytes: DEFAULT_MAX_SHARD_INPUT_BYTES,
         };
 
         write_file_checked(&path, b"first", false, ctx)?;
@@ -572,6 +653,7 @@ mod tests {
             json: false,
             quiet: true,
             allow_symlink: true,
+            max_shard_input_bytes: DEFAULT_MAX_SHARD_INPUT_BYTES,
         };
 
         write_secret_file_checked(&output, b"new-secret", true, ctx)?;
@@ -589,6 +671,41 @@ mod tests {
         let first = PathBuf::from("outputs/archive.qenc");
         let alias = PathBuf::from("outputs/./nested/../archive.qenc");
         assert!(ensure_distinct_output_paths(&[first, alias]).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_file_set_rejects_per_file_and_aggregate_limits_before_reading() -> Result<()> {
+        let dir = unique_test_dir("bounded-input-set");
+        fs::create_dir(&dir)?;
+        let first = dir.join("first.qcont");
+        let second = dir.join("second.qcont");
+        fs::write(&first, [0u8; 8])?;
+        fs::write(&second, [0u8; 7])?;
+        let ctx = CliContext {
+            json: false,
+            quiet: true,
+            allow_symlink: false,
+            max_shard_input_bytes: DEFAULT_MAX_SHARD_INPUT_BYTES,
+        };
+
+        let per_file_error = preflight_bounded_file_set_checked(
+            std::slice::from_ref(&first),
+            ctx,
+            7,
+            100,
+            "test artifact",
+        )
+        .expect_err("per-file limit must fail");
+        assert!(per_file_error.to_string().contains("per-file limit"));
+
+        let aggregate_error =
+            preflight_bounded_file_set_checked(&[first, second], ctx, 8, 14, "test artifact")
+                .expect_err("aggregate limit must fail");
+        assert!(aggregate_error.to_string().contains("aggregate limit"));
+
+        fs::remove_dir_all(&dir)?;
+        Ok(())
     }
 
     #[cfg(unix)]

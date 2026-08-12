@@ -11,8 +11,13 @@ pub(super) fn run_split(args: SplitArgs, ctx: CliContext) -> Result<()> {
         bail!("--min-valid-signatures must be a positive integer");
     }
 
-    let qenc_bytes = read_file_checked(&args.input_qenc, ctx)
-        .with_context(|| format!("failed to read {}", args.input_qenc.display()))?;
+    let qenc_bytes = read_bounded_file_checked(
+        &args.input_qenc,
+        ctx,
+        MAX_QENC_CONTAINER_SIZE as u64,
+        "QENC container",
+    )
+    .with_context(|| format!("failed to read {}", args.input_qenc.display()))?;
     let private_key = Zeroizing::new(
         read_small_artifact_checked(&args.private_key, ctx, "ML-KEM private key")
             .with_context(|| format!("failed to read {}", args.private_key.display()))?,

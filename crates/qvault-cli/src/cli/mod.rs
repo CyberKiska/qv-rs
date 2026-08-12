@@ -42,8 +42,9 @@ use qvault_core::qcont::{
     AttachLifecycleOptions, LifecycleSignatureFamily, LifecycleSignatureImport,
     LifecycleSourceEvidenceImport, Qvqcont7BuildOptions, Qvqcont7BuildParams,
     ReshareSameStateOptions, ReshareSameStateParams, ReshareTransitionOptions,
-    RestoreQvqcont7Options, RestoreQvqcont7Selection,
+    RestoreQvqcont7Options, RestoreQvqcont7Selection, MAX_QVQCONT7_SHARD_BYTES,
 };
+use qvault_core::qenc::{MAX_FILE_SIZE, MAX_QENC_CONTAINER_SIZE};
 use qvault_core::{
     current_iso8601_utc_millis, decrypt_qenc, encrypt_qenc, generate_key_pair,
     parse_bundle_payload, parse_qenc_header, EncryptQencOptions,
@@ -52,6 +53,9 @@ use serde_json::Value;
 use zeroize::{Zeroize, Zeroizing};
 
 const MAX_SIGNED_TARGET_BYTES: u64 = 512 * 1024 * 1024;
+const DEFAULT_MAX_SHARD_INPUT_BYTES: u64 = 1024 * 1024 * 1024;
+const MAX_CONFIGURABLE_SHARD_INPUT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const MAX_GENERIC_ARTIFACT_INPUT_BYTES: u64 = MAX_QVQCONT7_SHARD_BYTES as u64;
 
 #[derive(Parser)]
 #[command(name = "qvault-cli")]
@@ -71,6 +75,14 @@ struct Cli {
     no_color: bool,
     #[arg(long, global = true, help = "Accept color opt-in for JS CLI parity")]
     color: bool,
+    #[arg(
+        long,
+        global = true,
+        default_value_t = DEFAULT_MAX_SHARD_INPUT_BYTES,
+        value_parser = clap::value_parser!(u64).range(1..=MAX_CONFIGURABLE_SHARD_INPUT_BYTES),
+        help = "Aggregate QVqcont shard input budget in bytes (maximum 2 GiB)"
+    )]
+    max_shard_input_bytes: u64,
     #[command(subcommand)]
     command: Command,
 }
@@ -99,6 +111,7 @@ struct CliContext {
     json: bool,
     quiet: bool,
     allow_symlink: bool,
+    max_shard_input_bytes: u64,
 }
 
 #[derive(Parser)]
@@ -574,6 +587,7 @@ pub fn main() -> Result<()> {
         json: cli.json,
         quiet: cli.quiet,
         allow_symlink: cli.allow_symlink,
+        max_shard_input_bytes: cli.max_shard_input_bytes,
     };
     let _color_flags_accepted = (cli.color, cli.no_color);
     commands::run(cli.command, ctx)

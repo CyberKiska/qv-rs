@@ -22,6 +22,7 @@ pub use restore_v7::{
 pub use shard_v7::{
     build_qvqcont7_shard, parse_qvqcont7_shard, Qvqcont7Shard, LIFECYCLE_ARTIFACT_FAMILY,
     LIFECYCLE_QCONT_FORMAT_VERSION, LIFECYCLE_QCONT_MAGIC, LIFECYCLE_QCONT_MIN_HEADER_BYTES,
+    MAX_QVQCONT7_SHARD_BYTES,
 };
 pub use split_v7::{
     build_qvqcont7_shards, BuiltQvqcont7Shard, BuiltQvqcont7Shards, Qvqcont7BuildOptions,

@@ -20,22 +20,7 @@ pub(super) fn run_reshare(args: ReshareArgs, ctx: CliContext) -> Result<()> {
             .map(|artifact| artifact.bytes)
             .collect::<Vec<_>>();
     let maintenance_timestamps = load_named_artifacts(&args.maintenance_timestamps, ctx)?;
-    let predecessor_shards = args
-        .shards
-        .iter()
-        .map(|path| {
-            let bytes = Zeroizing::new(
-                read_file_checked(path, ctx)
-                    .with_context(|| format!("failed to read {}", path.display()))?,
-            );
-            parse_qvqcont7_shard(bytes.as_slice()).map_err(|error| {
-                anyhow::Error::from(coded(
-                    QvCode::InvalidFormat,
-                    format!("failed to parse shard {}: {error}", path.display()),
-                ))
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let predecessor_shards = read_qcont_shards_checked(&args.shards, ctx)?;
     let lifecycle_bundle_bytes = args
         .bundle
         .as_ref()

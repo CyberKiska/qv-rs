@@ -21,6 +21,11 @@ pub const MAX_META_LEN: usize = 65_535;
 /// cohort reader enforces (`lifecycle-cohort-shared.js`).
 pub const MAX_QENC_META_LEN: usize = 4096;
 pub const MAX_ARTIFACT_LEN: usize = 16 * 1024 * 1024;
+/// Maximum complete shard size accepted by the in-memory parser. The allowance
+/// above the QENC ceiling covers the three bounded lifecycle artifacts and all
+/// fixed/variable shard framing without permitting arbitrary trailing payloads.
+pub const MAX_QVQCONT7_SHARD_BYTES: usize =
+    crate::qenc::MAX_QENC_CONTAINER_SIZE + (64 * 1024 * 1024);
 pub const LIFECYCLE_QCONT_MIN_HEADER_BYTES: usize =
     4 + 2 + 4 + DIGEST_LEN + 4 + DIGEST_LEN + 4 + DIGEST_LEN + 4 + 12 + 16 + 2 + 1 + 2 + 2;
 
@@ -75,6 +80,11 @@ impl Drop for Qvqcont7Shard {
 }
 
 pub fn parse_qvqcont7_shard(bytes: &[u8]) -> Result<Qvqcont7Shard> {
+    if bytes.len() > MAX_QVQCONT7_SHARD_BYTES {
+        return Err(err(format!(
+            "Shard exceeds maximum supported size ({MAX_QVQCONT7_SHARD_BYTES} bytes)"
+        )));
+    }
     if bytes.len() < LIFECYCLE_QCONT_MIN_HEADER_BYTES {
         return Err(err("Shard is too small to contain a valid header"));
     }

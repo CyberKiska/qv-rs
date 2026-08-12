@@ -5,7 +5,7 @@ pub mod payload;
 
 pub use crypto::{
     current_iso8601_utc_millis, decrypt_qenc, encrypt_qenc, DecryptedQenc, EncryptQencOptions,
-    CHUNK_SIZE, MAX_FILE_SIZE,
+    CHUNK_SIZE, MAX_FILE_SIZE, MAX_QENC_CONTAINER_SIZE,
 };
 pub use header::{build_qenc_header, parse_qenc_header, QencHeader};
 pub use metadata::{

@@ -3,6 +3,7 @@ use crate::error::{err, Result};
 use crate::kdf::KDF_SALT_SIZE;
 use crate::mlkem::ML_KEM_1024_ENCAPSULATED_KEY_SIZE;
 use crate::qenc::metadata::{authenticated_geometry, parse_qenc_metadata_bytes, QencMetadata};
+use crate::qenc::MAX_QENC_CONTAINER_SIZE;
 
 pub const MAGIC: &[u8; 4] = b"QVv1";
 pub const KEY_COMMITMENT_SIZE: usize = 32;
@@ -65,6 +66,11 @@ pub fn build_qenc_header(
 }
 
 pub fn parse_qenc_header(container_bytes: &[u8]) -> Result<QencHeader> {
+    if container_bytes.len() > MAX_QENC_CONTAINER_SIZE {
+        return Err(err(format!(
+            "QENC container exceeds maximum supported size ({MAX_QENC_CONTAINER_SIZE} bytes)"
+        )));
+    }
     if container_bytes.len() < MINIMAL_CONTAINER_SIZE {
         return Err(err(format!(
             "File is too small to be a valid container (size: {} B).",

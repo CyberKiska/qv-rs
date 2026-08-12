@@ -11,8 +11,13 @@ pub(super) fn run_encrypt(args: EncryptArgs, ctx: CliContext) -> Result<()> {
     }
 
     let plaintext = Zeroizing::new(
-        read_file_checked(&args.input_file, ctx)
-            .with_context(|| format!("failed to read {}", args.input_file.display()))?,
+        read_bounded_file_checked(
+            &args.input_file,
+            ctx,
+            MAX_FILE_SIZE as u64,
+            "Plaintext input",
+        )
+        .with_context(|| format!("failed to read {}", args.input_file.display()))?,
     );
     let public_key = read_small_artifact_checked(&args.public_key, ctx, "ML-KEM public key")
         .with_context(|| format!("failed to read {}", args.public_key.display()))?;
@@ -324,8 +329,13 @@ pub(super) fn run_decrypt(args: DecryptArgs, ctx: CliContext) -> Result<()> {
     if args.out.is_some() && (args.out_dir.is_some() || args.use_original_filename) {
         bail!("decrypt accepts --out or --out-dir/--use-original-filename, not both");
     }
-    let qenc_bytes = read_file_checked(&args.input_qenc, ctx)
-        .with_context(|| format!("failed to read {}", args.input_qenc.display()))?;
+    let qenc_bytes = read_bounded_file_checked(
+        &args.input_qenc,
+        ctx,
+        MAX_QENC_CONTAINER_SIZE as u64,
+        "QENC container",
+    )
+    .with_context(|| format!("failed to read {}", args.input_qenc.display()))?;
     let private_key = Zeroizing::new(
         read_small_artifact_checked(&args.private_key, ctx, "ML-KEM private key")
             .with_context(|| format!("failed to read {}", args.private_key.display()))?,

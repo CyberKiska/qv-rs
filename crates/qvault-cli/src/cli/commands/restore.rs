@@ -26,21 +26,7 @@ pub(super) fn run_restore(args: RestoreArgs, ctx: CliContext) -> Result<()> {
     let timestamps = load_named_artifacts(&args.timestamps, ctx)?;
     let pinned_pq_public_key_file_bytes_list = select_distinct_pinned_pqpks(&pq_public_keys);
 
-    let shards = shard_paths
-        .iter()
-        .map(|path| {
-            let bytes = Zeroizing::new(
-                read_file_checked(path, ctx)
-                    .with_context(|| format!("failed to read {}", path.display()))?,
-            );
-            parse_qvqcont7_shard(bytes.as_slice()).map_err(|error| {
-                anyhow::Error::from(coded(
-                    QvCode::InvalidFormat,
-                    format!("failed to parse shard {}: {error}", path.display()),
-                ))
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let shards = read_qcont_shards_checked(&shard_paths, ctx)?;
 
     let mut restored = restore_qvqcont7_from_shards(
         &shards,

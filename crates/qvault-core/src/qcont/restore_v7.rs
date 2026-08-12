@@ -29,13 +29,16 @@ use crate::mlkem::decapsulate;
 use crate::policy::validate_container_policy_metadata;
 use crate::qcont::shard_v7::Qvqcont7Shard;
 use crate::qenc::metadata::{authenticated_geometry, AuthenticatedGeometry};
-use crate::qenc::{build_qenc_header, parse_qenc_header, parse_qenc_metadata_bytes, QencMetadata};
+use crate::qenc::{
+    build_qenc_header, parse_qenc_header, parse_qenc_metadata_bytes, QencMetadata,
+    MAX_QENC_CONTAINER_SIZE,
+};
 use crate::sss::combine_shares;
 
 const RS_MAX_CODEWORD: usize = 255;
 /// Oracle `MAX_RECONSTRUCTED_CIPHERTEXT_BYTES`: a fixed reconstruction ceiling
 /// (1 GiB + 1 MiB) enforced independently of allocator behavior.
-const MAX_RECONSTRUCTED_CIPHERTEXT_BYTES: u64 = (1024 * 1024 * 1024) + (1024 * 1024);
+const MAX_RECONSTRUCTED_CIPHERTEXT_BYTES: u64 = MAX_QENC_CONTAINER_SIZE as u64;
 type MaintenanceSignatureEvidence = (BTreeSet<String>, BTreeSet<String>, BTreeSet<String>);
 type SignatureDigestEvidence = (BTreeSet<String>, BTreeSet<String>);
 
@@ -791,23 +794,27 @@ fn reconstruct_lifecycle_cohort_material<'a>(
                 ));
             }
         }
-        let mut encoded = Vec::with_capacity(n);
-        for fragments in &valid_fragments_by_index {
-            if let Some(fragments) = fragments {
-                encoded.push(fragments[chunk_index].clone());
-            } else {
-                encoded.push(try_zeroed_vec(expected_frag_len)?);
-            }
-        }
-        let recombined =
-            erasure::recombine(&encoded, this_len, k, allowed_failures, rs_encode_base).map_err(
-                |error| {
-                    coded(
-                        QvCode::RestoreFailed,
-                        format!("RS recombination failed on chunk {chunk_index}: {error}"),
-                    )
-                },
-            )?;
+        let encoded = valid_fragments_by_index
+            .iter()
+            .map(|fragments| {
+                fragments
+                    .as_ref()
+                    .map(|fragments| fragments[chunk_index].as_slice())
+            })
+            .collect::<Vec<_>>();
+        let recombined = erasure::recombine_with_missing(
+            &encoded,
+            this_len,
+            k,
+            allowed_failures,
+            rs_encode_base,
+        )
+        .map_err(|error| {
+            coded(
+                QvCode::RestoreFailed,
+                format!("RS recombination failed on chunk {chunk_index}: {error}"),
+            )
+        })?;
         ciphertext.extend_from_slice(&recombined);
         if !is_per_chunk {
             break;
@@ -979,18 +986,6 @@ fn redundant_shard_metadata_mismatches(
     expected_numbers.iter().any(|(field, expected)| {
         shard.meta_json.get(*field).and_then(Value::as_u64) != Some(*expected)
     }) || shard.meta_json.get("containerId").and_then(Value::as_str) != Some(container_id)
-}
-
-fn try_zeroed_vec(len: usize) -> Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    bytes.try_reserve_exact(len).map_err(|_| {
-        coded(
-            QvCode::InvalidFormat,
-            "Unable to allocate RS erasure fragment",
-        )
-    })?;
-    bytes.resize(len, 0);
-    Ok(bytes)
 }
 
 fn parse_fragment_stream(bytes: &[u8], chunk_count: usize) -> Result<Vec<Vec<u8>>> {

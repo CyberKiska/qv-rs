@@ -354,13 +354,41 @@ pub fn recombine(
     allowed_failures: usize,
     max_codeword: usize,
 ) -> Result<Vec<u8>> {
+    let encoded = encoded
+        .iter()
+        .map(|fragment| Some(fragment.as_slice()))
+        .collect::<Vec<_>>();
+    recombine_with_missing(
+        &encoded,
+        truncate_to,
+        original_blobs,
+        allowed_failures,
+        max_codeword,
+    )
+}
+
+/// Recombine Reed-Solomon fragments without allocating full-sized zero buffers
+/// for known-missing shards. Missing fragments are synthesized one small codec
+/// block at a time.
+pub fn recombine_with_missing(
+    encoded: &[Option<&[u8]>],
+    truncate_to: usize,
+    original_blobs: usize,
+    allowed_failures: usize,
+    max_codeword: usize,
+) -> Result<Vec<u8>> {
     let layout = checked_layout(original_blobs, allowed_failures, max_codeword)?;
     if encoded.len() != layout.n {
         return Err(err("Encoded fragment count does not match RS n"));
     }
-    let total_fragment_size = encoded[0].len();
+    let total_fragment_size = encoded
+        .iter()
+        .flatten()
+        .next()
+        .ok_or_else(|| err("At least one encoded fragment must be present"))?
+        .len();
 
-    for fragment in encoded.iter().skip(1) {
+    for fragment in encoded.iter().flatten() {
         if fragment.len() != total_fragment_size {
             return Err(err("Encoded fragments must all have the same length"));
         }
@@ -389,7 +417,10 @@ pub fn recombine(
             let end = offset
                 .checked_add(layout.symbol_size)
                 .ok_or_else(|| err("Reed-Solomon fragment offset overflow"))?;
-            block.extend_from_slice(&fragment[offset..end]);
+            match fragment {
+                Some(fragment) => block.extend_from_slice(&fragment[offset..end]),
+                None => block.resize(block.len() + layout.symbol_size, 0),
+            }
         }
         let decoded = decode(&block, layout.n_ec)?;
         out.extend_from_slice(&decoded[..layout.input_size]);

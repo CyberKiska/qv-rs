@@ -23,6 +23,9 @@ use zeroize::{Zeroize, Zeroizing};
 
 pub const CHUNK_SIZE: usize = 8 * 1024 * 1024;
 pub const MAX_FILE_SIZE: usize = 1024 * 1024 * 1024;
+/// Maximum complete QENC container size, including wrapped metadata, header,
+/// and per-chunk authentication tags.
+pub const MAX_QENC_CONTAINER_SIZE: usize = MAX_FILE_SIZE + (1024 * 1024);
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct DecryptedQenc {

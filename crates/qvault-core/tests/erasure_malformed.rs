@@ -1,4 +1,4 @@
-use qvault_core::erasure::{recombine, split};
+use qvault_core::erasure::{recombine, recombine_with_missing, split};
 use qvault_core::hash::sha3_512_hex;
 
 use proptest::prelude::*;
@@ -38,6 +38,21 @@ fn reed_solomon_zero_pads_a_short_final_block_like_the_js_codec() {
         ]
     );
     let restored = recombine(&fragments, input.len(), 3, 1, 255).expect("recombine");
+    assert_eq!(restored, input);
+}
+
+#[test]
+fn reed_solomon_reconstructs_missing_fragments_without_full_zero_buffers() {
+    let input = (0..600).map(|value| value as u8).collect::<Vec<_>>();
+    let fragments = split(&input, 3, 1, 255).expect("split input");
+    let available = fragments
+        .iter()
+        .enumerate()
+        .map(|(index, fragment)| (index != 1).then_some(fragment.as_slice()))
+        .collect::<Vec<_>>();
+
+    let restored = recombine_with_missing(&available, input.len(), 3, 1, 255)
+        .expect("recover one missing fragment");
     assert_eq!(restored, input);
 }
 
