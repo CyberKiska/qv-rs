@@ -147,8 +147,6 @@ fn build_fixture_split() -> Result<qvault_core::qcont::BuiltQvqcont7Shards> {
         SECRET_KEY_BYTES,
         Qvqcont7BuildParams { n: 5, k: 3 },
         &Qvqcont7BuildOptions {
-            archive_id: Some("31".repeat(32)),
-            sss_random_bytes: Some(vec![0x42; 10_000]),
             auth_policy_level: Some(AuthPolicyLevel::IntegrityOnly),
             min_valid_signatures: Some(1),
             ..Qvqcont7BuildOptions::default()

@@ -43,6 +43,8 @@ pub use digests::{
     Sha3_256Digest, Sha3_512Digest, AUTH_POLICY_COMMITMENT_ALG, SHA256_ALG, SHA3_256_ALG,
     SHA3_512_ALG,
 };
+#[cfg(feature = "deterministic-test-vectors")]
+pub use identity::generate_archive_id_deterministic;
 pub use identity::{
     canonicalize_cohort_id_preimage, derive_cohort_id, generate_archive_id,
     CanonicalCohortIdPreimage, CohortIdPreimage,

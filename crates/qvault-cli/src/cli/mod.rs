@@ -228,12 +228,16 @@ struct SplitArgs {
     force: bool,
     #[arg(long, help = "PQ signing secret key (.pqsk) for archive approval")]
     archive_approval_key: Option<PathBuf>,
+    #[cfg(feature = "deterministic-test-vectors")]
     #[arg(long, hide = true, value_parser = parse_archive_id_selector)]
     archive_id: Option<String>,
+    #[cfg(feature = "deterministic-test-vectors")]
     #[arg(long, hide = true)]
     archive_id_random: Option<String>,
+    #[cfg(feature = "deterministic-test-vectors")]
     #[arg(long, hide = true, value_parser = parse_state_id_selector)]
     parent_state_id: Option<String>,
+    #[cfg(feature = "deterministic-test-vectors")]
     #[arg(long, hide = true)]
     state_type: Option<String>,
 }

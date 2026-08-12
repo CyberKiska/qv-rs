@@ -13,6 +13,27 @@ fn qvault_cli() -> &'static str {
     env!("CARGO_BIN_EXE_qvault-cli")
 }
 
+#[cfg(not(feature = "deterministic-test-vectors"))]
+#[test]
+fn production_cli_does_not_expose_deterministic_split_inputs() {
+    let output = Command::new(qvault_cli())
+        .args([
+            "--json",
+            "split",
+            "--archive-id",
+            "3131313131313131313131313131313131313131313131313131313131313131",
+        ])
+        .output()
+        .expect("run split argument parser");
+    assert!(!output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).expect("JSON usage error");
+    assert_eq!(report["qvCode"], "USAGE");
+    assert!(report["error"]
+        .as_str()
+        .expect("error text")
+        .contains("unexpected argument '--archive-id'"));
+}
+
 fn unique_temp_path(name: &str) -> std::path::PathBuf {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)

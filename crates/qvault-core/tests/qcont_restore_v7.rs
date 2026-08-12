@@ -22,7 +22,7 @@ const SECRET_KEY_BYTES: &[u8] = include_bytes!("data/split_v7/single-small.secre
 
 #[test]
 fn restore_v7_reconstructs_successor_qenc_and_private_key() -> Result<()> {
-    let built = build_fixture_split(vec![0x42; 10_000])?;
+    let built = build_fixture_split()?;
     let shards = parse_built_shards(&built)?;
     let restored = restore_qvqcont7_from_shards(&shards, &RestoreQvqcont7Options::default())?;
 
@@ -45,8 +45,8 @@ fn restore_v7_reconstructs_successor_qenc_and_private_key() -> Result<()> {
 
 #[test]
 fn restore_v7_fails_closed_on_ambiguous_same_state_cohorts() -> Result<()> {
-    let first = build_fixture_split(vec![0x42; 10_000])?;
-    let second = build_fixture_split(vec![0x24; 10_000])?;
+    let first = build_fixture_split()?;
+    let second = build_fixture_split_preserving(&first.archive_state_bytes)?;
     assert_eq!(first.archive_id, second.archive_id);
     assert_eq!(first.state_id, second.state_id);
     assert_ne!(first.cohort_id, second.cohort_id);
@@ -85,8 +85,6 @@ fn restore_v7_enforces_archive_policy() -> Result<()> {
         SECRET_KEY_BYTES,
         Qvqcont7BuildParams { n: 5, k: 3 },
         &Qvqcont7BuildOptions {
-            archive_id: Some("31".repeat(32)),
-            sss_random_bytes: Some(vec![0x55; 10_000]),
             auth_policy_level: Some(AuthPolicyLevel::StrongPqSignature),
             min_valid_signatures: Some(1),
             ..Qvqcont7BuildOptions::default()
@@ -101,7 +99,7 @@ fn restore_v7_enforces_archive_policy() -> Result<()> {
 
 #[test]
 fn restore_and_verify_report_all_successor_signature_families() -> Result<()> {
-    let built = build_fixture_split(vec![0x42; 10_000])?;
+    let built = build_fixture_split()?;
     let signed_bundle = build_signed_lifecycle_bundle_all_families(&built)?;
 
     // Without an externally supplied pin the approval stays cryptographically
@@ -213,7 +211,7 @@ fn restore_and_verify_report_all_successor_signature_families() -> Result<()> {
 
 #[test]
 fn restore_v7_tolerates_one_corrupted_shard_under_rs_policy() -> Result<()> {
-    let built = build_fixture_split(vec![0x42; 10_000])?;
+    let built = build_fixture_split()?;
     let mut shards = parse_built_shards(&built)?;
     shards[0].share[0] ^= 0x80;
 
@@ -226,7 +224,7 @@ fn restore_v7_tolerates_one_corrupted_shard_under_rs_policy() -> Result<()> {
 
 #[test]
 fn restore_v7_rejects_mismatched_bundle_bytes_and_selected_digest() -> Result<()> {
-    let built = build_fixture_split(vec![0x42; 10_000])?;
+    let built = build_fixture_split()?;
     let shards = parse_built_shards(&built)?;
     let error = restore_qvqcont7_from_shards(
         &shards,
@@ -246,7 +244,7 @@ fn restore_v7_rejects_mismatched_bundle_bytes_and_selected_digest() -> Result<()
 
 #[test]
 fn restore_v7_ignores_uncommitted_allocation_geometry() -> Result<()> {
-    let built = build_fixture_split(vec![0x42; 10_000])?;
+    let built = build_fixture_split()?;
     let mut shards = parse_built_shards(&built)?;
     let metadata = shards[0]
         .meta_json
@@ -274,7 +272,7 @@ fn restore_v7_ignores_uncommitted_allocation_geometry() -> Result<()> {
 
 #[test]
 fn restore_v7_treats_private_key_hash_metadata_as_diagnostic() -> Result<()> {
-    let built = build_fixture_split(vec![0x42; 10_000])?;
+    let built = build_fixture_split()?;
     let mut shards = parse_built_shards(&built)?;
     shards[0]
         .meta_json
@@ -300,8 +298,6 @@ fn restore_v7_validates_shares_and_fragments_independently() -> Result<()> {
         SECRET_KEY_BYTES,
         Qvqcont7BuildParams { n: 6, k: 2 },
         &Qvqcont7BuildOptions {
-            archive_id: Some("31".repeat(32)),
-            sss_random_bytes: Some(vec![0x55; 20_000]),
             auth_policy_level: Some(AuthPolicyLevel::IntegrityOnly),
             min_valid_signatures: Some(1),
             ..Qvqcont7BuildOptions::default()
@@ -324,7 +320,7 @@ fn restore_v7_validates_shares_and_fragments_independently() -> Result<()> {
 
 #[test]
 fn restore_v7_rejects_unregistered_qenc_domain_strings() -> Result<()> {
-    let built = build_fixture_split(vec![0x42; 10_000])?;
+    let built = build_fixture_split()?;
     let mut shards = parse_built_shards(&built)?;
     let mut metadata = parse_qenc_metadata_bytes(&shards[0].qenc_meta_bytes)?;
     metadata.domain_strings.kdf = "quantum-vault:kdf:unregistered".to_string();
@@ -567,20 +563,41 @@ fn set_object_field(value: &mut Value, key: &str, replacement: Value) {
         .insert(key.to_string(), replacement);
 }
 
-fn build_fixture_split(
-    sss_random_bytes: Vec<u8>,
-) -> Result<qvault_core::qcont::BuiltQvqcont7Shards> {
+fn build_fixture_split() -> Result<qvault_core::qcont::BuiltQvqcont7Shards> {
     build_qvqcont7_shards(
         QENC_BYTES,
         SECRET_KEY_BYTES,
         Qvqcont7BuildParams { n: 5, k: 3 },
         &Qvqcont7BuildOptions {
-            archive_id: Some("31".repeat(32)),
-            sss_random_bytes: Some(sss_random_bytes),
             auth_policy_level: Some(AuthPolicyLevel::IntegrityOnly),
             min_valid_signatures: Some(1),
             ..Qvqcont7BuildOptions::default()
         },
+    )
+    .map_err(Into::into)
+}
+
+fn build_fixture_split_preserving(
+    archive_state_bytes: &[u8],
+) -> Result<qvault_core::qcont::BuiltQvqcont7Shards> {
+    #[cfg(feature = "deterministic-test-vectors")]
+    let options = Qvqcont7BuildOptions {
+        preserved_archive_state_bytes: Some(archive_state_bytes.to_vec()),
+        auth_policy_level: Some(AuthPolicyLevel::IntegrityOnly),
+        min_valid_signatures: Some(1),
+        ..Qvqcont7BuildOptions::default()
+    };
+    #[cfg(not(feature = "deterministic-test-vectors"))]
+    let options = Qvqcont7BuildOptions {
+        preserved_archive_state_bytes: Some(archive_state_bytes.to_vec()),
+        auth_policy_level: Some(AuthPolicyLevel::IntegrityOnly),
+        min_valid_signatures: Some(1),
+    };
+    build_qvqcont7_shards(
+        QENC_BYTES,
+        SECRET_KEY_BYTES,
+        Qvqcont7BuildParams { n: 5, k: 3 },
+        &options,
     )
     .map_err(Into::into)
 }

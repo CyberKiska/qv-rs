@@ -1,4 +1,6 @@
-use anyhow::{Context, Result};
+#[cfg(feature = "deterministic-test-vectors")]
+use anyhow::Context;
+use anyhow::Result;
 use qvault_core::auth::AuthPolicyLevel;
 use qvault_core::lifecycle::{
     parse_archive_state_descriptor_bytes, parse_cohort_binding_bytes, parse_lifecycle_bundle_bytes,
@@ -7,6 +9,7 @@ use qvault_core::qcont::{
     build_qvqcont7_shards, parse_qvqcont7_shard, Qvqcont7BuildOptions, Qvqcont7BuildParams,
     LIFECYCLE_ARTIFACT_FAMILY, LIFECYCLE_QCONT_FORMAT_VERSION,
 };
+#[cfg(feature = "deterministic-test-vectors")]
 use serde_json::Value;
 
 const QENC_BYTES: &[u8] = include_bytes!("data/split_v7/single-small.qenc");
@@ -54,6 +57,7 @@ fn split_v7_builds_successor_artifacts_and_parseable_shards() -> Result<()> {
 }
 
 #[test]
+#[cfg(feature = "deterministic-test-vectors")]
 fn split_v7_archive_state_matches_js_successor_fixture() -> Result<()> {
     let built = build_fixture_split()?;
     let expected: Value = serde_json::from_str(include_str!(
@@ -95,8 +99,8 @@ fn build_fixture_split() -> Result<qvault_core::qcont::BuiltQvqcont7Shards> {
         SECRET_KEY_BYTES,
         Qvqcont7BuildParams { n: 5, k: 3 },
         &Qvqcont7BuildOptions {
+            #[cfg(feature = "deterministic-test-vectors")]
             archive_id: Some("31".repeat(32)),
-            sss_random_bytes: Some(vec![0x42; 10_000]),
             auth_policy_level: Some(AuthPolicyLevel::IntegrityOnly),
             min_valid_signatures: Some(1),
             ..Qvqcont7BuildOptions::default()

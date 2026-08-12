@@ -52,6 +52,7 @@ pub(super) fn run_reshare(args: ReshareArgs, ctx: CliContext) -> Result<()> {
                 actor_hints: serde_json::json!({}),
                 notes: args.notes.clone(),
             },
+            #[cfg(feature = "deterministic-test-vectors")]
             sss_random_bytes: None,
             maintenance_artifacts: Vec::new(),
             maintenance_signature_imports,

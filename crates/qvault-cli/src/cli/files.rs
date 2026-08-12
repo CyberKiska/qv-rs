@@ -7,6 +7,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{bail, Context, Result};
+#[cfg(feature = "deterministic-test-vectors")]
 use qvault_core::bytes::from_hex;
 use qvault_core::error::{coded, QvCode};
 use qvault_core::qcont::{parse_qvqcont7_shard, Qvqcont7Shard, MAX_QVQCONT7_SHARD_BYTES};
@@ -19,6 +20,7 @@ const SECRET_FILE_MODE: u32 = 0o600;
 pub(crate) const SMALL_ARTIFACT_READ_LIMIT: u64 = 32 * 1024 * 1024;
 static NEXT_ATOMIC_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(feature = "deterministic-test-vectors")]
 pub(crate) fn parse_fixed_hex_32(value: &str, field: &str) -> Result<[u8; 32]> {
     let bytes = from_hex(value).map_err(|error| anyhow::anyhow!("invalid {field}: {error}"))?;
     bytes

@@ -2,7 +2,9 @@ use super::super::*;
 
 pub(super) fn run_split(args: SplitArgs, ctx: CliContext) -> Result<()> {
     validate_cohort_cli_params(args.n, args.k)?;
+    #[cfg(feature = "deterministic-test-vectors")]
     validate_deterministic_flags(&args)?;
+    #[cfg(feature = "deterministic-test-vectors")]
     if args.archive_id.is_some() && args.archive_id_random.is_some() {
         bail!("split accepts --archive-id or --archive-id-random, not both");
     }
@@ -24,6 +26,7 @@ pub(super) fn run_split(args: SplitArgs, ctx: CliContext) -> Result<()> {
     );
     validate_secret_key(&private_key)?;
 
+    #[cfg(feature = "deterministic-test-vectors")]
     let archive_id_random_bytes = match args.archive_id_random.as_deref() {
         Some(hex) => Some(parse_fixed_hex_32(hex, "--archive-id-random")?),
         None => None,
@@ -36,9 +39,13 @@ pub(super) fn run_split(args: SplitArgs, ctx: CliContext) -> Result<()> {
             k: args.k,
         },
         &Qvqcont7BuildOptions {
+            #[cfg(feature = "deterministic-test-vectors")]
             archive_id: args.archive_id.clone(),
+            #[cfg(feature = "deterministic-test-vectors")]
             archive_id_random_bytes,
+            #[cfg(feature = "deterministic-test-vectors")]
             parent_state_id: args.parent_state_id.clone(),
+            #[cfg(feature = "deterministic-test-vectors")]
             state_type: args.state_type.clone(),
             auth_policy_level: Some(args.auth_policy_level.into()),
             min_valid_signatures: Some(args.min_valid_signatures),
@@ -284,6 +291,7 @@ fn split_archive_approval_json(approval: &SplitArchiveApproval) -> Result<Value>
     }))
 }
 
+#[cfg(feature = "deterministic-test-vectors")]
 fn validate_deterministic_flags(args: &SplitArgs) -> Result<()> {
     let has_deterministic = args.archive_id.is_some()
         || args.archive_id_random.is_some()

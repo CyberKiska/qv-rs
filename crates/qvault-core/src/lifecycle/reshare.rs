@@ -1,5 +1,7 @@
 use serde_json::Value;
 use zeroize::Zeroize;
+#[cfg(feature = "deterministic-test-vectors")]
+use zeroize::Zeroizing;
 
 use super::attach::{import_maintenance_evidence_for_new_transition, LifecycleSignatureImport};
 use crate::auth::{AuthPolicyLevel, NamedBinaryArtifact};
@@ -67,9 +69,8 @@ pub struct ReshareSameStateOptions {
     pub selection: RestoreQvqcont7Selection,
     pub lifecycle_bundle_bytes: Option<Vec<u8>>,
     pub transition: ReshareTransitionOptions,
-    /// Deterministic interoperability-test hook. Production callers must leave
-    /// this unset and are responsible for clearing any supplied bytes.
-    pub sss_random_bytes: Option<Vec<u8>>,
+    #[cfg(feature = "deterministic-test-vectors")]
+    pub sss_random_bytes: Option<Zeroizing<Vec<u8>>>,
     pub maintenance_artifacts: Vec<ReshareMaintenanceArtifacts>,
     /// Detached maintenance signatures over the **new** transition (same semantics as attach
     /// `--maintenance-sig` after resharing; `targetRef` / `targetDigestHex` may be omitted).
@@ -82,20 +83,23 @@ pub struct ReshareSameStateOptions {
 
 impl std::fmt::Debug for ReshareSameStateOptions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ReshareSameStateOptions")
+        let mut debug = f.debug_struct("ReshareSameStateOptions");
+        debug
             .field("selection", &self.selection)
             .field(
                 "lifecycle_bundle_bytes_len",
                 &self.lifecycle_bundle_bytes.as_ref().map(Vec::len),
             )
-            .field("transition", &self.transition)
-            .field(
-                "sss_random_bytes",
-                &self
-                    .sss_random_bytes
-                    .as_ref()
-                    .map(|bytes| format!("<redacted:{} bytes>", bytes.len())),
-            )
+            .field("transition", &self.transition);
+        #[cfg(feature = "deterministic-test-vectors")]
+        debug.field(
+            "sss_random_bytes",
+            &self
+                .sss_random_bytes
+                .as_ref()
+                .map(|bytes| format!("<redacted:{} bytes>", bytes.len())),
+        );
+        debug
             .field(
                 "maintenance_artifacts_len",
                 &self.maintenance_artifacts.len(),
@@ -180,6 +184,20 @@ pub fn reshare_same_state(
     let predecessor_bundle = parse_lifecycle_bundle_bytes(&restored.lifecycle_bundle_bytes)?;
     let (policy_level, min_valid) = parse_auth_policy(&predecessor_bundle)?;
 
+    #[cfg(feature = "deterministic-test-vectors")]
+    let successor_options = Qvqcont7BuildOptions {
+        preserved_archive_state_bytes: Some(restored.archive_state_bytes.clone()),
+        auth_policy_level: Some(policy_level),
+        min_valid_signatures: Some(min_valid),
+        sss_random_bytes: options.sss_random_bytes.clone(),
+        ..Qvqcont7BuildOptions::default()
+    };
+    #[cfg(not(feature = "deterministic-test-vectors"))]
+    let successor_options = Qvqcont7BuildOptions {
+        preserved_archive_state_bytes: Some(restored.archive_state_bytes.clone()),
+        auth_policy_level: Some(policy_level),
+        min_valid_signatures: Some(min_valid),
+    };
     let successor_base = build_qvqcont7_shards(
         &restored.qenc_bytes,
         &restored.priv_key,
@@ -187,13 +205,7 @@ pub fn reshare_same_state(
             n: params.n,
             k: params.k,
         },
-        &Qvqcont7BuildOptions {
-            preserved_archive_state_bytes: Some(restored.archive_state_bytes.clone()),
-            auth_policy_level: Some(policy_level),
-            min_valid_signatures: Some(min_valid),
-            sss_random_bytes: options.sss_random_bytes.clone(),
-            ..Qvqcont7BuildOptions::default()
-        },
+        &successor_options,
     )?;
     restored.priv_key.zeroize();
     assert_same_state_preserved(&restored, &successor_base)?;

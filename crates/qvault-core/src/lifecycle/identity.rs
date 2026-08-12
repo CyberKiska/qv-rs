@@ -72,18 +72,18 @@ pub fn derive_cohort_id(
     Ok(hex::encode(sha3_256(&canonical.bytes)))
 }
 
-pub fn generate_archive_id(random_bytes: Option<[u8; 32]>) -> Result<String> {
-    let bytes = if let Some(bytes) = random_bytes {
-        bytes
-    } else {
-        let mut bytes = [0u8; 32];
-        fill_random(&mut bytes).map_err(|error| {
-            coded(
-                QvCode::EntropyFailed,
-                format!("archiveId RNG failed: {error}"),
-            )
-        })?;
-        bytes
-    };
+pub fn generate_archive_id() -> Result<String> {
+    let mut bytes = [0u8; 32];
+    fill_random(&mut bytes).map_err(|error| {
+        coded(
+            QvCode::EntropyFailed,
+            format!("archiveId RNG failed: {error}"),
+        )
+    })?;
     Ok(hex::encode(bytes))
+}
+
+#[cfg(feature = "deterministic-test-vectors")]
+pub fn generate_archive_id_deterministic(bytes: [u8; 32]) -> String {
+    hex::encode(bytes)
 }

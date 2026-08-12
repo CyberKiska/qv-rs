@@ -23,7 +23,10 @@ impl<'a> RandomSource<'a> {
 
     fn fill(&mut self, out: &mut [u8]) -> Result<()> {
         if let Some(preloaded) = self.preloaded {
-            let end = self.offset + out.len();
+            let end = self
+                .offset
+                .checked_add(out.len())
+                .ok_or_else(|| err("Deterministic SSS random stream offset overflow"))?;
             if end > preloaded.len() {
                 return Err(err("Insufficient deterministic SSS random bytes"));
             }
@@ -148,7 +151,21 @@ fn new_coordinates(random: &mut RandomSource<'_>) -> Result<[u8; 255]> {
     Ok(coordinates)
 }
 
-pub fn split_secret(
+pub fn split_secret(secret: &[u8], shares: usize, threshold: usize) -> Result<Vec<Vec<u8>>> {
+    split_secret_inner(secret, shares, threshold, None)
+}
+
+#[cfg(feature = "deterministic-test-vectors")]
+pub fn split_secret_deterministic(
+    secret: &[u8],
+    shares: usize,
+    threshold: usize,
+    deterministic_random: &[u8],
+) -> Result<Vec<Vec<u8>>> {
+    split_secret_inner(secret, shares, threshold, Some(deterministic_random))
+}
+
+fn split_secret_inner(
     secret: &[u8],
     shares: usize,
     threshold: usize,

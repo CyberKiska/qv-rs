@@ -6,6 +6,8 @@ use crate::erasure;
 use crate::error::{coded, err, QvCode, Result};
 use crate::hash::{sha3_512, sha3_512_hex};
 use crate::kdf::{derive_key_with_kmac, verify_key_commitment};
+#[cfg(feature = "deterministic-test-vectors")]
+use crate::lifecycle::generate_archive_id_deterministic;
 use crate::lifecycle::{
     build_archive_state_descriptor, build_cohort_binding, build_lifecycle_bundle,
     canonicalize_archive_state_descriptor, canonicalize_cohort_binding,
@@ -24,6 +26,8 @@ use crate::qcont::shard_v7::{
 };
 use crate::qenc::{parse_qenc_header, CHUNK_SIZE};
 use crate::sss::split_secret;
+#[cfg(feature = "deterministic-test-vectors")]
+use crate::sss::split_secret_deterministic;
 
 const RS_MAX_CODEWORD: usize = 255;
 
@@ -35,39 +39,46 @@ pub struct Qvqcont7BuildParams {
 
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct Qvqcont7BuildOptions {
+    #[cfg(feature = "deterministic-test-vectors")]
     pub archive_id: Option<String>,
+    #[cfg(feature = "deterministic-test-vectors")]
     pub archive_id_random_bytes: Option<[u8; 32]>,
     pub preserved_archive_state_bytes: Option<Vec<u8>>,
+    #[cfg(feature = "deterministic-test-vectors")]
     pub parent_state_id: Option<String>,
+    #[cfg(feature = "deterministic-test-vectors")]
     pub state_type: Option<String>,
-    /// Deterministic interoperability-test hook. Production callers must leave
-    /// this unset and are responsible for clearing any supplied bytes.
-    pub sss_random_bytes: Option<Vec<u8>>,
+    #[cfg(feature = "deterministic-test-vectors")]
+    pub sss_random_bytes: Option<Zeroizing<Vec<u8>>>,
     pub auth_policy_level: Option<AuthPolicyLevel>,
     pub min_valid_signatures: Option<u64>,
 }
 
 impl std::fmt::Debug for Qvqcont7BuildOptions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Qvqcont7BuildOptions")
-            .field("archive_id", &self.archive_id)
-            .field(
-                "archive_id_random_bytes_present",
-                &self.archive_id_random_bytes.is_some(),
-            )
-            .field(
-                "preserved_archive_state_bytes_len",
-                &self.preserved_archive_state_bytes.as_ref().map(Vec::len),
-            )
+        let mut debug = f.debug_struct("Qvqcont7BuildOptions");
+        #[cfg(feature = "deterministic-test-vectors")]
+        debug.field("archive_id", &self.archive_id).field(
+            "archive_id_random_bytes_present",
+            &self.archive_id_random_bytes.is_some(),
+        );
+        debug.field(
+            "preserved_archive_state_bytes_len",
+            &self.preserved_archive_state_bytes.as_ref().map(Vec::len),
+        );
+        #[cfg(feature = "deterministic-test-vectors")]
+        debug
             .field("parent_state_id", &self.parent_state_id)
-            .field("state_type", &self.state_type)
-            .field(
-                "sss_random_bytes",
-                &self
-                    .sss_random_bytes
-                    .as_ref()
-                    .map(|bytes| format!("<redacted:{} bytes>", bytes.len())),
-            )
+            .field("state_type", &self.state_type);
+        #[cfg(feature = "deterministic-test-vectors")]
+        debug.field(
+            "sss_random_bytes",
+            &self
+                .sss_random_bytes
+                .as_ref()
+                .map(|bytes| format!("<redacted:{} bytes>", bytes.len())),
+        );
+        debug
             .field("auth_policy_level", &self.auth_policy_level)
             .field("min_valid_signatures", &self.min_valid_signatures)
             .finish()
@@ -210,12 +221,14 @@ pub fn build_qvqcont7_shards(
     };
     let _nonce_mode = get_nonce_contract_for_aead_mode(&parsed.metadata.aead_mode)?;
 
-    let shares = Zeroizing::new(split_secret(
-        priv_key_bytes,
-        n,
-        t,
-        options.sss_random_bytes.as_deref(),
-    )?);
+    #[cfg(feature = "deterministic-test-vectors")]
+    let generated_shares = match options.sss_random_bytes.as_ref() {
+        Some(random) => split_secret_deterministic(priv_key_bytes, n, t, random.as_slice())?,
+        None => split_secret(priv_key_bytes, n, t)?,
+    };
+    #[cfg(not(feature = "deterministic-test-vectors"))]
+    let generated_shares = split_secret(priv_key_bytes, n, t)?;
+    let shares = Zeroizing::new(generated_shares);
     let share_commitments = shares
         .iter()
         .map(|share| sha3_512_hex(share))
@@ -236,15 +249,19 @@ pub fn build_qvqcont7_shards(
         .map(|body| sha3_512_hex(body))
         .collect::<Vec<_>>();
 
+    #[cfg(feature = "deterministic-test-vectors")]
     let has_forbidden_archive_override = options.archive_id.is_some()
         || options.archive_id_random_bytes.is_some()
         || options.parent_state_id.is_some()
         || options.state_type.is_some();
+    #[cfg(not(feature = "deterministic-test-vectors"))]
+    let has_forbidden_archive_override = false;
     if options.preserved_archive_state_bytes.is_some() && has_forbidden_archive_override {
         return Err(err(
             "preserved_archive_state_bytes forbids archive-state override options",
         ));
     }
+    #[cfg(feature = "deterministic-test-vectors")]
     let archive_id = match (
         &options.archive_id,
         options.archive_id_random_bytes,
@@ -258,12 +275,24 @@ pub fn build_qvqcont7_shards(
             .map(str::to_string)
             .ok_or_else(|| err("Missing preserved archiveState.archiveId"))?,
         (Some(archive_id), None, None) => archive_id.clone(),
-        (None, random_bytes, None) => generate_archive_id(random_bytes)?,
+        (None, Some(random_bytes), None) => generate_archive_id_deterministic(random_bytes),
+        (None, None, None) => generate_archive_id()?,
         (Some(_), Some(_), None) => {
             return Err(err(
                 "archive_id and archive_id_random_bytes are mutually exclusive",
             ))
         }
+    };
+    #[cfg(not(feature = "deterministic-test-vectors"))]
+    let archive_id = match options.preserved_archive_state_bytes.as_deref() {
+        Some(bytes) => parse_archive_state_descriptor_bytes(bytes)?
+            .archive_state
+            .value
+            .get("archiveId")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| err("Missing preserved archiveState.archiveId"))?,
+        None => generate_archive_id()?,
     };
     let auth_policy_level = options
         .auth_policy_level
@@ -312,8 +341,14 @@ pub fn build_qvqcont7_shards(
     } else {
         let archive_state = build_archive_state_descriptor(&BuildArchiveStateDescriptorParams {
             archive_id: archive_id.clone(),
+            #[cfg(feature = "deterministic-test-vectors")]
             parent_state_id: options.parent_state_id.clone(),
+            #[cfg(not(feature = "deterministic-test-vectors"))]
+            parent_state_id: None,
+            #[cfg(feature = "deterministic-test-vectors")]
             state_type: options.state_type.clone(),
+            #[cfg(not(feature = "deterministic-test-vectors"))]
+            state_type: None,
             crypto_profile_id: crypto_profile_id.clone(),
             kdf_tree_id,
             nonce_policy_id: parsed.metadata.nonce_policy_id.clone(),
