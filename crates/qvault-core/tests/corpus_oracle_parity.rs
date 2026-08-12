@@ -38,10 +38,11 @@ fn walk_corpus_json(dir: &Path, f: &mut impl FnMut(&Path)) {
 }
 
 #[test]
+#[ignore = "requires QV_ORACLE_ROOT and an explicit --ignored parity run"]
 fn corpus_bytes_match_oracle_when_qv_oracle_root_set() {
-    let Ok(oracle_root) = std::env::var("QV_ORACLE_ROOT") else {
-        return;
-    };
+    let oracle_root = std::env::var("QV_ORACLE_ROOT").expect(
+        "QV_ORACLE_ROOT is required; this test must never report parity without an oracle checkout",
+    );
     let oracle_root = PathBuf::from(oracle_root);
     let oracle_corpus = oracle_root.join("docs/schema/corpus");
     assert!(
