@@ -1,6 +1,7 @@
 use core::num::NonZeroU32;
 
 use fips203::{CryptoRng, RngCore, RngError};
+use zeroize::Zeroizing;
 
 use crate::error::{coded, QvCode, Result};
 
@@ -43,4 +44,10 @@ pub(crate) fn fill_random(dest: &mut [u8]) -> Result<()> {
             format!("OS randomness is unavailable: {error}"),
         )
     })
+}
+
+pub(crate) fn secret_random_array<const N: usize>() -> Result<Zeroizing<[u8; N]>> {
+    let mut bytes = Zeroizing::new([0u8; N]);
+    fill_random(bytes.as_mut())?;
+    Ok(bytes)
 }

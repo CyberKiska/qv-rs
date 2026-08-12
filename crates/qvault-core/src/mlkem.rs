@@ -1,9 +1,9 @@
 use fips203::ml_kem_1024;
 use fips203::traits::{Decaps, Encaps, KeyGen, SerDes};
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 use crate::error::{coded, err, QvCode, Result};
-use crate::rng::SystemRng;
+use crate::rng::secret_random_array;
 
 pub const ML_KEM_1024_PUBLIC_KEY_SIZE: usize = 1568;
 pub const ML_KEM_1024_SECRET_KEY_SIZE: usize = 3168;
@@ -11,31 +11,22 @@ pub const ML_KEM_1024_ENCAPSULATED_KEY_SIZE: usize = 1568;
 pub const ML_KEM_1024_SHARED_SECRET_SIZE: usize = 32;
 
 pub fn generate_key_pair() -> Result<(Vec<u8>, Vec<u8>)> {
-    generate_key_pair_inner(None)
+    let seed = secret_random_array::<64>()?;
+    generate_key_pair_inner(*seed)
 }
 
 #[cfg(feature = "deterministic-test-vectors")]
 pub fn generate_key_pair_deterministic(seed: [u8; 64]) -> Result<(Vec<u8>, Vec<u8>)> {
-    generate_key_pair_inner(Some(seed))
+    generate_key_pair_inner(seed)
 }
 
-fn generate_key_pair_inner(custom_seed: Option<[u8; 64]>) -> Result<(Vec<u8>, Vec<u8>)> {
-    let (encaps_key, decaps_key) = match custom_seed {
-        Some(mut seed) => {
-            let mut d = Zeroizing::new([0u8; 32]);
-            let mut z = Zeroizing::new([0u8; 32]);
-            d.copy_from_slice(&seed[..32]);
-            z.copy_from_slice(&seed[32..]);
-            seed.zeroize();
-            ml_kem_1024::KG::keygen_from_seed(*d, *z)
-        }
-        None => ml_kem_1024::KG::try_keygen_with_rng(&mut SystemRng).map_err(|error| {
-            coded(
-                QvCode::EntropyFailed,
-                format!("ML-KEM-1024 key generation failed: {error}"),
-            )
-        })?,
-    };
+fn generate_key_pair_inner(seed: [u8; 64]) -> Result<(Vec<u8>, Vec<u8>)> {
+    let seed = Zeroizing::new(seed);
+    let mut d = Zeroizing::new([0u8; 32]);
+    let mut z = Zeroizing::new([0u8; 32]);
+    d.copy_from_slice(&seed[..32]);
+    z.copy_from_slice(&seed[32..]);
+    let (encaps_key, decaps_key) = ml_kem_1024::KG::keygen_from_seed(*d, *z);
 
     let public_key = encaps_key.into_bytes().to_vec();
     let secret_key_bytes = Zeroizing::new(decaps_key.into_bytes());
@@ -46,15 +37,17 @@ fn generate_key_pair_inner(custom_seed: Option<[u8; 64]>) -> Result<(Vec<u8>, Ve
 }
 
 pub fn encapsulate(public_key: &[u8]) -> Result<(Vec<u8>, [u8; 32])> {
-    encapsulate_inner(public_key, None)
+    let seed = secret_random_array::<32>()?;
+    encapsulate_inner(public_key, *seed)
 }
 
 #[cfg(feature = "deterministic-test-vectors")]
 pub fn encapsulate_deterministic(public_key: &[u8], seed: [u8; 32]) -> Result<(Vec<u8>, [u8; 32])> {
-    encapsulate_inner(public_key, Some(seed))
+    encapsulate_inner(public_key, seed)
 }
 
-fn encapsulate_inner(public_key: &[u8], seed: Option<[u8; 32]>) -> Result<(Vec<u8>, [u8; 32])> {
+fn encapsulate_inner(public_key: &[u8], seed: [u8; 32]) -> Result<(Vec<u8>, [u8; 32])> {
+    let seed = Zeroizing::new(seed);
     validate_public_key(public_key)?;
     let encaps_key = ml_kem_1024::EncapsKey::try_from_bytes(
         public_key
@@ -68,21 +61,7 @@ fn encapsulate_inner(public_key: &[u8], seed: Option<[u8; 32]>) -> Result<(Vec<u
         )
     })?;
 
-    let (shared_secret, ciphertext) = match seed {
-        Some(mut seed) => {
-            let result = encaps_key.encaps_from_seed(&seed);
-            seed.zeroize();
-            result
-        }
-        None => encaps_key
-            .try_encaps_with_rng(&mut SystemRng)
-            .map_err(|error| {
-                coded(
-                    QvCode::EntropyFailed,
-                    format!("ML-KEM-1024 encapsulation failed: {error}"),
-                )
-            })?,
-    };
+    let (shared_secret, ciphertext) = encaps_key.encaps_from_seed(&seed);
 
     Ok((ciphertext.into_bytes().to_vec(), shared_secret.into_bytes()))
 }

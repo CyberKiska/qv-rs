@@ -1,10 +1,12 @@
+use std::collections::{HashSet, VecDeque};
+use std::sync::{Mutex, OnceLock};
+
 use crate::aead::{
     assert_per_chunk_nonce_contract, build_chunk_aad, decrypt_chunk, derive_chunk_iv_from_k,
     encrypt_chunk, PerChunkIvParams,
 };
 use crate::error::{coded, err, QvCode, Result};
-use crate::hash::sha3_512_hex;
-#[cfg(feature = "deterministic-test-vectors")]
+use crate::hash::{sha3_256, sha3_512_hex};
 use crate::kdf::KDF_SALT_SIZE;
 use crate::kdf::{compute_key_commitment, derive_key_with_kmac, verify_key_commitment};
 #[cfg(feature = "deterministic-test-vectors")]
@@ -21,13 +23,16 @@ use crate::qenc::payload::{
 use crate::qenc::QencHeader;
 use crate::rng::fill_random;
 use time::OffsetDateTime;
-use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+#[cfg(feature = "deterministic-test-vectors")]
+use zeroize::ZeroizeOnDrop;
+use zeroize::{Zeroize, Zeroizing};
 
 pub const CHUNK_SIZE: usize = 8 * 1024 * 1024;
 pub const MAX_FILE_SIZE: usize = 1024 * 1024 * 1024;
 /// Maximum complete QENC container size, including wrapped metadata, header,
 /// and per-chunk authentication tags.
 pub const MAX_QENC_CONTAINER_SIZE: usize = MAX_FILE_SIZE + (1024 * 1024);
+const RECENT_ENCRYPTION_TUPLE_LIMIT: usize = 4096;
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct DecryptedQenc {
@@ -135,19 +140,21 @@ fn encrypt_qenc_inner(
     let (encapsulated_key, shared_secret) = encapsulate(public_key)?;
     let shared_secret = Zeroizing::new(shared_secret);
     #[cfg(feature = "deterministic-test-vectors")]
-    let container_nonce = match deterministic {
-        Some(randomness) => randomness.container_nonce,
-        None => random_array()?,
+    let (container_nonce, kdf_salt, enforce_tuple_uniqueness) = match deterministic {
+        Some(randomness) => (randomness.container_nonce, randomness.kdf_salt, false),
+        None => {
+            let (nonce, salt) = random_qenc_fields()?;
+            (nonce, salt, true)
+        }
     };
     #[cfg(not(feature = "deterministic-test-vectors"))]
-    let container_nonce = random_array()?;
-    #[cfg(feature = "deterministic-test-vectors")]
-    let kdf_salt = match deterministic {
-        Some(randomness) => randomness.kdf_salt,
-        None => random_array()?,
+    let (container_nonce, kdf_salt, enforce_tuple_uniqueness) = {
+        let (nonce, salt) = random_qenc_fields()?;
+        (nonce, salt, true)
     };
-    #[cfg(not(feature = "deterministic-test-vectors"))]
-    let kdf_salt = random_array()?;
+    if enforce_tuple_uniqueness {
+        remember_encryption_tuple(&encapsulated_key, &container_nonce, &kdf_salt)?;
+    }
 
     let private_metadata = WrappedPayloadPrivateMetadata {
         original_filename: options.original_filename.clone(),
@@ -479,8 +486,89 @@ fn encrypt_per_chunk(
     Ok(encrypted)
 }
 
-fn random_array<const N: usize>() -> Result<[u8; N]> {
-    let mut bytes = [0u8; N];
+fn random_qenc_fields() -> Result<([u8; 12], [u8; KDF_SALT_SIZE])> {
+    let mut bytes = [0u8; 12 + KDF_SALT_SIZE];
     fill_random(&mut bytes)?;
-    Ok(bytes)
+    let mut container_nonce = [0u8; 12];
+    container_nonce.copy_from_slice(&bytes[..12]);
+    let mut kdf_salt = [0u8; KDF_SALT_SIZE];
+    kdf_salt.copy_from_slice(&bytes[12..]);
+    Ok((container_nonce, kdf_salt))
+}
+
+#[derive(Default)]
+struct RecentEncryptionTuples {
+    insertion_order: VecDeque<[u8; 32]>,
+    fingerprints: HashSet<[u8; 32]>,
+}
+
+impl RecentEncryptionTuples {
+    fn insert_unique(&mut self, fingerprint: [u8; 32]) -> bool {
+        if !self.fingerprints.insert(fingerprint) {
+            return false;
+        }
+        self.insertion_order.push_back(fingerprint);
+        if self.insertion_order.len() > RECENT_ENCRYPTION_TUPLE_LIMIT {
+            if let Some(expired) = self.insertion_order.pop_front() {
+                self.fingerprints.remove(&expired);
+            }
+        }
+        true
+    }
+}
+
+fn remember_encryption_tuple(
+    encapsulated_key: &[u8],
+    container_nonce: &[u8; 12],
+    kdf_salt: &[u8; KDF_SALT_SIZE],
+) -> Result<()> {
+    static RECENT: OnceLock<Mutex<RecentEncryptionTuples>> = OnceLock::new();
+    let mut preimage = Vec::with_capacity(
+        b"qvault:qenc:encryption-randomness:v1".len()
+            + encapsulated_key.len()
+            + container_nonce.len()
+            + kdf_salt.len(),
+    );
+    preimage.extend_from_slice(b"qvault:qenc:encryption-randomness:v1");
+    preimage.extend_from_slice(encapsulated_key);
+    preimage.extend_from_slice(container_nonce);
+    preimage.extend_from_slice(kdf_salt);
+    let fingerprint = sha3_256(&preimage);
+    let mut recent = RECENT
+        .get_or_init(|| Mutex::new(RecentEncryptionTuples::default()))
+        .lock()
+        .map_err(|_| {
+            coded(
+                QvCode::EntropyFailed,
+                "Encryption randomness replay guard is unavailable",
+            )
+        })?;
+    if !recent.insert_unique(fingerprint) {
+        return Err(coded(
+            QvCode::EntropyFailed,
+            "Repeated encryption randomness detected; refusing potential AES-GCM key/nonce reuse",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recent_encryption_tuple_guard_rejects_duplicates_and_stays_bounded() {
+        let mut recent = RecentEncryptionTuples::default();
+        let first = [0x42; 32];
+        assert!(recent.insert_unique(first));
+        assert!(!recent.insert_unique(first));
+
+        for value in 0..=RECENT_ENCRYPTION_TUPLE_LIMIT {
+            let mut fingerprint = [0u8; 32];
+            fingerprint[..8].copy_from_slice(&(value as u64).to_be_bytes());
+            recent.insert_unique(fingerprint);
+        }
+        assert_eq!(recent.insertion_order.len(), RECENT_ENCRYPTION_TUPLE_LIMIT);
+        assert_eq!(recent.fingerprints.len(), RECENT_ENCRYPTION_TUPLE_LIMIT);
+    }
 }
