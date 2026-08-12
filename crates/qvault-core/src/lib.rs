@@ -21,8 +21,9 @@ pub use auth::{
     AuthPolicy, AuthPolicyLevel, AuthenticityReport, NamedBinaryArtifact, VerificationInputs,
 };
 pub use bundle::{
-    build_bundle_payload, bundle_filename_for_time, current_bundle_filename, is_bundle_payload,
-    parse_bundle_payload, BundleEntryRef, ParsedBundleEntry,
+    build_bundle_payload, bundle_entry_output_path, bundle_filename_for_time,
+    current_bundle_filename, is_bundle_payload, parse_bundle_payload, BundleEntryRef,
+    ParsedBundleEntry,
 };
 pub use error::{QvError, Result};
 pub use mlkem::{decapsulate, encapsulate, generate_key_pair};

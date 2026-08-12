@@ -1,3 +1,5 @@
+use std::path::{Component, Path, PathBuf};
+
 use time::OffsetDateTime;
 
 use crate::error::{err, Result};
@@ -17,10 +19,40 @@ fn assert_entry_name(name: &str) -> Result<()> {
     if name.is_empty() {
         return Err(err("QVPACK entry name must be a non-empty string"));
     }
-    if name.bytes().any(|byte| matches!(byte, b'/' | b'\\' | 0)) {
+    if name == "." || name == ".." {
+        return Err(err("QVPACK entry name must not be a dot path component"));
+    }
+    if name.chars().any(char::is_control) {
+        return Err(err("QVPACK entry name must not contain control characters"));
+    }
+    if name.bytes().any(|byte| {
+        matches!(
+            byte,
+            b'/' | b'\\' | b':' | b'*' | b'?' | b'"' | b'<' | b'>' | b'|'
+        )
+    }) {
         return Err(err(
-            "QVPACK entry name must not contain path separators or NUL",
+            "QVPACK entry name contains a path separator or non-portable filename character",
         ));
+    }
+    if matches!(name.as_bytes().last(), Some(b' ' | b'.')) {
+        return Err(err("QVPACK entry name must not end with a space or period"));
+    }
+    let device_stem = name
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches([' ', '.'])
+        .to_ascii_uppercase();
+    let reserved_device = matches!(device_stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || device_stem
+            .strip_prefix("COM")
+            .or_else(|| device_stem.strip_prefix("LPT"))
+            .is_some_and(|suffix| {
+                matches!(suffix, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
+            });
+    if reserved_device {
+        return Err(err("QVPACK entry name is reserved by a supported platform"));
     }
     if name.len() > MAX_QVPACK_ENTRY_NAME_BYTES {
         return Err(err(format!(
@@ -28,6 +60,21 @@ fn assert_entry_name(name: &str) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+/// Resolve a validated QVPACK entry below a caller-selected extraction root.
+///
+/// Entry names are restricted to one portable normal path component, so the
+/// returned path cannot name the root itself, a parent, or an absolute path.
+pub fn bundle_entry_output_path(root: &Path, name: &str) -> Result<PathBuf> {
+    assert_entry_name(name)?;
+    let mut components = Path::new(name).components();
+    if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
+        return Err(err(
+            "QVPACK entry name must be exactly one normal path component",
+        ));
+    }
+    Ok(root.join(name))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -79,8 +126,10 @@ pub fn build_bundle_payload(entries: &[BundleEntryRef<'_>]) -> Result<Vec<u8>> {
     let mut aggregate_payload = 0usize;
     let total_size = entries.iter().try_fold(total_size, |acc, entry| {
         assert_entry_name(entry.name)?;
-        if !seen_names.insert(entry.name) {
-            return Err(err("QVPACK contains a duplicate entry filename"));
+        if !seen_names.insert(entry.name.to_ascii_lowercase()) {
+            return Err(err(
+                "QVPACK contains duplicate or case-colliding entry filenames",
+            ));
         }
         let name_bytes = entry.name.as_bytes();
         if entry.bytes.len() > MAX_QVPACK_ENTRY_PAYLOAD_BYTES {
@@ -210,8 +259,10 @@ pub fn parse_bundle_payload(bytes: &[u8]) -> Result<Vec<ParsedBundleEntry<'_>>> 
             })?
             .to_string();
         assert_entry_name(&name)?;
-        if !seen_names.insert(name.clone()) {
-            return Err(err("QVPACK contains a duplicate entry filename"));
+        if !seen_names.insert(name.to_ascii_lowercase()) {
+            return Err(err(
+                "QVPACK contains duplicate or case-colliding entry filenames",
+            ));
         }
         offset = name_end;
 
@@ -270,9 +321,10 @@ pub fn bundle_filename_for_time(time: OffsetDateTime) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_bundle_payload, bundle_filename_for_time, is_bundle_payload, parse_bundle_payload,
-        BundleEntryRef,
+        build_bundle_payload, bundle_entry_output_path, bundle_filename_for_time,
+        is_bundle_payload, parse_bundle_payload, BundleEntryRef,
     };
+    use std::path::Path;
     use time::{Date, Month, Time};
 
     #[test]
@@ -312,17 +364,30 @@ mod tests {
     }
 
     #[test]
-    fn build_rejects_path_separators_and_nul() {
-        for bad in ["../evil", "dir/child", "back\\slash", "nul\0byte"] {
+    fn build_rejects_unsafe_or_non_portable_names() {
+        for bad in [
+            ".",
+            "..",
+            "../evil",
+            "dir/child",
+            "back\\slash",
+            "nul\0byte",
+            "line\nbreak",
+            "C:drive",
+            "wild*card",
+            "trailing.",
+            "trailing ",
+            "CON",
+            "nul.txt",
+            "COM1.log",
+            "lpt9",
+        ] {
             let error = build_bundle_payload(&[BundleEntryRef {
                 name: bad,
                 bytes: b"x",
             }])
             .expect_err("unsafe name must fail");
-            assert!(
-                error.to_string().contains("path separators or NUL"),
-                "{bad}: {error}"
-            );
+            assert!(!error.to_string().is_empty(), "{bad}: {error}");
         }
     }
 
@@ -339,7 +404,23 @@ mod tests {
             },
         ])
         .expect_err("duplicate name must fail");
-        assert!(error.to_string().contains("duplicate entry filename"));
+        assert!(error.to_string().contains("case-colliding entry filenames"));
+    }
+
+    #[test]
+    fn build_rejects_case_colliding_names() {
+        let error = build_bundle_payload(&[
+            BundleEntryRef {
+                name: "Report.txt",
+                bytes: b"a",
+            },
+            BundleEntryRef {
+                name: "report.TXT",
+                bytes: b"b",
+            },
+        ])
+        .expect_err("portable extraction collision must fail");
+        assert!(error.to_string().contains("case-colliding"));
     }
 
     #[test]
@@ -355,10 +436,19 @@ mod tests {
         bundle.extend_from_slice(&1u32.to_be_bytes());
         bundle.push(0x42);
         let error = parse_bundle_payload(&bundle).expect_err("traversal name must fail");
-        assert!(
-            error.to_string().contains("path separators or NUL"),
-            "{error}"
+        assert!(error.to_string().contains("path separator"), "{error}");
+    }
+
+    #[test]
+    fn output_path_is_anchored_below_extraction_root() {
+        let root = Path::new("safe-output");
+        assert_eq!(
+            bundle_entry_output_path(root, "report.txt").unwrap(),
+            root.join("report.txt")
         );
+        for bad in [".", "..", "../escape", "/absolute", "C:\\escape"] {
+            assert!(bundle_entry_output_path(root, bad).is_err(), "{bad}");
+        }
     }
 
     #[test]
