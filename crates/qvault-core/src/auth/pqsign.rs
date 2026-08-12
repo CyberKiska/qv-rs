@@ -170,8 +170,9 @@ pub fn create_detached_qsig(options: DetachedSignOptions<'_>) -> Result<Detached
 
 fn generate_ml_dsa_44() -> Result<PqSigningKeypair> {
     let suite = PqSignatureSuite::MlDsa44;
-    let (public_key, secret_key) = fips204::ml_dsa_44::try_keygen_with_rng(&mut SystemRng)
-        .map_err(|error| entropy_failed(suite, "key generation", error))?;
+    let (public_key, secret_key) = with_system_rng(suite, "key generation", |rng| {
+        fips204::ml_dsa_44::try_keygen_with_rng(rng)
+    })?;
     let public_key_bytes = public_key.into_bytes();
     let secret_key_bytes = Zeroizing::new(secret_key.into_bytes());
     finish_generated_keypair(suite, &public_key_bytes[..], &secret_key_bytes[..])
@@ -179,8 +180,9 @@ fn generate_ml_dsa_44() -> Result<PqSigningKeypair> {
 
 fn generate_ml_dsa_65() -> Result<PqSigningKeypair> {
     let suite = PqSignatureSuite::MlDsa65;
-    let (public_key, secret_key) = fips204::ml_dsa_65::try_keygen_with_rng(&mut SystemRng)
-        .map_err(|error| entropy_failed(suite, "key generation", error))?;
+    let (public_key, secret_key) = with_system_rng(suite, "key generation", |rng| {
+        fips204::ml_dsa_65::try_keygen_with_rng(rng)
+    })?;
     let public_key_bytes = public_key.into_bytes();
     let secret_key_bytes = Zeroizing::new(secret_key.into_bytes());
     finish_generated_keypair(suite, &public_key_bytes[..], &secret_key_bytes[..])
@@ -188,8 +190,9 @@ fn generate_ml_dsa_65() -> Result<PqSigningKeypair> {
 
 fn generate_ml_dsa_87() -> Result<PqSigningKeypair> {
     let suite = PqSignatureSuite::MlDsa87;
-    let (public_key, secret_key) = fips204::ml_dsa_87::try_keygen_with_rng(&mut SystemRng)
-        .map_err(|error| entropy_failed(suite, "key generation", error))?;
+    let (public_key, secret_key) = with_system_rng(suite, "key generation", |rng| {
+        fips204::ml_dsa_87::try_keygen_with_rng(rng)
+    })?;
     let public_key_bytes = public_key.into_bytes();
     let secret_key_bytes = Zeroizing::new(secret_key.into_bytes());
     finish_generated_keypair(suite, &public_key_bytes[..], &secret_key_bytes[..])
@@ -197,8 +200,9 @@ fn generate_ml_dsa_87() -> Result<PqSigningKeypair> {
 
 fn generate_slh_dsa_shake_128s() -> Result<PqSigningKeypair> {
     let suite = PqSignatureSuite::SlhDsaShake128s;
-    let (public_key, secret_key) = fips205::slh_dsa_shake_128s::try_keygen_with_rng(&mut SystemRng)
-        .map_err(|error| entropy_failed(suite, "key generation", error))?;
+    let (public_key, secret_key) = with_system_rng(suite, "key generation", |rng| {
+        fips205::slh_dsa_shake_128s::try_keygen_with_rng(rng)
+    })?;
     let public_key_bytes = public_key.into_bytes();
     let secret_key_bytes = Zeroizing::new(secret_key.into_bytes());
     finish_generated_keypair(suite, &public_key_bytes[..], &secret_key_bytes[..])
@@ -206,8 +210,9 @@ fn generate_slh_dsa_shake_128s() -> Result<PqSigningKeypair> {
 
 fn generate_slh_dsa_shake_192s() -> Result<PqSigningKeypair> {
     let suite = PqSignatureSuite::SlhDsaShake192s;
-    let (public_key, secret_key) = fips205::slh_dsa_shake_192s::try_keygen_with_rng(&mut SystemRng)
-        .map_err(|error| entropy_failed(suite, "key generation", error))?;
+    let (public_key, secret_key) = with_system_rng(suite, "key generation", |rng| {
+        fips205::slh_dsa_shake_192s::try_keygen_with_rng(rng)
+    })?;
     let public_key_bytes = public_key.into_bytes();
     let secret_key_bytes = Zeroizing::new(secret_key.into_bytes());
     finish_generated_keypair(suite, &public_key_bytes[..], &secret_key_bytes[..])
@@ -215,8 +220,9 @@ fn generate_slh_dsa_shake_192s() -> Result<PqSigningKeypair> {
 
 fn generate_slh_dsa_shake_256s() -> Result<PqSigningKeypair> {
     let suite = PqSignatureSuite::SlhDsaShake256s;
-    let (public_key, secret_key) = fips205::slh_dsa_shake_256s::try_keygen_with_rng(&mut SystemRng)
-        .map_err(|error| entropy_failed(suite, "key generation", error))?;
+    let (public_key, secret_key) = with_system_rng(suite, "key generation", |rng| {
+        fips205::slh_dsa_shake_256s::try_keygen_with_rng(rng)
+    })?;
     let public_key_bytes = public_key.into_bytes();
     let secret_key_bytes = Zeroizing::new(secret_key.into_bytes());
     finish_generated_keypair(suite, &public_key_bytes[..], &secret_key_bytes[..])
@@ -224,8 +230,9 @@ fn generate_slh_dsa_shake_256s() -> Result<PqSigningKeypair> {
 
 fn generate_slh_dsa_shake_256f() -> Result<PqSigningKeypair> {
     let suite = PqSignatureSuite::SlhDsaShake256f;
-    let (public_key, secret_key) = fips205::slh_dsa_shake_256f::try_keygen_with_rng(&mut SystemRng)
-        .map_err(|error| entropy_failed(suite, "key generation", error))?;
+    let (public_key, secret_key) = with_system_rng(suite, "key generation", |rng| {
+        fips205::slh_dsa_shake_256f::try_keygen_with_rng(rng)
+    })?;
     let public_key_bytes = public_key.into_bytes();
     let secret_key_bytes = Zeroizing::new(secret_key.into_bytes());
     finish_generated_keypair(suite, &public_key_bytes[..], &secret_key_bytes[..])
@@ -262,9 +269,9 @@ fn sign_ml_dsa_44(secret_key_bytes: &[u8], tbs: &[u8], context: &[u8]) -> Result
         copy_secret_array::<{ fips204::ml_dsa_44::SK_LEN }>(suite, secret_key_bytes)?;
     let secret_key = fips204::ml_dsa_44::PrivateKey::try_from_bytes(*secret_key_bytes)
         .map_err(|error| key_rejected(suite, format!("Invalid secret key bytes: {error}")))?;
-    let signature = secret_key
-        .try_sign_with_rng(&mut SystemRng, tbs, context)
-        .map_err(|error| signing_failed(suite, error))?;
+    let signature = with_system_rng(suite, "signing", |rng| {
+        secret_key.try_sign_with_rng(rng, tbs, context)
+    })?;
     Ok(signature.to_vec())
 }
 
@@ -274,9 +281,9 @@ fn sign_ml_dsa_65(secret_key_bytes: &[u8], tbs: &[u8], context: &[u8]) -> Result
         copy_secret_array::<{ fips204::ml_dsa_65::SK_LEN }>(suite, secret_key_bytes)?;
     let secret_key = fips204::ml_dsa_65::PrivateKey::try_from_bytes(*secret_key_bytes)
         .map_err(|error| key_rejected(suite, format!("Invalid secret key bytes: {error}")))?;
-    let signature = secret_key
-        .try_sign_with_rng(&mut SystemRng, tbs, context)
-        .map_err(|error| signing_failed(suite, error))?;
+    let signature = with_system_rng(suite, "signing", |rng| {
+        secret_key.try_sign_with_rng(rng, tbs, context)
+    })?;
     Ok(signature.to_vec())
 }
 
@@ -286,9 +293,9 @@ fn sign_ml_dsa_87(secret_key_bytes: &[u8], tbs: &[u8], context: &[u8]) -> Result
         copy_secret_array::<{ fips204::ml_dsa_87::SK_LEN }>(suite, secret_key_bytes)?;
     let secret_key = fips204::ml_dsa_87::PrivateKey::try_from_bytes(*secret_key_bytes)
         .map_err(|error| key_rejected(suite, format!("Invalid secret key bytes: {error}")))?;
-    let signature = secret_key
-        .try_sign_with_rng(&mut SystemRng, tbs, context)
-        .map_err(|error| signing_failed(suite, error))?;
+    let signature = with_system_rng(suite, "signing", |rng| {
+        secret_key.try_sign_with_rng(rng, tbs, context)
+    })?;
     Ok(signature.to_vec())
 }
 
@@ -298,9 +305,9 @@ fn sign_slh_dsa_shake_128s(secret_key_bytes: &[u8], tbs: &[u8], context: &[u8]) 
         copy_secret_array::<{ fips205::slh_dsa_shake_128s::SK_LEN }>(suite, secret_key_bytes)?;
     let secret_key = fips205::slh_dsa_shake_128s::PrivateKey::try_from_bytes(&*secret_key_bytes)
         .map_err(|error| key_rejected(suite, format!("Invalid secret key bytes: {error}")))?;
-    let signature = secret_key
-        .try_sign_with_rng(&mut SystemRng, tbs, context, true)
-        .map_err(|error| signing_failed(suite, error))?;
+    let signature = with_system_rng(suite, "signing", |rng| {
+        secret_key.try_sign_with_rng(rng, tbs, context, true)
+    })?;
     Ok(signature.to_vec())
 }
 
@@ -310,9 +317,9 @@ fn sign_slh_dsa_shake_192s(secret_key_bytes: &[u8], tbs: &[u8], context: &[u8]) 
         copy_secret_array::<{ fips205::slh_dsa_shake_192s::SK_LEN }>(suite, secret_key_bytes)?;
     let secret_key = fips205::slh_dsa_shake_192s::PrivateKey::try_from_bytes(&*secret_key_bytes)
         .map_err(|error| key_rejected(suite, format!("Invalid secret key bytes: {error}")))?;
-    let signature = secret_key
-        .try_sign_with_rng(&mut SystemRng, tbs, context, true)
-        .map_err(|error| signing_failed(suite, error))?;
+    let signature = with_system_rng(suite, "signing", |rng| {
+        secret_key.try_sign_with_rng(rng, tbs, context, true)
+    })?;
     Ok(signature.to_vec())
 }
 
@@ -322,9 +329,9 @@ fn sign_slh_dsa_shake_256s(secret_key_bytes: &[u8], tbs: &[u8], context: &[u8]) 
         copy_secret_array::<{ fips205::slh_dsa_shake_256s::SK_LEN }>(suite, secret_key_bytes)?;
     let secret_key = fips205::slh_dsa_shake_256s::PrivateKey::try_from_bytes(&*secret_key_bytes)
         .map_err(|error| key_rejected(suite, format!("Invalid secret key bytes: {error}")))?;
-    let signature = secret_key
-        .try_sign_with_rng(&mut SystemRng, tbs, context, true)
-        .map_err(|error| signing_failed(suite, error))?;
+    let signature = with_system_rng(suite, "signing", |rng| {
+        secret_key.try_sign_with_rng(rng, tbs, context, true)
+    })?;
     Ok(signature.to_vec())
 }
 
@@ -334,9 +341,9 @@ fn sign_slh_dsa_shake_256f(secret_key_bytes: &[u8], tbs: &[u8], context: &[u8]) 
         copy_secret_array::<{ fips205::slh_dsa_shake_256f::SK_LEN }>(suite, secret_key_bytes)?;
     let secret_key = fips205::slh_dsa_shake_256f::PrivateKey::try_from_bytes(&*secret_key_bytes)
         .map_err(|error| key_rejected(suite, format!("Invalid secret key bytes: {error}")))?;
-    let signature = secret_key
-        .try_sign_with_rng(&mut SystemRng, tbs, context, true)
-        .map_err(|error| signing_failed(suite, error))?;
+    let signature = with_system_rng(suite, "signing", |rng| {
+        secret_key.try_sign_with_rng(rng, tbs, context, true)
+    })?;
     Ok(signature.to_vec())
 }
 
@@ -694,19 +701,24 @@ fn entropy_failed(suite: PqSignatureSuite, operation: &str, error: &'static str)
     )
 }
 
-fn signing_failed(suite: PqSignatureSuite, error: &'static str) -> QvError {
-    let lower = error.to_ascii_lowercase();
-    if lower.contains("rng") || lower.contains("random") {
-        entropy_failed(suite, "signing", error)
-    } else {
-        coded(
+fn with_system_rng<T>(
+    suite: PqSignatureSuite,
+    operation: &str,
+    run: impl FnOnce(&mut SystemRng) -> core::result::Result<T, &'static str>,
+) -> Result<T> {
+    let mut rng = SystemRng::default();
+    match run(&mut rng) {
+        Ok(value) => Ok(value),
+        Err(error) if rng.entropy_failed() => Err(entropy_failed(suite, operation, error)),
+        Err(error) => Err(coded(
             QvCode::VerificationFailed,
             format!(
-                "PQC signing failed for {}: {}",
+                "PQC {} failed for {}: {}",
+                operation,
                 suite.canonical_name(),
                 error
             ),
-        )
+        )),
     }
 }
 

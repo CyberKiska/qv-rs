@@ -6,7 +6,15 @@ use zeroize::Zeroizing;
 use crate::error::{coded, QvCode, Result};
 
 #[derive(Debug, Default)]
-pub(crate) struct SystemRng;
+pub(crate) struct SystemRng {
+    entropy_failed: bool,
+}
+
+impl SystemRng {
+    pub(crate) fn entropy_failed(&self) -> bool {
+        self.entropy_failed
+    }
+}
 
 impl RngCore for SystemRng {
     fn next_u32(&mut self) -> u32 {
@@ -28,6 +36,7 @@ impl RngCore for SystemRng {
 
     fn try_fill_bytes(&mut self, dest: &mut [u8]) -> core::result::Result<(), RngError> {
         fill_random(dest).map_err(|_| {
+            self.entropy_failed = true;
             NonZeroU32::new(RngError::CUSTOM_START)
                 .unwrap_or(NonZeroU32::MIN)
                 .into()
