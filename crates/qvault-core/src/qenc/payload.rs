@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use zeroize::Zeroize;
 
 use crate::error::{err, Result};
 use crate::manifest::strict_json::parse_json_bytes_strict;
@@ -186,7 +187,14 @@ pub fn wrap_wrapped_payload(
     validate_wrapped_private_metadata(&reparsed, private_meta_bytes.len())?;
     let private_meta_len = u32::try_from(private_meta_bytes.len())
         .map_err(|_| err("Private metadata is too large for wrapped-v1 payload"))?;
-    let mut payload = Vec::with_capacity(4 + private_meta_bytes.len() + file_bytes.len());
+    let payload_len = 4usize
+        .checked_add(private_meta_bytes.len())
+        .and_then(|length| length.checked_add(file_bytes.len()))
+        .ok_or_else(|| err("Wrapped payload length overflow"))?;
+    let mut payload = Vec::new();
+    payload
+        .try_reserve_exact(payload_len)
+        .map_err(|_| err("Unable to allocate wrapped payload"))?;
     payload.extend_from_slice(&private_meta_len.to_be_bytes());
     payload.extend_from_slice(&private_meta_bytes);
     payload.extend_from_slice(file_bytes);
@@ -194,6 +202,30 @@ pub fn wrap_wrapped_payload(
 }
 
 pub fn unwrap_wrapped_payload(payload: &[u8]) -> Result<(WrappedPayloadPrivateMetadata, Vec<u8>)> {
+    let (private_meta, file_start) = parse_wrapped_payload_metadata(payload)?;
+    let file_len = payload.len() - file_start;
+    let mut file_bytes = Vec::new();
+    file_bytes
+        .try_reserve_exact(file_len)
+        .map_err(|_| err("Unable to allocate decrypted file"))?;
+    file_bytes.extend_from_slice(&payload[file_start..]);
+    Ok((private_meta, file_bytes))
+}
+
+pub(crate) fn unwrap_wrapped_payload_in_place(
+    payload: &mut Vec<u8>,
+) -> Result<WrappedPayloadPrivateMetadata> {
+    let (private_meta, file_start) = parse_wrapped_payload_metadata(payload)?;
+    let file_len = payload.len() - file_start;
+    payload.copy_within(file_start.., 0);
+    payload[file_len..].zeroize();
+    payload.truncate(file_len);
+    Ok(private_meta)
+}
+
+fn parse_wrapped_payload_metadata(
+    payload: &[u8],
+) -> Result<(WrappedPayloadPrivateMetadata, usize)> {
     if payload.len() < 4 {
         return Err(err("Invalid private metadata length in decrypted payload"));
     }
@@ -212,8 +244,7 @@ pub fn unwrap_wrapped_payload(payload: &[u8]) -> Result<(WrappedPayloadPrivateMe
     let private_meta_value = parse_json_bytes_strict(private_meta_bytes)
         .map_err(|_| err("Invalid private metadata JSON in decrypted payload"))?;
     let private_meta = validate_wrapped_private_metadata(&private_meta_value, private_meta_len)?;
-    let file_bytes = payload[4 + private_meta_len..].to_vec();
-    Ok((private_meta, file_bytes))
+    Ok((private_meta, 4 + private_meta_len))
 }
 
 #[cfg(test)]
@@ -235,6 +266,18 @@ mod tests {
         let (recovered, file_bytes) = unwrap_wrapped_payload(&payload).expect("unwrap");
         assert_eq!(recovered, metadata());
         assert_eq!(file_bytes, b"data");
+    }
+
+    #[test]
+    fn in_place_unwrap_reuses_the_authenticated_plaintext_allocation() {
+        let mut payload = wrap_wrapped_payload(&metadata(), b"data").expect("wrap");
+        let original_pointer = payload.as_ptr();
+        let original_capacity = payload.capacity();
+        let recovered = unwrap_wrapped_payload_in_place(&mut payload).expect("unwrap in place");
+        assert_eq!(recovered, metadata());
+        assert_eq!(payload, b"data");
+        assert_eq!(payload.as_ptr(), original_pointer);
+        assert_eq!(payload.capacity(), original_capacity);
     }
 
     #[test]

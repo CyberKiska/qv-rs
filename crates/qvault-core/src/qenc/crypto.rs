@@ -3,7 +3,7 @@ use std::sync::{Mutex, OnceLock};
 
 use crate::aead::{
     assert_per_chunk_nonce_contract, build_chunk_aad, decrypt_chunk, derive_chunk_iv_from_k,
-    encrypt_chunk, PerChunkIvParams,
+    encrypt_chunk, PerChunkIvParams, AES_TAG_SIZE,
 };
 use crate::error::{coded, err, QvCode, Result};
 use crate::hash::{sha3_256, sha3_512_hex};
@@ -18,7 +18,7 @@ use crate::qenc::metadata::{
     authenticated_geometry, build_qenc_metadata, serialize_qenc_metadata, AuthenticatedGeometry,
 };
 use crate::qenc::payload::{
-    unwrap_wrapped_payload, wrap_wrapped_payload, WrappedPayloadPrivateMetadata,
+    unwrap_wrapped_payload_in_place, wrap_wrapped_payload, WrappedPayloadPrivateMetadata,
 };
 use crate::qenc::QencHeader;
 use crate::rng::fill_random;
@@ -197,25 +197,26 @@ fn encrypt_qenc_inner(
             "single-container-aead" => {
                 let encrypted_payload =
                     encrypt_chunk(&derived.kenc, &payload, &container_nonce, &header)?;
-                let mut container = Vec::with_capacity(header.len() + encrypted_payload.len());
+                let container_len = header
+                    .len()
+                    .checked_add(encrypted_payload.len())
+                    .ok_or_else(|| err("Encrypted container length overflow"))?;
+                let mut container = Vec::new();
+                container
+                    .try_reserve_exact(container_len)
+                    .map_err(|_| err("Unable to allocate encrypted container"))?;
                 container.extend_from_slice(&header);
                 container.extend_from_slice(&encrypted_payload);
                 Ok(container)
             }
-            "per-chunk-aead" => {
-                let encrypted_payload = encrypt_per_chunk(
-                    &payload,
-                    &header,
-                    &metadata,
-                    &container_nonce,
-                    &derived.kenc,
-                    &derived.kiv,
-                )?;
-                let mut container = Vec::with_capacity(header.len() + encrypted_payload.len());
-                container.extend_from_slice(&header);
-                container.extend_from_slice(&encrypted_payload);
-                Ok(container)
-            }
+            "per-chunk-aead" => encrypt_per_chunk_container(
+                &payload,
+                &header,
+                &metadata,
+                &container_nonce,
+                &derived.kenc,
+                &derived.kiv,
+            ),
             other => return Err(err(format!("Unsupported AEAD mode: {other}"))),
         };
 
@@ -289,9 +290,8 @@ pub fn decrypt_qenc(container_bytes: &[u8], secret_key: &[u8]) -> Result<Decrypt
             )));
         }
 
-        let (private_metadata, file_bytes) = unwrap_wrapped_payload(&decrypted_payload)?;
-        let mut file_bytes = Zeroizing::new(file_bytes);
-        drop(decrypted_payload);
+        let mut file_bytes = decrypted_payload;
+        let private_metadata = unwrap_wrapped_payload_in_place(&mut file_bytes)?;
 
         let recovered_file_length = u64::try_from(file_bytes.len()).map_err(|_| {
             err("Decrypted file length exceeds the supported metadata integer range")
@@ -440,7 +440,7 @@ fn decrypt_per_chunk(
     Ok(std::mem::take(&mut *plaintext))
 }
 
-fn encrypt_per_chunk(
+fn encrypt_per_chunk_container(
     payload: &[u8],
     header: &[u8],
     metadata: &crate::qenc::metadata::QencMetadata,
@@ -462,15 +462,46 @@ fn encrypt_per_chunk(
         &metadata.iv_strategy,
     )?;
 
+    let chunk_count_usize = usize::try_from(chunk_count)
+        .map_err(|_| err("Invalid metadata: chunkCount exceeds platform limits"))?;
+    let chunk_size_usize = usize::try_from(chunk_size)
+        .map_err(|_| err("Encrypted chunk size exceeds platform limits"))?;
+    let tag_bytes = chunk_count_usize
+        .checked_mul(AES_TAG_SIZE)
+        .ok_or_else(|| err("Encrypted payload tag length overflow"))?;
+    let container_len = header
+        .len()
+        .checked_add(payload.len())
+        .and_then(|length| length.checked_add(tag_bytes))
+        .ok_or_else(|| err("Encrypted container length overflow"))?;
     let mut encrypted = Vec::new();
+    encrypted
+        .try_reserve_exact(container_len)
+        .map_err(|_| err("Unable to allocate encrypted container"))?;
+    encrypted.extend_from_slice(header);
     for index in 0..chunk_count {
-        let plain_offset = (index * chunk_size) as usize;
-        let plain_len = chunk_size.min((payload.len() - plain_offset) as u64) as usize;
-        let plain_chunk = &payload[plain_offset..plain_offset + plain_len];
+        let plain_offset_u64 = index
+            .checked_mul(chunk_size)
+            .ok_or_else(|| err("Encrypted chunk plaintext offset overflow"))?;
+        let plain_offset = usize::try_from(plain_offset_u64)
+            .map_err(|_| err("Encrypted chunk plaintext offset exceeds platform limits"))?;
+        let remaining = payload
+            .len()
+            .checked_sub(plain_offset)
+            .ok_or_else(|| err("Encrypted chunk geometry exceeds payload length"))?;
+        let plain_len = chunk_size_usize.min(remaining);
+        let plain_end = plain_offset
+            .checked_add(plain_len)
+            .ok_or_else(|| err("Encrypted chunk plaintext end overflow"))?;
+        let plain_chunk = &payload[plain_offset..plain_end];
+        let chunk_index = u32::try_from(index)
+            .map_err(|_| err("Encrypted chunk index exceeds uint32 capacity"))?;
+        let plain_len_u32 = u32::try_from(plain_len)
+            .map_err(|_| err("Encrypted chunk length exceeds uint32 capacity"))?;
         let iv = derive_chunk_iv_from_k(
             kiv,
             container_nonce,
-            index as u32,
+            chunk_index,
             &metadata.domain_strings.iv,
             PerChunkIvParams {
                 chunk_count: Some(chunk_count),
@@ -479,9 +510,14 @@ fn encrypt_per_chunk(
                 iv_strategy: &metadata.iv_strategy,
             },
         )?;
-        let aad = build_chunk_aad(header, index as u32, plain_len as u32);
+        let aad = build_chunk_aad(header, chunk_index, plain_len_u32);
         let cipher_chunk = encrypt_chunk(kenc, plain_chunk, &iv, &aad)?;
         encrypted.extend_from_slice(&cipher_chunk);
+    }
+    if encrypted.len() != container_len {
+        return Err(err(
+            "Encrypted container length did not match authenticated geometry",
+        ));
     }
     Ok(encrypted)
 }
