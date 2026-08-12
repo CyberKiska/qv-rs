@@ -103,11 +103,13 @@ fn expected_hex_length(alg: &str) -> usize {
     }
 }
 
-fn hash_field_name(alg: &str) -> &'static str {
+fn hash_field_name(alg: &str) -> Result<&'static str> {
     match alg {
-        HASH_ALG_SHA256 => "sha256",
-        HASH_ALG_SHA3_512 => "sha3_512",
-        _ => unreachable!(),
+        HASH_ALG_SHA256 => Ok("sha256"),
+        HASH_ALG_SHA3_512 => Ok("sha3_512"),
+        other => Err(crate::error::err(format!(
+            "Unsupported hash algorithm after validation: {other}"
+        ))),
     }
 }
 
@@ -202,7 +204,11 @@ fn validate_stellar_v2_input_descriptor(
     Ok(())
 }
 
-fn build_expected_message(input_type: &str, size: usize, entries: &[(String, String)]) -> String {
+fn build_expected_message(
+    input_type: &str,
+    size: usize,
+    entries: &[(String, String)],
+) -> Result<String> {
     let mut lines = vec![
         MAGIC.to_string(),
         format!("type={input_type}"),
@@ -217,9 +223,9 @@ fn build_expected_message(input_type: &str, size: usize, entries: &[(String, Str
         ),
     ];
     for (alg, hex) in entries {
-        lines.push(format!("{}={hex}", hash_field_name(alg)));
+        lines.push(format!("{}={hex}", hash_field_name(alg)?));
     }
-    lines.join("\n")
+    Ok(lines.join("\n"))
 }
 
 fn crc16_xmodem(bytes: &[u8]) -> u16 {
@@ -378,7 +384,12 @@ fn verify_stellar_file_signature_v1_sep53(
         let actual = match alg.as_str() {
             HASH_ALG_SHA256 => digest_sha256.as_str(),
             HASH_ALG_SHA3_512 => digest_sha3_512.as_str(),
-            _ => unreachable!(),
+            other => {
+                return Ok(fail_result(
+                    format!("Unsupported hash algorithm after validation: {other}"),
+                    warnings,
+                ))
+            }
         };
         if actual != hex {
             return Ok(fail_result(format!("Digest mismatch for {alg}"), warnings));
@@ -390,7 +401,7 @@ fn verify_stellar_file_signature_v1_sep53(
         .as_ref()
         .and_then(|input| input.input_type.as_deref())
         .unwrap_or("file");
-    let expected_message = build_expected_message(input_type, message_bytes.len(), &hash_entries);
+    let expected_message = build_expected_message(input_type, message_bytes.len(), &hash_entries)?;
     if doc.message.as_deref() != Some(expected_message.as_str()) {
         return Ok(fail_result("Deterministic message mismatch", warnings));
     }
@@ -495,7 +506,12 @@ fn verify_stellar_signature_v2_sep53_message(
         let actual = match alg.as_str() {
             HASH_ALG_SHA256 => digest_sha256.as_str(),
             HASH_ALG_SHA3_512 => digest_sha3_512.as_str(),
-            _ => unreachable!(),
+            other => {
+                return Ok(fail_result(
+                    format!("Unsupported hash algorithm after validation: {other}"),
+                    warnings,
+                ))
+            }
         };
         if actual != hex {
             return Ok(fail_result(format!("Digest mismatch for {alg}"), warnings));

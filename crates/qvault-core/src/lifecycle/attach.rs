@@ -703,7 +703,9 @@ fn resolve_existing_target(
             }
             Err(err("source-evidence targetDigest mismatch"))
         }
-        LifecycleSignatureFamily::ArchiveApproval => unreachable!(),
+        LifecycleSignatureFamily::ArchiveApproval => Err(err(
+            "archive-approval targets must resolve directly to the selected archive state",
+        )),
     }
 }
 

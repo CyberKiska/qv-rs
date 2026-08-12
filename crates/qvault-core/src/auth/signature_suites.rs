@@ -99,7 +99,8 @@ pub fn normalize_signature_suite(value: &str) -> Result<&'static str> {
 }
 
 pub fn get_signature_suite_info(value: &str) -> Result<SignatureSuiteInfo> {
-    Ok(match normalize_signature_suite(value)? {
+    let canonical = normalize_signature_suite(value)?;
+    let info = match canonical {
         "mldsa-44" => MLDSA_44,
         "mldsa-65" => MLDSA_65,
         "mldsa-87" => MLDSA_87,
@@ -108,8 +109,13 @@ pub fn get_signature_suite_info(value: &str) -> Result<SignatureSuiteInfo> {
         "slhdsa-shake-256s" => SLHDSA_SHAKE_256S,
         "slhdsa-shake-256f" => SLHDSA_SHAKE_256F,
         "ed25519" => ED25519,
-        _ => unreachable!(),
-    })
+        other => {
+            return Err(err(format!(
+                "Unsupported normalized signature suite: {other}"
+            )))
+        }
+    };
+    Ok(info)
 }
 
 pub fn is_strong_pq_suite(value: &str) -> Result<bool> {

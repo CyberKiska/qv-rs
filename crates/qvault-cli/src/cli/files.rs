@@ -278,18 +278,18 @@ pub(crate) fn signer_key_output_paths(out_prefix: &Path) -> Result<(PathBuf, Pat
         bail!("--out must name an output file prefix");
     }
     Ok((
-        append_file_name_os_suffix(out_prefix, ".pqpk"),
-        append_file_name_os_suffix(out_prefix, ".pqsk"),
+        append_file_name_os_suffix(out_prefix, ".pqpk")?,
+        append_file_name_os_suffix(out_prefix, ".pqsk")?,
     ))
 }
 
-fn append_file_name_os_suffix(path: &Path, suffix: &str) -> PathBuf {
+fn append_file_name_os_suffix(path: &Path, suffix: &str) -> Result<PathBuf> {
     let mut file_name = path
         .file_name()
-        .expect("caller checked file_name")
+        .ok_or_else(|| anyhow::anyhow!("output path must have a file name"))?
         .to_os_string();
     file_name.push(suffix);
-    path.with_file_name(file_name)
+    Ok(path.with_file_name(file_name))
 }
 
 pub(crate) fn prepare_output_parent_dirs(paths: &[PathBuf], ctx: CliContext) -> Result<()> {

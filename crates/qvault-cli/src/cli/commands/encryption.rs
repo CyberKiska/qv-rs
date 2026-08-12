@@ -34,18 +34,16 @@ pub(super) fn run_encrypt(args: EncryptArgs, ctx: CliContext) -> Result<()> {
             .and_then(|value| value.to_str())
             .map(str::to_string),
     };
-    let source_evidence = source_evidence_paths
-        .map(|paths| {
-            create_encrypt_source_evidence(
-                paths,
-                args.source_evidence_key
-                    .as_deref()
-                    .expect("source-evidence paths require a key"),
-                plaintext.as_slice(),
-                ctx,
-            )
-        })
-        .transpose()?;
+    let source_evidence = match (source_evidence_paths, args.source_evidence_key.as_deref()) {
+        (Some(paths), Some(secret_key_path)) => Some(create_encrypt_source_evidence(
+            paths,
+            secret_key_path,
+            plaintext.as_slice(),
+            ctx,
+        )?),
+        (None, None) => None,
+        _ => bail!("source-evidence argument validation produced an inconsistent state"),
+    };
     let qenc_bytes = encrypt_qenc(
         &plaintext,
         &public_key,

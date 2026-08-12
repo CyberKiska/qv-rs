@@ -180,7 +180,11 @@ pub fn try_validate_supported_stellar_signature_document(doc: &Value) -> Result<
                 return Err(err("Signature has no hashes[] entries"));
             }
         }
-        _ => unreachable!(),
+        _ => {
+            return Err(err(format!(
+                "Unsupported Stellar signature profile after validation: {schema} / {proof_type} / {signature_scheme}"
+            )))
+        }
     }
     Ok(())
 }
