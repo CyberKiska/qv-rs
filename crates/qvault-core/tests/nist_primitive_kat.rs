@@ -5,6 +5,7 @@
 //!   <https://csrc.nist.gov/projects/cryptographic-standards-and-guidelines/example-values>
 //! - SHA3-256 / SHA3-512: FIPS 202 known answers for the empty string and "abc".
 
+use qvault_core::aead::{decrypt_chunk, encrypt_chunk};
 use qvault_core::hash::{sha3_256, sha3_512};
 use qvault_core::kdf::kmac256;
 
@@ -78,5 +79,21 @@ fn sha3_matches_fips202_known_answers() {
         hex(&sha3_512(b"abc")),
         "b751850b1a57168a5693cd924b6b096e08f621827444f70d884f5d0240d2712e\
          10e116e9192af3c91a7ec57647e3934057340b4cf408d5a56592f8274eec53f0"
+    );
+}
+
+#[test]
+fn aes256_gcm_matches_nist_zero_key_known_answer() {
+    let key = [0u8; 32];
+    let iv = [0u8; 12];
+    let plaintext = [0u8; 16];
+    let ciphertext = encrypt_chunk(&key, &plaintext, &iv, &[]).expect("AES-GCM encryption");
+    assert_eq!(
+        hex(&ciphertext),
+        "cea7403d4d606b6e074ec5d3baf39d18d0d1c8a799996bf0265b98b5d48ab919"
+    );
+    assert_eq!(
+        decrypt_chunk(&key, &ciphertext, &iv, &[]).expect("AES-GCM decryption"),
+        plaintext
     );
 }
