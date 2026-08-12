@@ -12,7 +12,7 @@ deterministic-test-vectors = ["qvault-core/deterministic-test-vectors"]
 anyhow.workspace = true
 base64.workspace = true
 clap.workspace = true
-qvault-core = { path = "../qvault-core" }
+qvault-core.workspace = true
 serde_json.workspace = true
 time.workspace = true
 zeroize.workspace = true

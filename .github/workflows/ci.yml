@@ -113,11 +113,21 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      - name: Supply chain (duplicates, advisories, sources)
+      - name: Supply chain (licenses, bans, advisories, sources)
         run: |
           set -euo pipefail
           cargo tree --workspace --locked --edges normal --duplicates
-          cargo deny check advisories sources
+          cargo deny check
+
+      - name: Verify production feature boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_tree="$(cargo tree -p qvault-cli --locked --edges features --no-default-features)"
+          if grep -Fq 'deterministic-test-vectors' <<<"${release_tree}"; then
+            echo "Production dependency graph enabled deterministic-test-vectors"
+            exit 1
+          fi
 
       - name: Clippy (warnings denied) and test workspace
         run: |

@@ -30,6 +30,7 @@ time = { version = "0.3.55", default-features = false, features = ["std", "parsi
 tiny-keccak = { version = "2.0.2", features = ["sha3", "kmac"] }
 zeroize = { version = "1.9.0", features = ["zeroize_derive"] }
 proptest = { version = "=1.11.0", default-features = false, features = ["std"] }
+qvault-core = { path = "crates/qvault-core", version = "=0.3.0" }
 
 [profile.release]
 opt-level = 3
