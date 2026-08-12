@@ -11,6 +11,7 @@ use anyhow::{bail, Context, Result};
 use qvault_core::bytes::from_hex;
 use qvault_core::error::{coded, QvCode};
 use qvault_core::qcont::{parse_qvqcont7_shard, Qvqcont7Shard, MAX_QVQCONT7_SHARD_BYTES};
+use qvault_core::validate_portable_filename;
 use zeroize::Zeroizing;
 
 use super::{CliContext, DecryptArgs, RestoreArgs};
@@ -497,17 +498,17 @@ pub(crate) fn reject_symlink_components(path: &Path, allow_symlink: bool) -> Res
 }
 
 pub(crate) fn validate_safe_name_prefix(prefix: &str) -> Result<()> {
-    if prefix.contains(['/', '\\', '\0']) {
-        bail!("--name must not contain path separators or NUL");
-    }
-    Ok(())
+    validate_portable_filename(&format!("{prefix}publicKey.qkey"))
+        .map_err(|error| anyhow::anyhow!("--name must form portable key filenames: {error}"))
 }
 
 pub(crate) fn validate_optional_filename(filename: Option<&str>) -> Result<()> {
     if let Some(filename) = filename {
-        if filename.is_empty() || filename.len() > 255 || filename.contains(['/', '\\', '\0']) {
-            bail!("--filename must be a safe basename");
+        if filename.starts_with('.') {
+            bail!("--filename must not be hidden or a dot path component");
         }
+        validate_portable_filename(filename)
+            .map_err(|error| anyhow::anyhow!("--filename must be a portable basename: {error}"))?;
     }
     Ok(())
 }
@@ -527,16 +528,11 @@ pub(crate) fn validate_cohort_cli_params(n: u16, k: u16) -> Result<()> {
 
 fn safe_recovered_filename(filename: Option<&str>) -> Result<String> {
     let filename = filename.unwrap_or("decrypted");
-    if filename.is_empty()
-        || filename == "."
-        || filename == ".."
-        || filename.starts_with('.')
-        || filename.len() > 255
-        || filename.contains(['/', '\\', '\0'])
-        || filename.chars().any(char::is_control)
-    {
+    if filename.starts_with('.') {
         bail!("recovered original filename is unsafe");
     }
+    validate_portable_filename(filename)
+        .map_err(|error| anyhow::anyhow!("recovered original filename is unsafe: {error}"))?;
     Ok(filename.to_string())
 }
 
@@ -735,5 +731,18 @@ mod tests {
         assert!(parse_archive_id_selector(&"AB".repeat(32)).is_err());
         assert!(parse_state_id_selector(&"ab".repeat(63)).is_err());
         assert!(parse_bundle_digest_selector(&"0g".repeat(64)).is_err());
+    }
+
+    #[test]
+    fn filename_validation_rejects_cross_platform_special_names() {
+        for name in ["CON", "nul.txt", "COM1.log", "name:stream", "trailing."] {
+            assert!(validate_optional_filename(Some(name)).is_err(), "{name}");
+            assert!(safe_recovered_filename(Some(name)).is_err(), "{name}");
+        }
+        assert!(validate_optional_filename(Some("report.txt")).is_ok());
+        assert_eq!(
+            safe_recovered_filename(Some("report.txt")).unwrap(),
+            "report.txt"
+        );
     }
 }

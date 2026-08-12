@@ -15,15 +15,15 @@ pub const MAX_QVPACK_ENTRY_PAYLOAD_BYTES: usize = crate::qenc::crypto::MAX_FILE_
 pub const MAX_QVPACK_AGGREGATE_PAYLOAD_BYTES: usize = crate::qenc::crypto::MAX_FILE_SIZE;
 pub const MAX_QVPACK_ENCODED_BYTES: usize = crate::qenc::crypto::MAX_FILE_SIZE;
 
-fn assert_entry_name(name: &str) -> Result<()> {
+pub fn validate_portable_filename(name: &str) -> Result<()> {
     if name.is_empty() {
-        return Err(err("QVPACK entry name must be a non-empty string"));
+        return Err(err("Filename must be a non-empty string"));
     }
     if name == "." || name == ".." {
-        return Err(err("QVPACK entry name must not be a dot path component"));
+        return Err(err("Filename must not be a dot path component"));
     }
     if name.chars().any(char::is_control) {
-        return Err(err("QVPACK entry name must not contain control characters"));
+        return Err(err("Filename must not contain control characters"));
     }
     if name.bytes().any(|byte| {
         matches!(
@@ -32,11 +32,11 @@ fn assert_entry_name(name: &str) -> Result<()> {
         )
     }) {
         return Err(err(
-            "QVPACK entry name contains a path separator or non-portable filename character",
+            "Filename contains a path separator or non-portable character",
         ));
     }
     if matches!(name.as_bytes().last(), Some(b' ' | b'.')) {
-        return Err(err("QVPACK entry name must not end with a space or period"));
+        return Err(err("Filename must not end with a space or period"));
     }
     let device_stem = name
         .split('.')
@@ -52,11 +52,11 @@ fn assert_entry_name(name: &str) -> Result<()> {
                 matches!(suffix, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
             });
     if reserved_device {
-        return Err(err("QVPACK entry name is reserved by a supported platform"));
+        return Err(err("Filename is reserved by a supported platform"));
     }
     if name.len() > MAX_QVPACK_ENTRY_NAME_BYTES {
         return Err(err(format!(
-            "QVPACK entry filename exceeds resource limit ({MAX_QVPACK_ENTRY_NAME_BYTES} UTF-8 bytes)"
+            "Filename exceeds resource limit ({MAX_QVPACK_ENTRY_NAME_BYTES} UTF-8 bytes)"
         )));
     }
     Ok(())
@@ -67,7 +67,7 @@ fn assert_entry_name(name: &str) -> Result<()> {
 /// Entry names are restricted to one portable normal path component, so the
 /// returned path cannot name the root itself, a parent, or an absolute path.
 pub fn bundle_entry_output_path(root: &Path, name: &str) -> Result<PathBuf> {
-    assert_entry_name(name)?;
+    validate_portable_filename(name)?;
     let mut components = Path::new(name).components();
     if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
         return Err(err(
@@ -125,7 +125,7 @@ pub fn build_bundle_payload(entries: &[BundleEntryRef<'_>]) -> Result<Vec<u8>> {
     let mut seen_names = std::collections::HashSet::new();
     let mut aggregate_payload = 0usize;
     let total_size = entries.iter().try_fold(total_size, |acc, entry| {
-        assert_entry_name(entry.name)?;
+        validate_portable_filename(entry.name)?;
         if !seen_names.insert(entry.name.to_ascii_lowercase()) {
             return Err(err(
                 "QVPACK contains duplicate or case-colliding entry filenames",
@@ -258,7 +258,7 @@ pub fn parse_bundle_payload(bytes: &[u8]) -> Result<Vec<ParsedBundleEntry<'_>>> 
                 ))
             })?
             .to_string();
-        assert_entry_name(&name)?;
+        validate_portable_filename(&name)?;
         if !seen_names.insert(name.to_ascii_lowercase()) {
             return Err(err(
                 "QVPACK contains duplicate or case-colliding entry filenames",
