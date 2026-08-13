@@ -55,7 +55,7 @@ Not implemented:
 
 Requirements:
 
-- Rust 1.95.0 (the toolchain pinned by CI) or a compatible newer stable toolchain
+- Rust 1.97.1 (the toolchain pinned by CI) or a compatible newer stable toolchain
 - no Node.js or JavaScript checkout for normal builds, tests, or operation
 - optional Node.js and a pinned JavaScript checkout only for live oracle comparison or fixture maintenance
 
