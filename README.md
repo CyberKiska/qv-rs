@@ -1,6 +1,8 @@
-# qv-cli
+# qv-rs / qv-cli
 
-`qv-cli` is the Rust implementation for Quantum Vault artifacts. It is a local CLI and library workspace for creating, inspecting, attaching evidence to, verifying, resharing, and restoring current Quantum Vault archives.
+`qv-rs` is the standalone Rust implementation of the current Quantum Vault artifact family. The workspace provides the `qvault-core` Rust library and the `qvault-cli` executable for creating, inspecting, signing, attaching evidence to, verifying, resharing, restoring, and decrypting archives.
+
+The Rust implementation does **not** require the JavaScript Quantum Vault project, Node.js, a network service, or a daemon at build time or runtime. It implements the supported formats and cryptographic operations locally. Artifacts are format-compatible with [CyberKiska/quantum-vault](https://github.com/CyberKiska/quantum-vault); a pinned JavaScript revision is used only as an independent interoperability oracle in CI and during intentional fixture refreshes.
 
 Quantum Vault is an archival container format that separates confidentiality, recoverability, and authenticity:
 
@@ -10,7 +12,7 @@ Quantum Vault is an archival container format that separates confidentiality, re
 - Archive approval signatures cover canonical archive-state bytes, not mutable lifecycle-bundle bytes.
 - Restore is fail-closed: ambiguity, malformed bytes, digest mismatch, failed key binding, or unsatisfied archive policy blocks output.
 
-The [sibling JavaScript project](https://github.com/CyberKiska/quantum-vault) remains the source-of-truth implementation and normative documentation set. This Rust repository keeps its docs self-contained, but protocol behavior should be checked against the JS source and its `docs/format-spec.md`, `docs/security-model.md`, `docs/trust-and-policy.md`, and schema fixtures when compatibility questions arise.
+Start with [USAGE.md](USAGE.md) for the complete command/parameter reference and end-to-end workflows. [ARCHITECTURE.md](ARCHITECTURE.md) describes the trust and data model; [docs/IMPLEMENTATION_NOTES.md](docs/IMPLEMENTATION_NOTES.md) and [docs/successor-conformance.md](docs/successor-conformance.md) define contributor and cross-implementation constraints.
 
 ## Current Status
 
@@ -28,12 +30,17 @@ Implemented:
 - `.qsig`, `.pqpk`, Stellar `.sig`, and OpenTimestamps linkage handling
 - Rust-native PQ signing key generation, detached `.qsig` creation, and generic `.qsig` verification
 - stable CLI JSON envelopes and JS-aligned `qvCode` exit taxonomy
+- OS-backed, fail-closed randomness for ML-KEM, randomized PQ signatures, QENC nonce/salt generation, archive identities, and Shamir sharing
+- compile-time isolation of deterministic interoperability inputs behind the non-default `deterministic-test-vectors` feature
+- bounded artifact/shard reads, atomic output replacement, symlink rejection by default, and portable recovered-filename validation
 
 Not implemented:
 
 - dedicated CLI `qvpack` pack/extract commands (the core payload format is implemented)
 - full OpenTimestamps calendar attestation validation
 - network services, daemon mode, or RPC mode
+
+“Format-compatible” means the supported Rust and JavaScript implementations can exchange the listed artifact versions and that frozen byte-level vectors are checked in CI. It does not mean that every command name, optional legacy format, report field, or unfinished feature in one implementation exists in the other.
 
 ## Repository Layout
 
@@ -42,20 +49,23 @@ Not implemented:
 - `crates/qvault-core/tests/data`: self-contained JS oracle fixtures, schema fixtures, corpus cases, and compact examples
 - `docs/successor-conformance.md`: conformance boundaries and intentional Rust deviations
 - `ARCHITECTURE.md`: current Rust architecture
-- `IMPLEMENTATION_NOTES.md`: contributor rules and oracle references
+- `docs/IMPLEMENTATION_NOTES.md`: contributor rules and oracle references
 
 ## Build And Test
 
 Requirements:
 
-- Rust toolchain compatible with the workspace `Cargo.toml`
-- Node.js only when manually comparing or regenerating JS-oracle fixtures
+- Rust 1.95.0 (the toolchain pinned by CI) or a compatible newer stable toolchain
+- no Node.js or JavaScript checkout for normal builds, tests, or operation
+- optional Node.js and a pinned JavaScript checkout only for live oracle comparison or fixture maintenance
 
 Build:
 
 ```bash
-cargo build
+cargo build --release -p qvault-cli --locked
 ```
+
+The production build has no default features. Do not enable `deterministic-test-vectors` in a release: it exposes exact seed/nonce inputs intended only for frozen interoperability tests. CI verifies that the production dependency graph does not enable it.
 
 ### Prebuilt binaries (CI)
 
@@ -73,7 +83,8 @@ Each archive contains the `qvault-cli` binary (or `qvault-cli.exe` on Windows), 
 Run tests:
 
 ```bash
-cargo test
+cargo test --workspace --all-targets --locked
+cargo test --workspace --all-targets --all-features --locked
 ```
 
 Run focused successor fixtures:
@@ -84,13 +95,18 @@ cargo test -p qvault-core --test qcont_v7
 cargo test -p qvault-cli --test cli_json
 ```
 
-The old fixture generator in `tools/gen-js-fixtures.mjs` is intentionally disabled until it is rewritten against the successor JS modules.
+The default test suite is self-contained. The optional live-oracle test requires `QV_ORACLE_ROOT` and an explicit `--ignored` run; see [the corpus notes](crates/qvault-core/tests/data/corpus/README.md).
 
 ## CLI Surface
 
 The Cargo binary is `qvault-cli`.
 
-See `USAGE.md` for end-to-end command examples, restore workflows, attach/reshare examples, test commands, and development guidance.
+See [USAGE.md](USAGE.md) for every command, positional argument, option, default, output rule, end-to-end workflow, and automation/error contract. The executable itself is authoritative for the installed version:
+
+```bash
+qvault-cli --help
+qvault-cli <command> --help
+```
 
 Primary commands:
 
@@ -110,7 +126,22 @@ Primary commands:
 - `selftest`
 - `version`
 
-Global reporting flags include `--json`, `--quiet`, `--allow-symlink`, `--color`, and `--no-color`.
+Global flags include `--json`, `--quiet`, `--allow-symlink`, `--color`, `--no-color`, and the aggregate shard-memory guard `--max-shard-input-bytes` (1 GiB by default, at most 2 GiB by explicit opt-in).
+
+Commands refuse to overwrite existing outputs unless `--force` is supplied. Writes use temporary files and replacement/rename semantics; secret keys, decrypted plaintext, and shard files use owner-only permissions on Unix. Output names recovered from authenticated metadata must be portable basenames, and symlink path components are rejected unless the operator explicitly opts in with `--allow-symlink`.
+
+## Rust Library Surface
+
+`qvault-core` can be used without the CLI. Its top-level re-exports cover the common path:
+
+- `generate_key_pair`, `encapsulate`, and `decapsulate` for ML-KEM-1024
+- `encrypt_qenc`, `decrypt_qenc`, `parse_qenc_header`, and `build_qenc_header` for QENC
+- `build_bundle_payload`, `parse_bundle_payload`, and `validate_portable_filename` for QVB1 payloads
+- `verify_successor_lifecycle_authenticity` plus `AuthPolicy`, `VerificationInputs`, and `AuthenticityReport` for lifecycle verification
+
+The public modules additionally expose strict lifecycle parsers/builders, QVqcont split/restore/attach/reshare operations, PQ key/signature formats, Shamir/Reed–Solomon compatibility functions, KDF/AEAD helpers, and policy constants. APIs return `qvault_core::Result`; coded failures expose `QvError::qv_code()`.
+
+Production callers should use the ordinary random APIs. Seeded ML-KEM/QENC/Shamir helpers and deterministic archive identifiers exist only when the non-default `deterministic-test-vectors` feature is explicitly enabled; they are for tests, never production key or nonce generation.
 
 ## Rust-Only Archive Approval Workflow
 
@@ -151,17 +182,19 @@ qvault-cli --json attach \
 
 qvault-cli --json verify important-shards/important.pdf.archive-state.json \
   --bundle important-approved.lifecycle-bundle.json \
+  --pqpk signer.pqpk \
   --required-policy-level strong-pq-signature
 
 qvault-cli --json restore important-approved-shards/*.qcont \
   --bundle important-approved.lifecycle-bundle.json \
+  --pqpk signer.pqpk \
   --output-qenc restored/important.pdf.qenc \
   --output-secret-key restored/important-privateKey.qkey
 ```
 
 `sign --target archive-state` signs the exact canonical archive-state descriptor bytes read from `important-shards/important.pdf.archive-state.json`. It does not sign the lifecycle bundle. This distinction is intentional: the archive-state descriptor is the stable archive identity and policy commitment, while the lifecycle bundle is mutable evidence that can later receive signatures, public keys, timestamps, transition records, and source evidence.
 
-The `.qsig` embeds enough public key material for cryptographic self-verification, but embedded-only keys are not trusted identities. A signature satisfies archive policy only when the signer is pinned by trusted public-key material, either attached into the lifecycle bundle with `attach --sig --pqpk` or supplied explicitly to policy commands with `--pqpk`. `sig-verify` verifies arbitrary document bytes and reports whether verification used a supplied `.pqpk` or only the embedded key; it does not evaluate lifecycle policy and should not be used as a substitute for `verify` or `restore`.
+The `.qsig` embeds enough public key material for cryptographic self-verification, but embedded keys and lifecycle-bundle `publicKeys[]` entries are mutable evidence, not trust anchors. `attach --sig --pqpk` records the evidence needed for portable verification, but a signature is trusted and may satisfy lifecycle policy only when the operator also supplies the authorized signer independently to `verify` or `restore` with `--pqpk` (or `--expected-ed25519-signer` for Stellar signatures). `sig-verify` verifies arbitrary document bytes and reports whether verification used a supplied `.pqpk` or only the embedded key; it does not evaluate lifecycle policy and should not be used as a substitute for `verify` or `restore`.
 
 ## Compatibility Targets
 
@@ -187,24 +220,33 @@ Restore groups candidates by archive identity and exact canonical bytes:
 
 Lifecycle-bundle bytes are mutable evidence and are selected explicitly when multiple bundle digests are present. Archive approval signatures are verified over canonical archive-state bytes. Maintenance signatures target transition-record bytes. Source-evidence signatures target source-evidence bytes.
 
-For `any-signature` and `strong-pq-signature` policies, Rust counts signatures only when the signer is bound through bundle public-key material or explicit user pins (`--pqpk` or `--expected-ed25519-signer`). Self-verifying signature material can be reported, but it does not satisfy archive policy by itself.
+For `any-signature` and `strong-pq-signature` policies, Rust counts signatures only when the signer is independently authorized by an explicit user pin (`--pqpk` or `--expected-ed25519-signer`). Bundle-carried keys and self-verifying signature material can establish raw cryptographic validity, but they do not establish trust and never produce trusted lifecycle `Verified` status by themselves.
 
 OpenTimestamps evidence is linked to `SHA-256(detached signature bytes)`. OTS evidence does not satisfy archive policy. Completion fields and labels are heuristic reporting only; complete-looking proofs are reported as `OTS proof appears complete (heuristic)`.
 
 ## Security Notes
 
+- Both crates use `#![forbid(unsafe_code)]`; release builds enable overflow checks and abort on panic.
+- Production randomness comes from the operating system through `getrandom` and fails closed. QENC obtains its container nonce and KDF salt together, ML-KEM seeds remain in zeroizing storage, and randomized PQ signing preserves entropy-failure attribution.
+- QENC keeps a bounded in-process replay guard for recent encapsulated-key/nonce/salt tuples and refuses a detected repeat to reduce catastrophic AES-GCM nonce-reuse risk after RNG failure.
 - Key commitment is mandatory and checked before `.qenc` decryption.
+- QENC authenticates format/policy metadata and either the complete payload or every chunk with injective AAD and a bounded KMAC-derived per-chunk IV counter.
 - Decrypt verifies the inner wrapped-payload file hash.
 - Split verifies that the provided ML-KEM secret key matches the `.qenc` before producing shards.
 - Restore validates embedded archive-state, cohort-binding, lifecycle-bundle, `.qenc` metadata, key commitment, share commitments, fragment body hashes, and policy.
-- Secret keys, decrypted plaintext, and `.qcont` shards are written with owner-only permissions on Unix where available.
+- Artifact reads have format-specific ceilings. QENC plaintext is limited to 1 GiB, QENC containers to that payload plus 1 MiB, generic signed targets to 512 MiB, small metadata/key/signature artifacts to 32 MiB, and aggregate shard input to 1 GiB by default (2 GiB maximum opt-in).
+- Secret keys, decrypted plaintext, and `.qcont` shards are written atomically with owner-only permissions on Unix where available. Public outputs use ordinary public-file permissions.
 - `.pqsk` signing keys authorize archive approvals; keep them separate from archive storage and publish/pin only `.pqpk` public keys.
-- Secret zeroization is best-effort. Temporary shared secrets, derived keys, and intermediate buffers are cleared where feasible; returned plaintext and returned secret-key bytes remain caller-controlled memory.
+- JSON randomness reports identify the OS provider, purpose, deterministic-feature state, and fail-closed mode without exposing seed or secret bytes.
+- Secret zeroization is best-effort, not a formal guarantee. Temporary seeds, shared secrets, derived keys, private-key material, shares, plaintext, and intermediate buffers are cleared where ownership permits; values returned to library callers remain caller-controlled memory.
 
-## Remaining Gaps
+The cryptographic known-answer tests and runtime `selftest` are engineering health checks. They are not a NIST CAVP/CMVP validation claim and do not replace platform, operational, or independent cryptographic review.
 
-- No automated end-to-end JS/Rust fixture regeneration harness is checked in yet.
+## Limitations And Assurance Boundary
+
+- CI checks the frozen corpus byte-for-byte against pinned JavaScript oracle revision `485a51388d0d26ee6cae9cd4785753a12eee9d32`. The default local suite reports the live parity test as ignored rather than silently passing without `QV_ORACLE_ROOT`.
 - `split --archive-approval-key <key.pqsk>` supports same-run archive approval; the separate `sign` + `attach` workflow remains useful for offline approval.
 - Dedicated CLI `qvpack` pack/extract commands are not yet exposed.
 - OTS validation is structural/linkage reporting, not full calendar verification.
-- Full workspace CI should continue expanding malformed and cross-implementation cases before production release.
+- CI now includes 32-bit checking, seeded fuzz smoke coverage, and scheduled sanitizer fuzzing; longer externally recorded fuzz campaigns remain desirable before high-assurance releases.
+- QENC and shard workflows are bounded but remain in-memory operations; the current wire format/API is not a streaming encryption or restore interface.

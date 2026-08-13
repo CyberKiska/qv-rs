@@ -1,6 +1,8 @@
-# qv-cli Usage
+# qv-rs / qvault-cli Usage
 
-`qv-cli` is a local Rust command-line tool for current Quantum Vault artifacts. It creates encrypted `.qenc` containers, splits them into recoverable `QVqcont-7` shard cohorts, attaches lifecycle evidence, verifies archive authenticity, restores encrypted containers and secret keys from shards, and decrypts restored containers.
+`qvault-cli` is the standalone command-line interface from the `qv-rs` workspace. It creates encrypted `.qenc` containers, splits them into recoverable `QVqcont-7` shard cohorts, signs and attaches lifecycle evidence, verifies archive authenticity, restores encrypted containers and secret keys from shards, and decrypts restored containers.
+
+No JavaScript Quantum Vault checkout, Node.js runtime, server, or network connection is required. The Rust implementation performs the cryptography and format handling itself. Its supported artifacts are byte/format-compatible with the pinned JavaScript Quantum Vault oracle, but the two CLIs are independent products and need not expose identical commands for every feature.
 
 Quantum Vault is meant for long-lived archives where three properties matter at the same time:
 
@@ -15,7 +17,7 @@ The important operational model is: keep enough shards to restore, keep lifecycl
 From the repository root:
 
 ```bash
-cargo build --release -p qvault-cli
+cargo build --release -p qvault-cli --locked
 ```
 
 The built binary is:
@@ -44,6 +46,7 @@ These flags work with every command:
 - `--quiet`: suppress non-error text output
 - `--allow-symlink`: permit symlink paths and path components
 - `--color` / `--no-color`: accepted for JavaScript CLI parity
+- `--max-shard-input-bytes <bytes>`: aggregate QVqcont input budget; defaults to 1 GiB and can be raised explicitly to at most 2 GiB
 
 Use `--json` for automation:
 
@@ -52,6 +55,222 @@ $QV --json version
 ```
 
 By default, the CLI rejects symlink path components for safer local file handling. Use `--allow-symlink` only when you intentionally trust the path tree.
+
+Global flags may appear before or after the subcommand. `--json` and `--quiet` are normally alternatives: JSON mode prints the machine-readable result, while quiet mode suppresses successful human-readable output. Errors still produce a JSON envelope when `--json` is present.
+
+## Common Output Behavior
+
+- Existing files are not overwritten unless the command accepts and receives `--force`.
+- Output paths are preflighted before expensive secret work where practical. Related outputs are checked for path collisions.
+- File writes use a temporary file followed by replacement/rename. Secret-key, plaintext, and shard outputs use mode `0600` on Unix; public artifacts use mode `0644`.
+- Input and output symlinks are rejected by default, including symlinked parent components. `--allow-symlink` is an explicit trust decision.
+- Filenames embedded in or recovered from artifacts must be portable single-component basenames: no separators, control characters, Windows device names, alternate-data-stream colons, trailing spaces/periods, `.`/`..`, or case-colliding QVB1 entries.
+- QENC plaintext is limited to 1 GiB. Signed targets are limited to 512 MiB. Metadata, keys, and detached evidence use a 32 MiB small-artifact ceiling. QVqcont inputs are also checked against per-file and aggregate limits.
+- Randomized command reports include a `randomness` object in JSON mode. Production reports identify `getrandom`, the purposes served, and `failureMode: "fail-closed"`; secret seeds and RNG output are never reported.
+
+Use `qvault-cli <command> --help` for the exact syntax of the installed version.
+
+## Command Reference
+
+The forms below omit the global flags described above. Options documented as “repeatable” may be passed more than once.
+
+### `keygen`
+
+```text
+qvault-cli keygen --out <directory> [--name <prefix>] [--print-public] [--force]
+```
+
+- `--out` is required and receives the raw ML-KEM-1024 key files.
+- `--name` prepends a validated portable prefix. The default outputs are `publicKey.qkey` and `privateKey.qkey`; `--name archive-` produces `archive-publicKey.qkey` and `archive-privateKey.qkey`.
+- `--print-public` prints the public key as Base64 in text mode or adds `publicKeyBase64` in JSON mode. Private-key bytes are never printed.
+- `--force` permits replacement of both output files.
+
+### `signer-keygen`
+
+```text
+qvault-cli signer-keygen --out <file-prefix> [--suite <suite>] [--force]
+```
+
+- `--out signer` writes `signer.pqpk` and `signer.pqsk`; it is a file prefix, not a directory.
+- `--suite` defaults to `mldsa-87`. Accepted values are `mldsa-44`, `mldsa-65`, `mldsa-87`, `slhdsa-shake-128s`, `slhdsa-shake-192s`, `slhdsa-shake-256s`, and `slhdsa-shake-256f`.
+- Under the current Quantum Vault policy registry, `mldsa-87`, `slhdsa-shake-256s`, and `slhdsa-shake-256f` are classified as `strongPq`; the other supported PQ suites remain valid signatures but do not satisfy `strong-pq-signature` policy.
+- `--force` permits replacement of both key files.
+
+### `sign`
+
+```text
+qvault-cli sign <input-file> --secret-key <key.pqsk> --out <signature.qsig>
+  [--target <bytes|archive-state|transition-record|source-evidence>]
+  [--filename <display-name>] [--created-at <RFC3339>] [--force]
+```
+
+- The default target is `bytes`, which signs the input exactly as read.
+- Lifecycle targets require strict, canonical, valid JSON of the selected type before signing.
+- `--filename` and `--created-at` populate display metadata. The filename is unauthenticated QSIG display metadata and must be a portable basename. The timestamp is normalized to UTC millisecond form.
+- The target size ceiling is 512 MiB.
+- Signing is randomized/hedged with the OS CSPRNG and fails closed if entropy is unavailable.
+
+### `sig-verify`
+
+```text
+qvault-cli sig-verify <input-file> --sig <signature.qsig> [--pqpk <signer.pqpk>]
+```
+
+- Verifies a detached QSIG over the exact input bytes.
+- Without `--pqpk`, the embedded key may establish cryptographic consistency but not an authorized signer identity.
+- With `--pqpk`, that file is authoritative for this operation. JSON distinguishes `cryptographicOk`, `trusted`, and `trustSource`.
+- This command does not evaluate lifecycle policy and never counts the result toward archive policy.
+
+### `encrypt`
+
+```text
+qvault-cli encrypt <input-file> --public-key <publicKey.qkey> --out <file.qenc>
+  [--filename <basename>] [--source-evidence-key <signer.pqsk>]
+  [--source-evidence-out <file>] [--source-evidence-sig-out <file>]
+  [--source-evidence-pqpk-out <file>] [--force]
+```
+
+- `--filename` overrides the input basename stored in authenticated encrypted `wrapped-v1` metadata.
+- `--source-evidence-key` additionally creates canonical source-evidence JSON, a detached QSIG over it, and the derived signer `.pqpk`. Defaults append `.source-evidence.json`, `.source-evidence.json.qsig`, and `.source-evidence.pqpk` to the QENC output name.
+- Any source-evidence output override requires `--source-evidence-key`.
+- All coordinated output paths are checked before writing. On a non-force partial write failure, best-effort cleanup removes files from that output set.
+- Plaintext must be non-empty and at most 1 GiB. The command selects single-container or 8 MiB per-chunk AES-GCM automatically.
+
+### `decrypt`
+
+```text
+qvault-cli decrypt <input.qenc> --private-key <privateKey.qkey>
+  [--out <file> | --out-dir <directory> [--use-original-filename]
+  | --use-original-filename] [--force]
+```
+
+- `--out` writes exactly that path and cannot be combined with `--out-dir` or `--use-original-filename`.
+- `--out-dir` writes the authenticated original basename into that directory; `--use-original-filename` may be supplied for clarity but is not required with `--out-dir`.
+- `--use-original-filename` without `--out-dir` writes beside the input QENC.
+- With none of those options, output defaults to `<input.qenc>.decrypted`.
+- If no original filename exists, filename-based modes use `decrypted`. Unsafe or non-portable recovered names are rejected rather than sanitized silently.
+- A `QVB1` payload is validated and reported as `payloadKind: "qvpack"`, but the CLI writes the bundle bytes as one file; it does not extract entries.
+
+### `split`
+
+```text
+qvault-cli split <input.qenc> --private-key <privateKey.qkey> --n <total> --k <data>
+  [--out <directory>] [--auth-policy-level <level>]
+  [--min-valid-signatures <count>] [--archive-approval-key <signer.pqsk>]
+  [--force]
+```
+
+- `--out` defaults to `shards`.
+- Cohort geometry must satisfy `2 <= k < n <= 255` and `n - k` must be even. The Shamir threshold is `k + (n - k) / 2`.
+- `--auth-policy-level` defaults to `strong-pq-signature`; accepted values are `integrity-only`, `any-signature`, and `strong-pq-signature`.
+- `--min-valid-signatures` defaults to `1` and must be positive.
+- `--archive-approval-key` creates a same-run randomized PQ archive approval over canonical archive-state bytes and embeds the signature/public-key evidence into the emitted bundle and shards. The key must use a suite capable of satisfying the selected policy if immediate satisfaction is expected.
+- Before output, split verifies that the private key decapsulates the QENC and that its key commitment matches.
+
+### `attach`
+
+```text
+qvault-cli attach [--shards <shard>...] [--archive-state <archive-state.json>]
+  [--bundle <lifecycle-bundle.json>] [evidence options]
+  [--out-bundle <file>] [--out-shards <directory>]
+  [--no-embed-into-shards] [--force]
+```
+
+Evidence options are repeatable unless noted:
+
+- `--sig <file>` imports an archive-approval QSIG or supported Stellar signature.
+- `--maintenance-sig <file>` requires one shared `--maintenance-target-ref <targetRef>`.
+- `--source-evidence-sig <file>` requires either one `--source-evidence <file>` or `--source-evidence-target-ref <targetRef>`.
+- `--source-evidence <file>` and `--source-evidence-bytes <file>` import source-evidence artifacts.
+- `--pqpk <file>` imports PQ public-key evidence; it does not turn the mutable bundle into a trust anchor.
+- `--ots <file>` imports detached OpenTimestamps evidence.
+- `--ed25519-signer <address>` (alias `--expected-ed25519-signer`) supplies the expected Stellar signer during import.
+- `--sig-import '<json>'` accepts a typed descriptor with required `file` and `signatureFamily` (`archive-approval`, `maintenance`, or `source-evidence`) and optional `targetType`, `targetRef`, `targetDigest` (hex string or `{ "value": "..." }`), and `sourceEvidence` path.
+
+`--out-bundle` defaults to `lifecycle-bundle.json`; `--out-shards` defaults to `attached-shards`. Shards are rewritten only when shards were supplied and `--no-embed-into-shards` is absent. `--archive-state` is a consistency check, while `--bundle` supplies the existing mutable evidence carrier.
+
+### `reshare`
+
+```text
+qvault-cli reshare --shards <shard>... --n <total> --k <data>
+  [--bundle <file>] [--archive-id <hex>] [--state-id <hex>]
+  [--cohort-id <hex>] [--bundle-digest <hex>]
+  [--reason-code <text>] [--operator-role <text>] [--notes <text>]
+  [--performed-at <RFC3339>] [--out <directory>] [--force]
+  [--maintenance-sig <file>...] [--maintenance-pqpk <file>...]
+  [--maintenance-ots <file>...] [--maintenance-ed25519-signer <address>]
+```
+
+- Creates a new availability cohort for the same archive state; it does not decrypt plaintext or claim compromise repair/reapproval.
+- Uses the same `n`/`k` geometry rules as `split`.
+- Selectors are optional only when the input set is unambiguous. Hex selectors must be exact lowercase values of the expected length.
+- Defaults: `reason-code=same-state-resharing`, `operator-role=operator`, current UTC millisecond timestamp, and `out=reshared-shards`.
+- Same-run maintenance signatures target the newly created transition. `--maintenance-pqpk` and `--maintenance-ots` require at least one `--maintenance-sig`.
+- Outputs include canonical archive state, new cohort binding, transition record, lifecycle bundle, and the new shards.
+
+### `inspect`
+
+```text
+qvault-cli inspect <artifact-file>
+```
+
+Recognizes supported canonical lifecycle JSON, `QVqcont-7`, and QENC. JSON mode reports type/version, digest, and a parsed summary. Unknown non-`.qenc`/`.qcont` input is reported as generic binary; malformed files carrying those extensions are rejected.
+
+### `canonicalize`
+
+```text
+qvault-cli canonicalize <artifact-file>
+```
+
+Accepts a strict, already canonical archive-state, cohort-binding, lifecycle-bundle, transition-record, or source-evidence document, validates it, and re-emits the canonical representation. It intentionally rejects rather than repairs noncanonical input. Text mode writes only canonical JSON bytes to stdout, suitable for redirection. JSON mode emits a report containing the canonical value/text and SHA3-512 digest. Binary QENC/QVqcont/QSIG/PQ key files are not canonicalization targets.
+
+### `verify`
+
+```text
+qvault-cli verify <archive-state.json> --bundle <lifecycle-bundle.json>
+  [--sig <file>...] [--pqpk <file>...] [--ots <file>...]
+  [--ed25519-signer <address>] [--required-policy-level <level>]
+  [--include-detached-summary]
+```
+
+- `--bundle` is required even though argument parsing defers that check to command execution.
+- Detached evidence is evaluated without rewriting the input bundle.
+- Each `--pqpk` is an independent operator trust anchor for this invocation. Bundle-carried and QSIG-embedded keys can prove raw validity but cannot authorize a signer.
+- `--required-policy-level` optionally raises the required level to `integrity-only`, `any-signature`, or `strong-pq-signature`; it cannot make the committed archive policy less strict.
+- `--include-detached-summary` adds compact per-proof rows to JSON output.
+- Unsatisfied policy returns a nonzero status even though the JSON report is still emitted.
+
+### `restore`
+
+```text
+qvault-cli restore [<shard>...] [--shards <shard>...]
+  [selection and verification options] [--dry-run]
+  [--output-qenc <file>] [--output-secret-key <file>] [--out <base>]
+  [--accept-policy-warnings] [--force]
+```
+
+- Positional shards and repeatable `--shards` inputs are combined; at least one is required.
+- Selection options are `--archive-state`, `--bundle` (alias `--lifecycle-bundle`), `--archive-id`, `--state-id`, `--cohort-id`, and `--bundle-digest` (alias `--lifecycle-bundle-digest`). Use them whenever mixed inputs are possible.
+- Verification options are repeatable `--sig` (alias `--signature`), `--pqpk`, `--ots`, and optional `--ed25519-signer` (alias `--expected-ed25519-signer`). Explicit PQPK/Ed25519 inputs are trust anchors for this invocation.
+- `--dry-run` reconstructs and verifies in memory but writes no recovered QENC or key. In JSON mode, inspect `ok`, `wouldSucceed`, policy, integrity flags, rejected/corrupt/missing indices, non-selected inputs, and warnings.
+- Write mode accepts `--output-qenc` (alias `--out-qenc`) and `--output-secret-key` (alias `--out-key`). `--out <base>` supplies defaults `<base>.qenc` and `<base>.qkey`; otherwise the base is derived from the first shard path.
+- `--accept-policy-warnings` is required only for specifically acknowledged non-policy warnings such as multiple embedded lifecycle-bundle digests in the selected cohort. It never overrides an unsatisfied policy or integrity failure.
+
+### `selftest`
+
+```text
+qvault-cli selftest [--filter <name-or-substring>]
+```
+
+Runs runtime health checks named `sha3-256-kat`, `kmac256-kat`, `aes-256-gcm-kat`, `ml-kem-keygen-encaps-decaps`, and `ml-dsa-44-sign-verify`. An empty filter or `crypto` runs all checks; another lowercase substring selects matching checks and must match at least one. ML-KEM and ML-DSA checks use production OS randomness.
+
+### `version`
+
+```text
+qvault-cli version
+```
+
+Prints the package version. JSON mode also reports the supported `QVqcont-7` and `QV-Lifecycle-Bundle/v1` family.
 
 ## Rust-Only Archive Approval Workflow
 
@@ -62,7 +281,7 @@ Container creation and signing are separate operations:
 - `keygen`, `encrypt`, and `split` create the encrypted archive and recoverable shard cohort.
 - `signer-keygen` creates PQ signing identity files: `signer.pqsk` and `signer.pqpk`.
 - `sign --target archive-state` signs the exact canonical archive-state bytes emitted by `split`.
-- `attach --sig --pqpk` binds the detached signature and public key into lifecycle evidence so policy evaluation can count it.
+- `attach --sig --pqpk` binds the detached signature and public key into portable lifecycle evidence; policy commands still require the trusted signer to be supplied independently with `--pqpk`.
 
 ### 1. Generate An ML-KEM Keypair
 
@@ -159,9 +378,9 @@ $QV --json attach \
   --out-shards important-approved-shards
 ```
 
-`attach --sig --pqpk` imports the detached archive approval signature and pins the signer public key into lifecycle evidence. This is what lets `verify` and `restore` count the PQ signature toward `strong-pq-signature` policy.
+`attach --sig --pqpk` imports the detached archive approval signature and its signer public key into portable lifecycle evidence. Because the lifecycle bundle is mutable, the imported key is not a trust anchor. `verify` and `restore` count the signature toward `strong-pq-signature` only when the operator independently supplies the authorized signer with `--pqpk`.
 
-A `.qsig` embeds a signer public key for self-contained cryptographic verification, but that embedded key is not a trusted identity by itself. Embedded-only verification proves that the signature is internally consistent; it does not prove that the signer was authorized. Archive policy is satisfied only when signer identity is pinned by lifecycle-bundle public-key material or an explicit user pin such as `--pqpk`.
+A `.qsig` embeds a signer public key for self-contained cryptographic verification, but that embedded key is not a trusted identity by itself. Embedded-only or bundle-key verification proves that the signature is internally consistent; it does not prove that the signer was authorized. Archive policy and trusted maintenance/source-evidence status require an explicit user pin such as `--pqpk`.
 
 ### 7. Verify Archive State And Lifecycle Evidence
 
@@ -170,6 +389,7 @@ After attachment, policy verification can use the approved lifecycle bundle dire
 ```bash
 $QV --json verify important-shards/important.pdf.archive-state.json \
   --bundle important-approved.lifecycle-bundle.json \
+  --pqpk signer.pqpk \
   --required-policy-level strong-pq-signature
 ```
 
@@ -228,6 +448,7 @@ Dry-run restore checks shard consistency, lifecycle evidence, restored integrity
 ```bash
 $QV --json restore important-approved-shards/*.qcont \
   --bundle important-approved.lifecycle-bundle.json \
+  --pqpk signer.pqpk \
   --dry-run
 ```
 
@@ -238,11 +459,12 @@ Write-mode restore emits the encrypted `.qenc` and recovered ML-KEM secret key:
 ```bash
 $QV --json restore important-approved-shards/*.qcont \
   --bundle important-approved.lifecycle-bundle.json \
+  --pqpk signer.pqpk \
   --output-qenc restored/important.pdf.qenc \
   --output-secret-key restored/important-privateKey.qkey
 ```
 
-Restore is policy-gated. A strong PQ archive will not restore unless the lifecycle bundle or explicit restore inputs include enough pinned valid signatures to satisfy the archive policy.
+Restore is policy-gated. A strong PQ archive will not restore unless explicit restore inputs authorize enough valid signers to satisfy the archive policy. Signatures and public keys embedded in the lifecycle bundle remain evidence only; pass each trusted PQ signer independently with `--pqpk`.
 
 If restore reports that lifecycle-bundle variant acknowledgement is required, inspect the JSON report and rerun with `--accept-policy-warnings` only if the operator accepts the residual bundle-variant risk.
 
@@ -409,15 +631,25 @@ With `--json`, failures emit:
 }
 ```
 
-Important qvCodes:
+Stable qvCodes and process statuses:
 
-- `USAGE`: invalid CLI usage
-- `FORMAT_POLICY_REJECT`: malformed or unsupported artifact
-- `KEY_REJECTED`: supplied key is invalid or does not match
-- `AEAD_FAILED`: key commitment or AES-GCM authentication failed
-- `QUORUM_UNREACHABLE`: not enough valid shards or shard integrity mismatch
-- `POLICY_NOT_SATISFIED`: archive policy blocks restore/verify
-- `RESTORE_LIFECYCLE_VARIANT_ACK_REQUIRED`: restore needs explicit lifecycle-bundle variant acknowledgement
+| qvCode | Exit | Meaning |
+| --- | ---: | --- |
+| `UNEXPECTED` | 1 | Verification/internal failure without a more specific public category |
+| `POLICY_NOT_SATISFIED` | 1 | Archive policy blocks verify or restore |
+| `USAGE` | 2 | Invalid command syntax or incompatible options |
+| `ENTROPY_FAILED` | 3 | Required OS cryptographic randomness was unavailable or replay defense rejected a repeat |
+| `FORMAT_POLICY_REJECT` | 4 | Malformed, noncanonical, unsupported, or policy-invalid artifact |
+| `KEY_REJECTED` | 5 | Supplied key is malformed, wrong-sized, or does not match |
+| `AEAD_FAILED` | 6 | Key commitment or AES-GCM authentication failed |
+| `QUORUM_UNREACHABLE` | 7 | Not enough valid shards or shard integrity mismatch |
+| `SIGNATURE_IMPORT_FAILED` | 8 | Detached lifecycle signature import failed |
+| `AMBIGUOUS_INPUTS` | 9 | Archive/cohort/bundle selection is ambiguous or invalid |
+| `RESHARE_CONTRACT_VIOLATION` | 10 | Same-state reshare constraints were violated |
+| `RESTORED_INTEGRITY_FAILED` | 11 | Reconstructed QENC/key/header/hash binding failed |
+| `RESTORE_LIFECYCLE_VARIANT_ACK_REQUIRED` | 12 | Write-mode restore needs explicit lifecycle-bundle variant acknowledgement |
+
+Some JSON commands, notably `verify` and `restore --dry-run`, print a complete unsuccessful report and then exit nonzero without printing a second error envelope. Automation must check both process status and the report’s `ok`/policy fields.
 
 ## Correctness And Safety Practices
 
@@ -426,9 +658,13 @@ Important qvCodes:
 - Preserve archive-state, cohort-binding, lifecycle-bundle, signature, public-key, and timestamp files alongside shards.
 - Use `restore --dry-run --json` before write-mode restore.
 - Use explicit `--archive-id`, `--state-id`, `--cohort-id`, or `--bundle-digest` when operating on mixed shard sets.
+- Keep the default aggregate shard budget unless a reviewed archive requires a larger value; raising `--max-shard-input-bytes` increases peak-memory exposure.
 - Do not use `--allow-symlink` on untrusted paths.
 - Treat OpenTimestamps completion labels as heuristic reporting, not full calendar attestation validation.
 - Keep detached signing keys and `.pqsk` files outside shared archive storage.
+- Supply trusted signer identities independently to each `verify`/`restore` operation. Do not treat keys embedded in a QSIG or mutable lifecycle bundle as authorization.
+- Never enable `deterministic-test-vectors` in a production build or expose deterministic seeds/nonces as an operational interface.
+- Treat `selftest` and known-answer tests as runtime/engineering health checks, not proof of formal cryptographic module validation.
 
 ## Tests And Development
 
@@ -450,9 +686,11 @@ cargo test -p qvault-cli --test cli_json
 Run formatting and compilation checks:
 
 ```bash
-cargo fmt -- --check
-cargo check --workspace --locked
-cargo build --release -p qvault-cli --locked
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo test --workspace --all-targets --all-features --locked
+cargo build --release -p qvault-cli --locked --no-default-features
+cargo deny check
 ```
 
-The JavaScript implementation remains the behavioral oracle. When changing wire-visible behavior, inspect the sibling JS files first and add Rust tests using committed cross-implementation fixtures under `crates/qvault-core/tests/data/`.
+Normal development and operation are self-contained in Rust. When intentionally changing wire-visible behavior, compare against the pinned JavaScript interoperability oracle and update focused cross-implementation fixtures under `crates/qvault-core/tests/data/`. The JavaScript project is a conformance reference, not a runtime dependency of `qv-rs`.
