@@ -1,6 +1,6 @@
 # Successor Conformance Notes
 
-This repository's default build is successor-only for the Quantum Vault archive lifecycle layer.
+This repository's default build is successor-only for the Quantum Vault archive lifecycle layer. It is a standalone Rust implementation: the JavaScript project is not loaded or invoked in production. “Oracle” below means an independently pinned implementation used to prove artifact compatibility in CI.
 
 Accepted production formats:
 
@@ -26,6 +26,8 @@ Rust conformance tests use frozen copies of JavaScript oracle material under `cr
 
 Refresh these fixtures only as part of an intentional oracle update.
 
+CI compares the mirrored corpus byte-for-byte with `CyberKiska/quantum-vault` revision `485a51388d0d26ee6cae9cd4785753a12eee9d32`. Updating that pin and any fixture bytes is one reviewed conformance change.
+
 ## Conformance Rules
 
 Rust must preserve these JS/normative contracts:
@@ -37,12 +39,14 @@ Rust must preserve these JS/normative contracts:
 - detached timestamp evidence links to `SHA-256(detached signature bytes)`
 - `apparentlyComplete` and `completeProof` are reporting heuristics only
 - CLI errors use JS-aligned `qvCode` strings and exit codes
+- production outputs use OS randomness; exact deterministic inputs are test-only and do not define an operational cross-language API
 
 ## Trust And Reporting Rules
 
 Rust follows the current JS signer-identity policy counting rules:
 
-- Archive approval signatures count toward `any-signature` and `strong-pq-signature` only when the signer is bound through lifecycle-bundle public-key material or an explicit user pin.
+- Archive approval signatures count toward `any-signature` and `strong-pq-signature` only when the signer is authorized by an explicit user pin. Lifecycle-bundle public keys are mutable evidence and never act as trust anchors.
+- Maintenance and source-evidence signatures are reported as trusted/verified only when an explicit user pin authorizes the signer; raw cryptographic validity remains available separately.
 - Self-verifying `.qsig` material may verify structurally and be reported, but it does not satisfy archive policy on its own.
 - Multiple proofs from one verified signer count once; thresholds count distinct stable signer identities.
 
@@ -53,3 +57,11 @@ Rust follows the normative restore-summary label from `format-spec.md` for compl
 The current JS implementation still emits `OTS proof appears complete` in some reporting paths. The Rust label makes the heuristic origin explicit without changing OTS acceptance, linkage, `apparentlyComplete`, `completeProof`, or policy semantics.
 
 Every intentional deviation should have a focused default test.
+
+## Runtime And CLI Independence
+
+Conformance applies to accepted/emitted artifact bytes, canonical identities, cryptographic profiles, policy semantics, and stable shared error taxonomy. It does not require either implementation to shell out to the other, share a dependency graph, or expose every command/flag from the other CLI.
+
+The Rust-only workflow covers key generation, QENC encryption/decryption, QVqcont split/restore/attach/reshare, PQ signer key generation, QSIG signing/verification, inspection, and lifecycle canonicalization. Node.js and `QV_ORACLE_ROOT` are optional release/contributor tools used only for explicit live corpus parity.
+
+Deterministic ML-KEM, QENC, Shamir, and archive-identity controls compile only with `deterministic-test-vectors`. Ordinary builds have no deterministic cryptographic input flags or public seeded QENC path. This is an intentional production-safety boundary and does not affect byte-level vector reproduction in all-feature tests.

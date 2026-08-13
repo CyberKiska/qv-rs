@@ -2,6 +2,10 @@
 
 `cargo-fuzz` targets for parser and restore-selection surfaces that accept untrusted bytes.
 
+CI runs all six targets against committed seeds on each change and schedules longer pinned-nightly sanitizer runs weekly. Local long-running campaigns remain important because the per-change job is a harness/seed smoke check rather than a substitute for sustained fuzzing.
+
+Fuzzing is self-contained in Rust and uses the committed corpus; it does not require the JavaScript Quantum Vault checkout. The separate `fuzz/` workspace depends on `qvault-core` with its normal production feature set, so fuzz harnesses exercise the same deterministic-input boundary as the standalone application.
+
 ## Install
 
 ```sh
