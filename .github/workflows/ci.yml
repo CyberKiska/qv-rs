@@ -311,7 +311,7 @@ jobs:
           ( cd stage-win && zip -qr "../qvault-cli-${V}-x86_64-pc-windows-gnu.zip" qvault-cli )
 
       - name: Upload Linux archive
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: qvault-cli-linux-x86_64-gnu
           path: qvault-cli-${{ env.PACKAGE_VERSION }}-x86_64-unknown-linux-gnu.tar.gz
@@ -319,7 +319,7 @@ jobs:
           retention-days: 30
 
       - name: Upload Windows archive
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: qvault-cli-windows-x86_64-gnu
           path: qvault-cli-${{ env.PACKAGE_VERSION }}-x86_64-pc-windows-gnu.zip
@@ -389,7 +389,7 @@ jobs:
           tar -czf "qvault-cli-${V}-${T}.tar.gz" -C stage qvault-cli
 
       - name: Upload macOS archive
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: qvault-cli-${{ matrix.name }}
           path: qvault-cli-${{ env.PACKAGE_VERSION }}-${{ matrix.target }}.tar.gz
